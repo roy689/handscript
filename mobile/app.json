@@ -1,0 +1,72 @@
+{
+  "expo": {
+    "name": "HandScript",
+    "slug": "mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0F172A"
+    },
+    "scheme": "handscript",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.roey.handscript",
+      "infoPlist": {
+        "NSPhotoLibraryAddUsageDescription": "האפליקציה שומרת את דפי כתב היד שלך לגלריה.",
+        "NSPhotoLibraryUsageDescription": "האפליקציה צריכה גישה לגלריה כדי לשמור ולשתף דפים.",
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "package": "com.roey.handscript",
+      "allowBackup": false,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0F172A"
+      },
+      "edgeToEdgeEnabled": true,
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.READ_MEDIA_AUDIO",
+        "android.permission.READ_MEDIA_VIDEO",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "האפליקציה צריכה גישה למצלמה כדי לסרוק את כתב היד שלך."
+        }
+      ],
+      "expo-font",
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "האפליקציה שומרת את דפי כתב היד שלך לגלריה.",
+          "savePhotosPermission": "האפליקציה שומרת את דפי כתב היד שלך לגלריה.",
+          "isAccessMediaLocationEnabled": false
+        }
+      ],
+      "expo-asset"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "28b061a5-77c0-4634-871b-f9e473e9ba81"
+      }
+    }
+  }
+}
