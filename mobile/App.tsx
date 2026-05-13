@@ -1,19 +1,5 @@
-import { I18nManager, StyleSheet, Text, View, ScrollView } from 'react-native';
-
-// ── Global native crash catcher (runs before React tree) ──────────────────────
-// Catches any error thrown at module init level (Firebase, native modules, etc.)
-// and displays it on screen so we can diagnose without logcat.
-let _globalError: string | null = null;
-const _origHandler = (global as any).ErrorUtils?.getGlobalHandler?.();
-(global as any).ErrorUtils?.setGlobalHandler?.((error: Error, isFatal: boolean) => {
-  _globalError = `[${isFatal ? 'FATAL' : 'ERROR'}] ${error?.message}\n\n${error?.stack ?? ''}`;
-  _origHandler?.(error, isFatal);
-});
-
-I18nManager.forceRTL(true);
-
 import React, { useEffect, useState } from 'react';
-import { View } from 'react-native';
+import { I18nManager, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
@@ -26,6 +12,17 @@ import {
   Heebo_800ExtraBold,
 } from '@expo-google-fonts/heebo';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
+
+// ── Global native crash catcher ────────────────────────────────────────────────
+let _globalError: string | null = null;
+const _origHandler = (global as any).ErrorUtils?.getGlobalHandler?.();
+(global as any).ErrorUtils?.setGlobalHandler?.((error: Error, isFatal: boolean) => {
+  _globalError = `[${isFatal ? 'FATAL' : 'ERROR'}] ${error?.message}\n\n${error?.stack ?? ''}`;
+  _origHandler?.(error, isFatal);
+});
+
+I18nManager.forceRTL(true);
+
 
 import type { RootStackParamList } from './navigation/types';
 import OnboardingScreen            from './screens/OnboardingScreen';
