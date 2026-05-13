@@ -1,4 +1,15 @@
-import { I18nManager, StyleSheet } from 'react-native';
+import { I18nManager, StyleSheet, Text, View, ScrollView } from 'react-native';
+
+// ── Global native crash catcher (runs before React tree) ──────────────────────
+// Catches any error thrown at module init level (Firebase, native modules, etc.)
+// and displays it on screen so we can diagnose without logcat.
+let _globalError: string | null = null;
+const _origHandler = (global as any).ErrorUtils?.getGlobalHandler?.();
+(global as any).ErrorUtils?.setGlobalHandler?.((error: Error, isFatal: boolean) => {
+  _globalError = `[${isFatal ? 'FATAL' : 'ERROR'}] ${error?.message}\n\n${error?.stack ?? ''}`;
+  _origHandler?.(error, isFatal);
+});
+
 I18nManager.forceRTL(true);
 
 import React, { useEffect, useState } from 'react';
@@ -213,13 +224,42 @@ export default function App() {
   });
 
   const [initialRoute, setInitialRoute] = useState<InitialRoute | null>(null);
+  const [firebaseError, setFirebaseError] = useState<string | null>(null);
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, user => {
-      setInitialRoute(user ? 'MainTabs' : 'Onboarding');
-    });
-    return unsub;
+    try {
+      const unsub = onAuthStateChanged(auth, user => {
+        setInitialRoute(user ? 'MainTabs' : 'Onboarding');
+      });
+      return unsub;
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setFirebaseError(msg);
+    }
   }, []);
+
+  // ── Show diagnostic screen if any error was caught ─────────────────────────
+  const anyError = _globalError || firebaseError;
+  if (anyError) {
+    return (
+      <View style={{ flex: 1, backgroundColor: '#0F172A', padding: 24, paddingTop: 60 }}>
+        <ScrollView>
+          <Text style={{ color: '#F87171', fontSize: 18, fontWeight: 'bold', marginBottom: 12 }}>
+            🔴 HandScript — שגיאת אבחון
+          </Text>
+          <Text style={{ color: '#FCA5A5', fontSize: 11, fontFamily: 'monospace', lineHeight: 18 }}>
+            {anyError}
+          </Text>
+          <Text style={{ color: '#6EE7B7', fontSize: 12, marginTop: 24, fontWeight: 'bold' }}>
+            Firebase Config:
+          </Text>
+          <Text style={{ color: '#A7F3D0', fontSize: 10, fontFamily: 'monospace', lineHeight: 16 }}>
+            {`apiKey: ${process.env.EXPO_PUBLIC_FIREBASE_API_KEY ? '✅ set' : '❌ MISSING'}\nprojectId: ${process.env.EXPO_PUBLIC_FIREBASE_PROJECT_ID || '❌ MISSING'}\nbackend: ${process.env.EXPO_PUBLIC_BACKEND_URL || '❌ MISSING'}`}
+          </Text>
+        </ScrollView>
+      </View>
+    );
+  }
 
   if (initialRoute === null || !fontsLoaded) {
     return <View style={{ flex: 1, backgroundColor: '#0F172A' }} />;
