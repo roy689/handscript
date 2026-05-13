@@ -1,0 +1,16 @@
+﻿backend/venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+mobile/node_modules/
+node_modules/
+mobile/.expo/
+backend/.env
+backend/serviceAccountKey.json
+mobile/.env
+backend/static/sample_pages/
+backend/data/banks/
+backend/test_output_layout/
+backend/debug_output/
+*.tmp
