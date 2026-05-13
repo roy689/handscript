@@ -4,7 +4,7 @@ WORKDIR /app
 
 # System deps: OpenCV, cairosvg, potrace (optional SVG tracing)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
     libcairo2 \
     libpango-1.0-0 \
@@ -24,4 +24,4 @@ RUN mkdir -p static/sample_pages
 
 EXPOSE 8000
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}
