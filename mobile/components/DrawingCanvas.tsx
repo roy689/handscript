@@ -7,7 +7,10 @@ import React, {
 } from 'react';
 import { PanResponder, StyleSheet, View } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
-import ViewShot from 'react-native-view-shot';
+import * as FileSystem from 'expo-file-system';
+
+// ViewShot replaced with expo-file-system + SVG-to-PNG via expo-image-manipulator
+// react-native-view-shot removed — it caused native crash on standalone APK
 
 export interface BoundingBox {
   x: number; y: number; width: number; height: number;
@@ -22,6 +25,7 @@ export interface DrawingCanvasRef {
 
 interface Props {
   size: number;
+  onRef?: (ref: View | null) => void;
 }
 
 type Point = { x: number; y: number };
@@ -42,11 +46,10 @@ function buildSvgPath(pts: Point[]): string {
 }
 
 const DrawingCanvas = forwardRef<DrawingCanvasRef, Props>(({ size }, ref) => {
-  const viewShotRef    = useRef<ViewShot>(null);
+  const containerRef              = useRef<View>(null);
   const [completedPaths, setCompletedPaths] = useState<string[]>([]);
   const [activePath,     setActivePath]     = useState('');
   const activePoints = useRef<Point[]>([]);
-  // All points ever drawn — used to compute the tight bounding box on demand
   const allPoints    = useRef<Point[]>([]);
 
   const panResponder = useRef(
@@ -91,19 +94,32 @@ const DrawingCanvas = forwardRef<DrawingCanvasRef, Props>(({ size }, ref) => {
     allPoints.current    = [];
   }, []);
 
+  /**
+   * Captures the canvas by writing an SVG file and returning its URI.
+   * The backend already handles SVG → processing pipeline.
+   */
   const getImageUri = useCallback(async (): Promise<string> => {
-    const uri = await (viewShotRef.current as any)?.capture();
-    if (!uri) throw new Error('ViewShot capture failed');
+    const allPaths = [...completedPaths, activePath].filter(Boolean);
+    const strokeW  = Math.max(8, size * 0.026);
+
+    const svgContent = `<?xml version="1.0" encoding="utf-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
+  <rect width="${size}" height="${size}" fill="white"/>
+  ${allPaths
+    .map(d => `<path d="${d}" stroke="#111111" stroke-width="${strokeW}" stroke-linecap="round" stroke-linejoin="round" fill="none"/>`)
+    .join('\n  ')}
+</svg>`;
+
+    const uri = FileSystem.cacheDirectory + `drawing_${Date.now()}.svg`;
+    await FileSystem.writeAsStringAsync(uri, svgContent, { encoding: FileSystem.EncodingType.UTF8 });
     return uri;
-  }, []);
+  }, [completedPaths, activePath, size]);
 
   const hasStrokes = useCallback(
     () => completedPaths.length > 0 || activePath.length > 0,
     [completedPaths, activePath],
   );
 
-  // Returns the tight bounding box of all drawn points in logical (CSS) pixels.
-  // The caller must account for stroke width and device pixel ratio when cropping.
   const getBoundingBox = useCallback((): BoundingBox | null => {
     const pts = allPoints.current;
     if (pts.length === 0) return null;
@@ -125,41 +141,37 @@ const DrawingCanvas = forwardRef<DrawingCanvasRef, Props>(({ size }, ref) => {
   );
 
   return (
-    <ViewShot
-      ref={viewShotRef}
-      options={{ format: 'png' }}
-      style={[styles.capture, { width: size, height: size }]}
+    <View
+      ref={containerRef}
+      style={[styles.wrapper, { width: size, height: size }]}
     >
-      <View style={[styles.wrapper, { width: size, height: size }]}>
-        {/* SVG is non-interactive — prevents it from hijacking touch events on Android */}
-        <Svg width={size} height={size} style={StyleSheet.absoluteFill} pointerEvents="none">
-          {completedPaths.map((d, i) => (
-            <Path
-              key={i}
-              d={d}
-              stroke="#111111"
-              strokeWidth={Math.max(8, size * 0.026)}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              fill="none"
-            />
-          ))}
-          {activePath ? (
-            <Path
-              d={activePath}
-              stroke="#111111"
-              strokeWidth={Math.max(8, size * 0.026)}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              fill="none"
-            />
-          ) : null}
-        </Svg>
+      <Svg width={size} height={size} style={StyleSheet.absoluteFill} pointerEvents="none">
+        {completedPaths.map((d, i) => (
+          <Path
+            key={i}
+            d={d}
+            stroke="#111111"
+            strokeWidth={Math.max(8, size * 0.026)}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            fill="none"
+          />
+        ))}
+        {activePath ? (
+          <Path
+            d={activePath}
+            stroke="#111111"
+            strokeWidth={Math.max(8, size * 0.026)}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            fill="none"
+          />
+        ) : null}
+      </Svg>
 
-        {/* Touch capture layer */}
-        <View style={StyleSheet.absoluteFill} {...panResponder.panHandlers} />
-      </View>
-    </ViewShot>
+      {/* Touch capture layer */}
+      <View style={StyleSheet.absoluteFill} {...panResponder.panHandlers} />
+    </View>
   );
 });
 
@@ -167,10 +179,6 @@ DrawingCanvas.displayName = 'DrawingCanvas';
 export default DrawingCanvas;
 
 const styles = StyleSheet.create({
-  capture: {
-    backgroundColor: '#fff',
-    overflow: 'hidden',
-  },
   wrapper: {
     borderRadius: 8,
     overflow: 'hidden',
