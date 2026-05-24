@@ -185,7 +185,55 @@ class _HttpsRedirectMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(_HttpsRedirectMiddleware)
 
-from starlette.middleware.trustedhost import TrustedHostMiddleware
+class _TrustedHostMiddleware(BaseHTTPMiddleware):
+    """
+    Trusted-host check that bypasses /health.
+
+    Starlette's built-in TrustedHostMiddleware rejects requests whose Host
+    header isn't in the allowlist — but Railway's internal load-balancer
+    sends healthchecks with a Host header that's not a public domain
+    (e.g. an internal IP or `*.railway.internal`).  Listing that explicitly
+    would defeat the purpose of the allowlist.
+
+    Our custom version always lets /health through and applies the strict
+    check only to other paths, so external traffic still gets the
+    protection against Host header injection.
+    """
+
+    def __init__(self, app, allowed_hosts: list[str]):
+        super().__init__(app)
+        self._exact: set[str] = set()
+        self._wildcard_suffixes: list[str] = []
+        self._allow_any: bool = False
+        for h in allowed_hosts:
+            h = h.strip().lower()
+            if not h:
+                continue
+            if h == "*":
+                self._allow_any = True
+                break
+            if h.startswith("*."):
+                self._wildcard_suffixes.append(h[1:])   # ".railway.app"
+            else:
+                self._exact.add(h)
+
+    def _is_allowed(self, host_header: str) -> bool:
+        if self._allow_any:
+            return True
+        host = host_header.split(":", 1)[0].lower()  # strip port if present
+        if host in self._exact:
+            return True
+        return any(host.endswith(sfx) for sfx in self._wildcard_suffixes)
+
+    async def dispatch(self, request: Request, call_next):
+        # Always allow internal healthchecks
+        if request.url.path == "/health":
+            return await call_next(request)
+        host_header = request.headers.get("host", "")
+        if not self._is_allowed(host_header):
+            return Response(status_code=400, content=b"Invalid host header")
+        return await call_next(request)
+
 
 if os.getenv("APP_ENV") == "production":
     _trusted_hosts = [
@@ -196,7 +244,7 @@ if os.getenv("APP_ENV") == "production":
             "TRUSTED_HOSTS env var must be set in production "
             "(e.g. 'api.handscript.co.il,*.railway.app')"
         )
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=_trusted_hosts)
+    app.add_middleware(_TrustedHostMiddleware, allowed_hosts=_trusted_hosts)
 
 # ---------------------------------------------------------------------------
 # Static files — generated sample pages are served from /static/
