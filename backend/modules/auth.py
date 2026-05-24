@@ -11,6 +11,7 @@ If SKIP_AUTH=true in the environment (dev mode only), verification
 is bypassed and the uid is read from X-Dev-User-Id header (default: "dev-user").
 """
 
+import json
 import logging
 import os
 
@@ -42,6 +43,19 @@ def _resolve_key_path() -> str | None:
 
 
 def _get_firebase_app():
+    """
+    Initialise Firebase Admin SDK from one of (in priority order):
+      1. FIREBASE_SERVICE_ACCOUNT  env var — raw JSON string (Railway / CI)
+      2. FIREBASE_CREDENTIALS_JSON env var — alias for legacy configs
+      3. FIREBASE_KEY_PATH         env var — path to JSON file
+      4. GOOGLE_APPLICATION_CREDENTIALS — gcloud ADC
+      5. %LOCALAPPDATA%/handscript/serviceAccountKey.json (Windows dev)
+      6. ./serviceAccountKey.json (cwd)
+
+    If `firebase_admin._apps` already has an initialised app (e.g. because
+    `firebase_storage._ensure_init()` ran first), reuses it instead of
+    re-initialising.
+    """
     global _firebase_app
     if _firebase_app is not None:
         return _firebase_app
@@ -49,24 +63,49 @@ def _get_firebase_app():
         import firebase_admin
         from firebase_admin import credentials
 
-        key_path = _resolve_key_path()
-        if not key_path:
+        # If another module already initialised the SDK, reuse that app
+        if firebase_admin._apps:
+            _firebase_app = firebase_admin.get_app()
+            logger.info("auth: reusing existing Firebase Admin app")
+            return _firebase_app
+
+        cred = None
+
+        # ── 1+2. Try env var with inline JSON (Railway secret) ───────────────
+        sa_json = os.getenv("FIREBASE_SERVICE_ACCOUNT") or os.getenv("FIREBASE_CREDENTIALS_JSON")
+        if sa_json:
+            try:
+                cred = credentials.Certificate(json.loads(sa_json))
+                logger.info("auth: Firebase Admin SDK initialised from FIREBASE_SERVICE_ACCOUNT env var")
+            except (json.JSONDecodeError, ValueError) as exc:
+                logger.error("auth: failed to parse FIREBASE_SERVICE_ACCOUNT JSON: %s", exc)
+                if os.getenv("APP_ENV") == "production":
+                    raise RuntimeError(f"Invalid FIREBASE_SERVICE_ACCOUNT JSON: {exc}") from exc
+
+        # ── 3-6. Fall back to file path resolution ───────────────────────────
+        if cred is None:
+            key_path = _resolve_key_path()
+            if key_path:
+                cred = credentials.Certificate(key_path)
+                logger.info("auth: Firebase Admin SDK initialised from %s", key_path)
+
+        # ── Nothing worked ───────────────────────────────────────────────────
+        if cred is None:
             if os.getenv("APP_ENV") == "production":
                 raise RuntimeError(
-                    "serviceAccountKey.json not found in production. "
-                    "Set FIREBASE_KEY_PATH or GOOGLE_APPLICATION_CREDENTIALS env var, "
-                    "or place the key at %LOCALAPPDATA%/handscript/serviceAccountKey.json. "
+                    "Firebase credentials not found in production. "
+                    "Set FIREBASE_SERVICE_ACCOUNT env var (JSON content), or "
+                    "FIREBASE_KEY_PATH / GOOGLE_APPLICATION_CREDENTIALS env var "
+                    "pointing to a service account JSON file. "
                     "Without this, all auth requests will fail."
                 )
             logger.warning(
-                "auth: serviceAccountKey.json not found — "
+                "auth: no Firebase credentials found — "
                 "token verification will be disabled. Set SKIP_AUTH=true for dev.",
             )
             return None
 
-        cred = credentials.Certificate(key_path)
         _firebase_app = firebase_admin.initialize_app(cred)
-        logger.info("auth: Firebase Admin SDK initialised from %s", key_path)
         return _firebase_app
     except ImportError:
         logger.warning("auth: firebase_admin not installed — run `pip install firebase-admin`")
