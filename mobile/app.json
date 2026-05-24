@@ -76,7 +76,7 @@
       "eas": {
         "projectId": "28b061a5-77c0-4634-871b-f9e473e9ba81"
       },
-      "BACKEND_URL": "https://api.handscript.co.il"
+      "BACKEND_URL": "https://handscript-production-2667.up.railway.app"
     }
   }
 }
