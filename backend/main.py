@@ -157,9 +157,21 @@ app.add_middleware(_TimingMiddleware)
 
 
 class _HttpsRedirectMiddleware(BaseHTTPMiddleware):
-    """In production, redirect plain HTTP requests to HTTPS."""
+    """
+    In production, redirect plain HTTP requests to HTTPS.
+
+    Exception: Railway's internal load-balancer probes /health over plain
+    HTTP from a private IP (e.g. 100.64.0.2) and does NOT follow redirects —
+    a 301 here breaks the healthcheck and Railway marks the deployment as
+    Failed. We therefore bypass the redirect for /health entirely. External
+    traffic still hits Railway's edge proxy which terminates TLS and sets
+    `x-forwarded-proto: https`, so this exception is safe.
+    """
     async def dispatch(self, request: Request, call_next):
         if os.getenv("APP_ENV") == "production":
+            # Always allow internal healthchecks (Railway uses plain HTTP)
+            if request.url.path == "/health":
+                return await call_next(request)
             # Default to empty string so an unset header is treated as HTTP, not HTTPS
             forwarded_proto = request.headers.get("x-forwarded-proto", "").lower()
             if forwarded_proto != "https":
