@@ -1,0 +1,35 @@
+# Secrets — never copy into the image
+.env
+.env.*
+serviceAccountKey.json
+firebase_credentials.json
+*.pem
+*.key
+
+# User data — must not leak to image
+data/banks/
+static/sample_pages/
+debug_output/
+
+# Dev/local
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+
+# VCS / IDE
+.git/
+.gitignore
+.dockerignore
+Dockerfile
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Docs
+README.md
+*.md

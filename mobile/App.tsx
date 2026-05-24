@@ -1,9 +1,14 @@
 import React, { useEffect, useState } from 'react';
-import { I18nManager, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { I18nManager, Linking, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { onAuthStateChanged } from 'firebase/auth';
+import { onAuthStateChanged } from './src/services/firebase';
+import { setupGlobalErrorHandler } from './src/utils/telemetry';
+import * as SplashScreen from 'expo-splash-screen';
+import * as Updates from 'expo-updates';
+
+SplashScreen.preventAutoHideAsync().catch(() => {});
 import {
   useFonts,
   Heebo_400Regular,
@@ -20,8 +25,17 @@ const _origHandler = (global as any).ErrorUtils?.getGlobalHandler?.();
   _globalError = `[${isFatal ? 'FATAL' : 'ERROR'}] ${error?.message}\n\n${error?.stack ?? ''}`;
   _origHandler?.(error, isFatal);
 });
+// Persist uncaught errors to AsyncStorage ring buffer for debugging
+setupGlobalErrorHandler();
 
-I18nManager.forceRTL(true);
+I18nManager.allowRTL(true);
+if (!I18nManager.isRTL) {
+  I18nManager.forceRTL(true);
+  // In production builds only — Expo Go doesn't support reloadAsync
+  if (!__DEV__) {
+    Updates.reloadAsync().catch(() => {});
+  }
+}
 
 
 import type { RootStackParamList } from './navigation/types';
@@ -94,7 +108,7 @@ function MainTabs() {
       fontSize:   17,
     } as const,
     headerShadowVisible:    false,
-    headerBackTitleVisible: false,
+    headerBackButtonDisplayMode: 'minimal' as const,
   };
 
   return (
@@ -167,7 +181,7 @@ function AppNavigator({ initialRoute }: { initialRoute: InitialRoute }) {
       fontSize:   17,
     } as const,
     headerShadowVisible:    false,
-    headerBackTitleVisible: false,
+    headerBackButtonDisplayMode: 'minimal' as const,
     contentStyle:           { backgroundColor: colors.bgPage },
   };
 
@@ -235,25 +249,50 @@ export default function App() {
     }
   }, []);
 
+  useEffect(() => {
+    if (initialRoute !== null && fontsLoaded) {
+      SplashScreen.hideAsync().catch(() => {});
+    }
+  }, [initialRoute, fontsLoaded]);
+
   // ── Show diagnostic screen if any error was caught ─────────────────────────
   const anyError = _globalError || firebaseError;
   if (anyError) {
+    if (__DEV__) {
+      return (
+        <View style={{ flex: 1, backgroundColor: '#0F172A', padding: 24, paddingTop: 60 }}>
+          <ScrollView>
+            <Text style={{ color: '#F87171', fontSize: 18, fontWeight: 'bold', marginBottom: 12 }}>
+              HandScript — שגיאת אבחון
+            </Text>
+            <Text style={{ color: '#FCA5A5', fontSize: 11, fontFamily: 'monospace', lineHeight: 18 }}>
+              {anyError}
+            </Text>
+            <Text style={{ color: '#6EE7B7', fontSize: 12, marginTop: 24, fontWeight: 'bold' }}>
+              Firebase Config:
+            </Text>
+            <Text style={{ color: '#A7F3D0', fontSize: 10, fontFamily: 'monospace', lineHeight: 16 }}>
+              {`apiKey: ${process.env.EXPO_PUBLIC_FIREBASE_API_KEY ? 'set' : 'MISSING'}\nprojectId: ${process.env.EXPO_PUBLIC_FIREBASE_PROJECT_ID ? 'set' : 'MISSING'}\nbackend: ${process.env.EXPO_PUBLIC_BACKEND_URL ? 'set' : 'MISSING'}`}
+            </Text>
+          </ScrollView>
+        </View>
+      );
+    }
+    // Production: show a friendly error screen without exposing infra details
     return (
-      <View style={{ flex: 1, backgroundColor: '#0F172A', padding: 24, paddingTop: 60 }}>
-        <ScrollView>
-          <Text style={{ color: '#F87171', fontSize: 18, fontWeight: 'bold', marginBottom: 12 }}>
-            🔴 HandScript — שגיאת אבחון
-          </Text>
-          <Text style={{ color: '#FCA5A5', fontSize: 11, fontFamily: 'monospace', lineHeight: 18 }}>
-            {anyError}
-          </Text>
-          <Text style={{ color: '#6EE7B7', fontSize: 12, marginTop: 24, fontWeight: 'bold' }}>
-            Firebase Config:
-          </Text>
-          <Text style={{ color: '#A7F3D0', fontSize: 10, fontFamily: 'monospace', lineHeight: 16 }}>
-            {`apiKey: ${process.env.EXPO_PUBLIC_FIREBASE_API_KEY ? '✅ set' : '❌ MISSING'}\nprojectId: ${process.env.EXPO_PUBLIC_FIREBASE_PROJECT_ID || '❌ MISSING'}\nbackend: ${process.env.EXPO_PUBLIC_BACKEND_URL || '❌ MISSING'}`}
-          </Text>
-        </ScrollView>
+      <View style={{ flex: 1, backgroundColor: '#0F172A', justifyContent: 'center', alignItems: 'center', padding: 32 }}>
+        <Text style={{ color: '#FFFFFF', fontSize: 20, fontWeight: 'bold', textAlign: 'center', marginBottom: 12 }}>
+          אירעה שגיאה בלתי צפויה
+        </Text>
+        <Text style={{ color: 'rgba(255,255,255,0.6)', fontSize: 15, textAlign: 'center', lineHeight: 22, marginBottom: 24 }}>
+          נסה להפעיל את האפליקציה מחדש. אם הבעיה נמשכת, פנה לתמיכה.
+        </Text>
+        <Text
+          style={{ color: '#93C5FD', fontSize: 14, textDecorationLine: 'underline' }}
+          onPress={() => Linking.openURL('mailto:handscriptir@gmail.com')}
+        >
+          handscriptir@gmail.com
+        </Text>
       </View>
     );
   }

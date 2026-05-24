@@ -25,7 +25,6 @@ export interface DrawingCanvasRef {
 
 interface Props {
   size: number;
-  onRef?: (ref: View | null) => void;
 }
 
 type Point = { x: number; y: number };
@@ -46,11 +45,11 @@ function buildSvgPath(pts: Point[]): string {
 }
 
 const DrawingCanvas = forwardRef<DrawingCanvasRef, Props>(({ size }, ref) => {
-  const containerRef              = useRef<View>(null);
   const [completedPaths, setCompletedPaths] = useState<string[]>([]);
   const [activePath,     setActivePath]     = useState('');
   const activePoints = useRef<Point[]>([]);
   const allPoints    = useRef<Point[]>([]);
+  const lastUriRef   = useRef<string | null>(null);
 
   const panResponder = useRef(
     PanResponder.create({
@@ -88,6 +87,10 @@ const DrawingCanvas = forwardRef<DrawingCanvasRef, Props>(({ size }, ref) => {
   ).current;
 
   const clear = useCallback(() => {
+    if (lastUriRef.current) {
+      FileSystem.deleteAsync(lastUriRef.current, { idempotent: true }).catch(() => {});
+      lastUriRef.current = null;
+    }
     setCompletedPaths([]);
     setActivePath('');
     activePoints.current = [];
@@ -112,6 +115,7 @@ const DrawingCanvas = forwardRef<DrawingCanvasRef, Props>(({ size }, ref) => {
 
     const uri = FileSystem.cacheDirectory + `drawing_${Date.now()}.svg`;
     await FileSystem.writeAsStringAsync(uri, svgContent, { encoding: FileSystem.EncodingType.UTF8 });
+    lastUriRef.current = uri;
     return uri;
   }, [completedPaths, activePath, size]);
 
@@ -142,7 +146,6 @@ const DrawingCanvas = forwardRef<DrawingCanvasRef, Props>(({ size }, ref) => {
 
   return (
     <View
-      ref={containerRef}
       style={[styles.wrapper, { width: size, height: size }]}
     >
       <Svg width={size} height={size} style={StyleSheet.absoluteFill} pointerEvents="none">

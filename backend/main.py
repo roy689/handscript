@@ -1,9 +1,67 @@
+import asyncio
+import hashlib
 import json
 import logging
 import os
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
+
+try:
+    from dotenv import load_dotenv
+    _local_env = Path(os.getenv("LOCALAPPDATA", "")) / "handscript" / ".env"
+    if _local_env.exists():
+        load_dotenv(_local_env)
+    else:
+        load_dotenv()  # fallback to ./.env
+except ImportError:
+    pass
+
+
+# ── Sentry error tracking (Fix #3) ────────────────────────────────────────────
+# Initialise BEFORE FastAPI is created so startup errors get captured.
+# SENTRY_DSN is optional — when unset, the entire block is skipped.
+def _sentry_scrub(event, hint):
+    """Strip auth tokens, emails, and passwords from Sentry events before sending."""
+    request = event.get("request") or {}
+    headers = request.get("headers") or {}
+    if isinstance(headers, dict):
+        for k in list(headers.keys()):
+            if k.lower() in {"authorization", "x-dev-user-id", "cookie"}:
+                headers[k] = "[Filtered]"
+    data = request.get("data") or {}
+    if isinstance(data, dict):
+        for k in ("password", "refreshToken", "idToken", "email"):
+            if k in data:
+                data[k] = "[Filtered]"
+    return event
+
+
+try:
+    _sentry_dsn = os.getenv("SENTRY_DSN")
+    if _sentry_dsn:
+        import sentry_sdk
+        from sentry_sdk.integrations.fastapi import FastApiIntegration
+        from sentry_sdk.integrations.starlette import StarletteIntegration
+        from sentry_sdk.integrations.logging import LoggingIntegration
+
+        sentry_sdk.init(
+            dsn=_sentry_dsn,
+            integrations=[
+                FastApiIntegration(transaction_style="endpoint"),
+                StarletteIntegration(),
+                LoggingIntegration(level=logging.INFO, event_level=logging.ERROR),
+            ],
+            environment=os.getenv("APP_ENV", "development"),
+            release=os.getenv("RAILWAY_GIT_COMMIT_SHA", "unknown"),
+            traces_sample_rate=float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0.1")),
+            send_default_pii=False,
+            before_send=_sentry_scrub,
+        )
+except ImportError:
+    pass  # sentry-sdk not installed — silently skip
+
 
 import cv2
 import numpy as np
@@ -18,7 +76,7 @@ logging.getLogger("modules.synthesizer").setLevel(logging.DEBUG)
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -26,9 +84,37 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from modules.auth import require_auth, assert_same_user
 
 from modules.validator import validate_text, generate_sample_page
-from modules import firebase_storage as firebase_client
+if os.getenv("APP_ENV") == "production":
+    from modules import firebase_storage as firebase_client
+else:
+    from modules import local_storage as firebase_client
+from services import auth_service, firebase_service
+from services import config as _svc_config
 
 logger = logging.getLogger(__name__)
+
+
+def _uid_tag(uid: str) -> str:
+    """Return a short non-reversible tag for logging — never logs the real uid."""
+    return hashlib.sha256(uid.encode()).hexdigest()[:8]
+
+
+@contextmanager
+def _tempfile(suffix: str = ".jpg"):
+    """Context manager that creates a NamedTemporaryFile and guarantees cleanup."""
+    tf = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    path = tf.name
+    try:
+        yield tf, path
+    finally:
+        try:
+            tf.close()
+        except OSError:
+            pass
+        Path(path).unlink(missing_ok=True)
+
+
+_DEBUG = os.getenv("ENABLE_DEBUG_ENDPOINTS", "").lower() == "true"
 
 app = FastAPI(title="Handscript API")
 
@@ -45,8 +131,7 @@ _ALLOWED_ORIGINS = [
     "http://127.0.0.1:19006",
     # add your production domain, e.g. "https://app.handscript.co.il"
 ]
-_ALLOWED_ORIGINS_EXTRA = os.getenv("ALLOWED_ORIGINS", "").split(",")
-_ALLOWED_ORIGINS += [o.strip() for o in _ALLOWED_ORIGINS_EXTRA if o.strip()]
+_ALLOWED_ORIGINS += [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
 
 app.add_middleware(
     CORSMiddleware,
@@ -70,6 +155,37 @@ class _TimingMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(_TimingMiddleware)
 
+
+class _HttpsRedirectMiddleware(BaseHTTPMiddleware):
+    """In production, redirect plain HTTP requests to HTTPS."""
+    async def dispatch(self, request: Request, call_next):
+        if os.getenv("APP_ENV") == "production":
+            # Default to empty string so an unset header is treated as HTTP, not HTTPS
+            forwarded_proto = request.headers.get("x-forwarded-proto", "").lower()
+            if forwarded_proto != "https":
+                https_url = str(request.url).replace("http://", "https://", 1)
+                return Response(
+                    status_code=301,
+                    headers={"Location": https_url},
+                )
+        return await call_next(request)
+
+
+app.add_middleware(_HttpsRedirectMiddleware)
+
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+if os.getenv("APP_ENV") == "production":
+    _trusted_hosts = [
+        h.strip() for h in os.getenv("TRUSTED_HOSTS", "").split(",") if h.strip()
+    ]
+    if not _trusted_hosts:
+        raise RuntimeError(
+            "TRUSTED_HOSTS env var must be set in production "
+            "(e.g. 'api.handscript.co.il,*.railway.app')"
+        )
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=_trusted_hosts)
+
 # ---------------------------------------------------------------------------
 # Static files — generated sample pages are served from /static/
 # ---------------------------------------------------------------------------
@@ -83,9 +199,59 @@ _DATA_BANKS.mkdir(parents=True, exist_ok=True)
 
 app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
-# Configure local storage with the server's own host (read from env or default)
+
+async def _cleanup_old_pages() -> None:
+    """Delete rendered pages older than 24 hours to prevent disk fill (B8)."""
+    cutoff = time.time() - 24 * 3600
+    pages_dir = _STATIC_DIR / "sample_pages"
+    deleted = 0
+    for p in pages_dir.glob("*.png"):
+        try:
+            if p.stat().st_mtime < cutoff:
+                p.unlink(missing_ok=True)
+                deleted += 1
+        except OSError:
+            pass
+    if deleted:
+        logger.info("cleanup_old_pages: deleted %d stale pages", deleted)
+
+
+async def _cleanup_loop() -> None:
+    while True:
+        await asyncio.sleep(3600)  # run every hour
+        await _cleanup_old_pages()
+        _prune_rate_buckets()
+
+
+@app.on_event("startup")
+async def _startup() -> None:
+    asyncio.create_task(_cleanup_loop())
+    if not os.getenv("FIREBASE_WEB_API_KEY"):
+        logger.critical("FIREBASE_WEB_API_KEY missing — /auth/* endpoints will fail")
+# /banks is no longer a public StaticFiles mount — served via authenticated route below
+
+
+@app.get("/banks/{user_id}/chars/{char_hex}/{filename}")
+async def get_variant(
+    user_id: str,
+    char_hex: str,
+    filename: str,
+    uid: str = Depends(require_auth),
+):
+    """Serve a character variant image — requires auth and ownership."""
+    assert_same_user(uid, user_id)
+    file_path = (_DATA_BANKS / user_id / "chars" / char_hex / filename).resolve()
+    if not str(file_path).startswith(str(_DATA_BANKS.resolve())):
+        raise HTTPException(status_code=404)
+    if not file_path.exists():
+        raise HTTPException(status_code=404)
+    return FileResponse(file_path)
+
+# Configure local storage with the server's own host (read from env or auto-detect for dev)
 def _detect_server_host() -> str:
-    """Return the machine's LAN IP so mobile clients can reach the server."""
+    """Return the machine's LAN IP for local dev. In production, SERVER_HOST env var must be set."""
+    if os.getenv("APP_ENV") == "production":
+        raise RuntimeError("SERVER_HOST environment variable must be set in production")
     import socket as _socket
     try:
         s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
@@ -94,13 +260,16 @@ def _detect_server_host() -> str:
         s.close()
         return f"http://{ip}:8000"
     except Exception:
-        return "http://172.20.10.2:8000"
+        return "http://localhost:8000"
 
 _SERVER_HOST = os.getenv("SERVER_HOST") or _detect_server_host()
 if not _SERVER_HOST.startswith(("http://", "https://")):
     raise RuntimeError(f"Invalid SERVER_HOST: {_SERVER_HOST!r}. Must start with http:// or https://")
 logger.info("Server host: %s", _SERVER_HOST)
 firebase_client.configure(_SERVER_HOST)
+
+# Expose the active client to firebase_service without a circular import (D1)
+_svc_config.firebase_client = firebase_client
 
 # ---------------------------------------------------------------------------
 # Local bank storage (placeholder until Firebase is wired)
@@ -115,20 +284,33 @@ firebase_client.configure(_SERVER_HOST)
 _BANKS_DIR = Path(__file__).parent / "data" / "banks"
 _BANKS_DIR.mkdir(parents=True, exist_ok=True)
 
+import re as _re_uid
+_SAFE_UID_FILE_RE = _re_uid.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
 
 def _load_bank(user_id: str) -> dict:
     """Return the user's character bank, or an empty dict if not found."""
+    if not _SAFE_UID_FILE_RE.fullmatch(user_id):
+        logger.warning("_load_bank: rejecting invalid user_id %r", user_id)
+        return {}
     path = _BANKS_DIR / f"{user_id}.json"
     if not path.exists():
         return {}
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("_load_bank: corrupt %s — returning empty (%s)", path, exc)
+        return {}
 
 
 def _save_bank(user_id: str, bank: dict) -> None:
+    if not _SAFE_UID_FILE_RE.fullmatch(user_id):
+        raise ValueError(f"invalid user_id: {user_id!r}")
     path = _BANKS_DIR / f"{user_id}.json"
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(bank, f, ensure_ascii=False, indent=2)
+    tmp  = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(bank, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)  # atomic rename
 
 
 # ---------------------------------------------------------------------------
@@ -144,31 +326,81 @@ _RATE_LIMIT   = 20     # max requests per window per user
 def _check_rate_limit(user_id: str) -> None:
     now = time.time()
     with _rate_lock:
-        bucket = _rate_buckets[user_id]
-        _rate_buckets[user_id] = [t for t in bucket if now - t < _RATE_WINDOW]
-        if len(_rate_buckets[user_id]) >= _RATE_LIMIT:
+        fresh = [t for t in _rate_buckets[user_id] if now - t < _RATE_WINDOW]
+        if len(fresh) >= _RATE_LIMIT:
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="יותר מדי בקשות. נסה שוב בעוד דקה.",
                 headers={"Retry-After": "60"},
             )
-        _rate_buckets[user_id].append(now)
+        fresh.append(now)
+        _rate_buckets[user_id] = fresh
+        # Pruning happens periodically in _cleanup_loop, not here.
+
+_ip_login_buckets: dict[str, list[float]] = collections.defaultdict(list)
+_IP_LOGIN_LIMIT  = 10   # max login/signup attempts per IP per minute
+
+def _check_ip_rate_limit(ip: str) -> None:
+    """IP-based rate limit for unauthenticated auth endpoints."""
+    now = time.time()
+    with _rate_lock:
+        fresh = [t for t in _ip_login_buckets[ip] if now - t < _RATE_WINDOW]
+        if len(fresh) >= _IP_LOGIN_LIMIT:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="יותר מדי ניסיונות. נסה שוב בעוד דקה.",
+                headers={"Retry-After": "60"},
+            )
+        fresh.append(now)
+        _ip_login_buckets[ip] = fresh
+        # Pruning happens periodically in _cleanup_loop, not here.
 
 _CONVERT_RATE_LIMIT = 6   # /convert is heavy — tighter limit
+_convert_buckets: dict[str, list[float]] = collections.defaultdict(list)
 
 def _check_convert_rate_limit(user_id: str) -> None:
     now = time.time()
-    key = f"__convert_{user_id}"
     with _rate_lock:
-        bucket = _rate_buckets[key]
-        _rate_buckets[key] = [t for t in bucket if now - t < _RATE_WINDOW]
-        if len(_rate_buckets[key]) >= _CONVERT_RATE_LIMIT:
+        fresh = [t for t in _convert_buckets[user_id] if now - t < _RATE_WINDOW]
+        if len(fresh) >= _CONVERT_RATE_LIMIT:
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="יותר מדי בקשות המרה. נסה שוב בעוד דקה.",
                 headers={"Retry-After": "60"},
             )
-        _rate_buckets[key].append(now)
+        fresh.append(now)
+        _convert_buckets[user_id] = fresh
+        # Pruning happens periodically in _cleanup_loop, not here.
+
+
+_RESET_PWD_BUCKETS: dict[str, list[float]] = collections.defaultdict(list)
+_RESET_PWD_LIMIT = 3  # tighter — password reset is a phishing/enum vector
+
+
+def _check_reset_rate_limit(ip: str) -> None:
+    now = time.time()
+    with _rate_lock:
+        fresh = [t for t in _RESET_PWD_BUCKETS[ip] if now - t < _RATE_WINDOW]
+        if len(fresh) >= _RESET_PWD_LIMIT:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="יותר מדי ניסיונות איפוס. נסה שוב בעוד דקה.",
+                headers={"Retry-After": "60"},
+            )
+        fresh.append(now)
+        _RESET_PWD_BUCKETS[ip] = fresh
+        # Pruning happens periodically in _cleanup_loop, not here.
+
+
+def _prune_rate_buckets() -> None:
+    """Drop expired/empty buckets — called periodically from _cleanup_loop."""
+    now = time.time()
+    with _rate_lock:
+        for bucket_dict in (_rate_buckets, _ip_login_buckets, _convert_buckets, _RESET_PWD_BUCKETS):
+            for key in list(bucket_dict.keys()):
+                bucket_dict[key] = [t for t in bucket_dict[key] if now - t < _RATE_WINDOW]
+                if not bucket_dict[key]:
+                    del bucket_dict[key]
 
 
 # ---------------------------------------------------------------------------
@@ -202,14 +434,21 @@ class ConvertRequest(BaseModel):
 
 
 class SaveCharacterSamplesRequest(BaseModel):
-    user_id:   str | None = Field(None, min_length=1, max_length=128)
+    # user_id removed — uid comes from JWT only
     character: str        = Field(..., min_length=1, max_length=4)
     samples:   list[str]  = Field(..., min_length=1, max_length=10)  # base64 images
+
+    @field_validator("character")
+    @classmethod
+    def single_codepoint(cls, v: str) -> str:
+        if len(v) != 1:
+            raise ValueError("character must be exactly one Unicode code point")
+        return v
 
     @field_validator("samples")
     @classmethod
     def limit_sample_size(cls, v: list[str]) -> list[str]:
-        max_b64_len = 10 * 1024 * 1024  # ~7.5 MB per sample
+        max_b64_len = int(1.5 * 1024 * 1024)  # ~1 MB binary per sample (B24)
         for s in v:
             if len(s) > max_b64_len:
                 raise ValueError("sample image too large")
@@ -237,15 +476,14 @@ def _bitmap_to_svg(binary_mask: np.ndarray, temp_id: str) -> "str | None":
     Run potrace on *binary_mask* (uint8, ink=255 background=0).
     Returns the raw SVG text, or None if potrace is unavailable or fails.
     """
-    import subprocess, tempfile as _tf
+    import subprocess
     if not _potrace_available():
         return None
+    tmp_dir  = Path(tempfile.gettempdir()) / "potrace_tmp"
+    tmp_dir.mkdir(exist_ok=True)
+    pbm_path = tmp_dir / f"{temp_id}.pbm"
+    svg_path = tmp_dir / f"{temp_id}.svg"
     try:
-        tmp_dir  = Path(tempfile.gettempdir()) / "potrace_tmp"
-        tmp_dir.mkdir(exist_ok=True)
-        pbm_path = tmp_dir / f"{temp_id}.pbm"
-        svg_path = tmp_dir / f"{temp_id}.svg"
-
         # potrace reads PBM: black pixel = foreground (ink).
         # Our mask has ink=255 (white) so we invert before saving.
         inverted = cv2.bitwise_not(binary_mask)
@@ -261,12 +499,13 @@ def _bitmap_to_svg(binary_mask: np.ndarray, temp_id: str) -> "str | None":
             check=True, capture_output=True, timeout=3,
         )
         svg_text = svg_path.read_text(encoding="utf-8")
-        pbm_path.unlink(missing_ok=True)
-        svg_path.unlink(missing_ok=True)
         return svg_text
-    except Exception as exc:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError) as exc:
         logger.warning("potrace failed: %s — falling back to raster", exc)
         return None
+    finally:
+        pbm_path.unlink(missing_ok=True)
+        svg_path.unlink(missing_ok=True)
 
 
 def _svg_to_rgba(svg_text: str, target_h: int, ink_rgb: tuple[int,int,int]) -> "np.ndarray | None":
@@ -658,6 +897,102 @@ def _extract_character(bgr: np.ndarray, sample_idx: int) -> "tuple[np.ndarray, s
 
 
 # ---------------------------------------------------------------------------
+# Auth proxy endpoints — Firebase credentials stay on the server
+# ---------------------------------------------------------------------------
+
+class _AuthCredentials(BaseModel):
+    email:    str = Field(..., min_length=3,  max_length=254, pattern=r"[^@]+@[^@]+\.[^@]+")
+    password: str = Field(..., min_length=6,  max_length=128)
+
+class _RefreshRequest(BaseModel):
+    refreshToken: str = Field(..., min_length=1, max_length=512)
+
+class _ResetRequest(BaseModel):
+    email: str = Field(..., min_length=3, max_length=254, pattern=r"[^@]+@[^@]+\.[^@]+")
+
+
+@app.post("/auth/login")
+async def auth_login(body: _AuthCredentials, request: Request):
+    _check_ip_rate_limit(request.client.host)
+    try:
+        return await auth_service.sign_in(body.email, body.password)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+
+
+@app.post("/auth/signup")
+async def auth_signup(body: _AuthCredentials, request: Request):
+    _check_ip_rate_limit(request.client.host)
+    try:
+        return await auth_service.sign_up(body.email, body.password)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+
+
+@app.post("/auth/refresh")
+async def auth_refresh(body: _RefreshRequest, request: Request):
+    _check_ip_rate_limit(request.client.host)
+    try:
+        return await auth_service.refresh_id_token(body.refreshToken)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+
+
+@app.post("/auth/reset-password")
+async def auth_reset_password(body: _ResetRequest, request: Request):
+    _check_reset_rate_limit(request.client.host)
+    sent = await auth_service.send_password_reset(body.email)
+    if not sent:
+        logger.warning("reset-password: delivery failed (email withheld from log)")
+    # Always return ok=True to prevent email enumeration
+    return {"ok": True}
+
+
+@app.delete("/auth/account")
+async def auth_delete_account(uid: str = Depends(require_auth)):
+    """Delete the Firebase Auth account for the authenticated user."""
+    try:
+        await auth_service.delete_account(uid)
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail="מחיקת חשבון נכשלה")
+    return {"ok": True}
+
+
+@app.get("/subscription/{user_id}")
+async def get_subscription(user_id: str, uid: str = Depends(require_auth)):
+    assert_same_user(uid, user_id)
+    return firebase_service.get_subscription_status(user_id)
+
+
+# ---------------------------------------------------------------------------
+
+class ErrorReport(BaseModel):
+    message:   str       = Field(..., max_length=2000)
+    stack:     str | None = Field(None, max_length=10000)
+    context:   str = "unknown"
+    timestamp: str
+
+@app.post("/debug/error")
+async def report_error(body: ErrorReport):
+    """Client-side error reporting — only active when ENABLE_DEBUG_ENDPOINTS=true."""
+    if not _DEBUG:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    logger.error(
+        "[client-error] context=%s message=%s stack_lines=%d timestamp=%s",
+        body.context,
+        body.message,
+        len(body.stack.split('\n')) if body.stack else 0,
+        body.timestamp,
+    )
+    return {"ok": True}
+
 
 @app.get("/health")
 async def health():
@@ -686,10 +1021,9 @@ async def debug_extraction(
         return {"error": "no samples"}
 
     raw_bytes = _b64.b64decode(body.samples[0])
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
-    tmp.write(raw_bytes); tmp.close()
-    bgr = _load_upright(tmp.name)
-    Path(tmp.name).unlink(missing_ok=True)
+    with _tempfile(".jpg") as (tmp, tmp_path):
+        tmp.write(raw_bytes); tmp.close()
+        bgr = _load_upright(tmp_path)
 
     if bgr is None:
         return {"error": "could not decode image"}
@@ -767,12 +1101,10 @@ def _process_samples_sync(
     for idx, b64 in enumerate(samples_b64):
         try:
             raw_bytes = _b64.b64decode(b64)
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
-            tmp.write(raw_bytes)
-            tmp.close()
-
-            bgr = _load_upright(tmp.name)
-            Path(tmp.name).unlink(missing_ok=True)
+            with _tempfile(".jpg") as (tmp, tmp_path):
+                tmp.write(raw_bytes)
+                tmp.close()
+                bgr = _load_upright(tmp_path)
 
             if bgr is None:
                 logger.warning("sample %d could not be decoded — skipped", idx)
@@ -825,8 +1157,8 @@ async def save_character_samples(body: SaveCharacterSamplesRequest, uid: str = D
 
     char = body.character
     logger.info(
-        "save-character-samples: user=%s char=%r samples=%d",
-        uid, char, len(body.samples),
+        "save-character-samples: user_tag=%s char=%r samples=%d",
+        _uid_tag(uid), char, len(body.samples),
     )
 
     # Run CPU-heavy extraction in a thread so the event loop stays responsive
@@ -841,6 +1173,7 @@ async def save_character_samples(body: SaveCharacterSamplesRequest, uid: str = D
     ok = firebase_client.save_character_bank(uid, {char: rgba_images})
     if not ok:
         logger.warning("save_character_bank reported partial failure for char=%r", char)
+        raise HTTPException(status_code=500, detail="שמירה נכשלה. נסה שוב.")
 
     saved_bank = firebase_client.load_character_bank(uid)
     char_data  = saved_bank.get(char, {})
@@ -876,8 +1209,7 @@ async def debug_vision(
     from modules.extractor import _VISION_API_KEY, _VISION_URL
 
     suffix   = Path(file.filename or "img.jpg").suffix or ".jpg"
-    tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-    try:
+    with _tempfile(suffix) as (tmp_file, tmp_path):
         content = await file.read()
         tmp_file.write(content)
         tmp_file.close()
@@ -889,7 +1221,7 @@ async def debug_vision(
 
         # Still decode with cv2 just to report the image dimensions.
         import cv2 as _cv2
-        img = _cv2.imread(tmp_file.name)
+        img = _cv2.imread(tmp_path)
         if img is None:
             return {"error": "could not decode image"}
         h, w = img.shape[:2]
@@ -922,12 +1254,12 @@ async def debug_vision(
         if not detected_text:
             data2 = _call_vision(b64, use_lang_hint=False)
             responses2 = data2.get("responses", [{}])
-            ft2 = responses2.get("fullTextAnnotation", {}) if isinstance(responses2, dict) else responses2[0].get("fullTextAnnotation", {})
+            ft2 = responses2[0].get("fullTextAnnotation", {})
             text2 = ft2.get("text", "")
             if text2:
                 # No-hint call found something — language hint was the blocker
                 ft = ft2
-                responses = responses2 if isinstance(responses2, dict) else [responses2[0]]
+                responses = responses2
                 detected_text = text2
                 hint_used = "none (he-hint returned empty)"
 
@@ -972,8 +1304,6 @@ async def debug_vision(
             "raw_response_keys":  list(first_resp.keys()) if isinstance(first_resp, dict) else [],
             "full_raw_response":  str(data)[:1000],
         }
-    finally:
-        Path(tmp_file.name).unlink(missing_ok=True)
 
 
 _MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
@@ -988,53 +1318,44 @@ async def upload_sample(
     _check_rate_limit(user_id)
     from modules.extractor import build_bank_from_image
 
-    logger.info("=== upload-sample: user=%s filename=%s ===", user_id, file.filename)
+    logger.info("=== upload-sample: user_tag=%s ===", _uid_tag(user_id))
 
     suffix = Path(file.filename or "sample.jpg").suffix or ".jpg"
-    tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-    try:
+    with _tempfile(suffix) as (tmp_file, tmp_path):
         content = await file.read(_MAX_UPLOAD_BYTES + 1)
         if len(content) > _MAX_UPLOAD_BYTES:
             raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                                 detail="הקובץ גדול מדי (מקסימום 20MB)")
         tmp_file.write(content)
         tmp_file.close()
-        tmp_path = tmp_file.name
-        logger.info("upload-sample: saved %d KB → %s", len(content) // 1024, tmp_path)
+        logger.info("upload-sample: saved %d KB", len(content) // 1024)
 
         # Single Vision API call on the full image → {char: [crops]}
-        bank = build_bank_from_image(tmp_path)
+        bank = await asyncio.to_thread(build_bank_from_image, tmp_path)
 
-        logger.info(
-            "upload-sample: recognised %d unique Hebrew characters: %s",
-            len(bank), sorted(bank.keys()),
+    logger.info(
+        "upload-sample: recognised %d unique Hebrew characters: %s",
+        len(bank), sorted(bank.keys()),
+    )
+
+    if not bank:
+        logger.warning(
+            "upload-sample: no Hebrew characters detected. "
+            "Check debug_output/3_vision_boxes.png to see what Vision API found."
         )
+        return {}
 
-        if not bank:
-            logger.warning(
-                "upload-sample: no Hebrew characters detected. "
-                "Check debug_output/3_vision_boxes.png to see what Vision API found."
-            )
-            return {}
+    # Persist to Firebase and local JSON fallback
+    firebase_client.save_character_bank(user_id, bank)
+    # Merge new chars into existing local metadata instead of overwriting
+    existing_meta = _load_bank(user_id)
+    for char, variants in bank.items():
+        existing_meta[char] = {"count": len(variants), "variants": []}
+    _save_bank(user_id, existing_meta)
 
-        # Persist to Firebase and local JSON fallback
-        firebase_client.save_character_bank(user_id, bank)
-        local_meta = {
-            char: {"count": len(variants), "variants": []}
-            for char, variants in bank.items()
-        }
-        _save_bank(user_id, local_meta)
-
-        # Return the full bank from Firebase (includes download URLs)
-        saved = firebase_client.load_character_bank(user_id)
-        return saved if saved else _load_bank(user_id)
-
-    finally:
-        tmp_file.close()
-        try:
-            Path(tmp_path).unlink(missing_ok=True)
-        except (OSError, UnboundLocalError):
-            pass
+    # Return the full bank from Firebase (includes download URLs)
+    saved = firebase_client.load_character_bank(user_id)
+    return saved if saved else _load_bank(user_id)
 
 
 @app.post("/validate")
@@ -1057,6 +1378,7 @@ async def validate(
     """
     assert_same_user(uid, body.user_id)
     _check_rate_limit(body.user_id)
+    logger.info("[validate] text_len=%d", len(body.text))
     bank = firebase_client.load_character_bank(body.user_id)
     result = validate_text(body.text, bank)
 
@@ -1107,8 +1429,7 @@ async def convert(body: ConvertRequest, uid: str = Depends(require_auth)):
     try:
         # 1. Load bank from Firebase
         bank = firebase_client.load_character_bank(body.user_id)
-        logger.info("convert: user=%s bank_chars=%s text=%r",
-                    body.user_id, sorted(bank.keys()), body.text[:60])
+        logger.info("convert: bank_size=%d text_len=%d", len(bank), len(body.text))
 
         # 2. Validate coverage
         result = validate_text(body.text, bank)
@@ -1120,22 +1441,24 @@ async def convert(body: ConvertRequest, uid: str = Depends(require_auth)):
                 "error": f"Missing characters: {', '.join(result['missing'])}",
             }
 
-        # 3. Synthesise lines
+        # 3. Synthesise lines (CPU-bound — run off the event loop)
         picker = VariantPicker(bank)
         _MARGIN = 200
         valid_ink = {"black", "blue", "red"}
         ink_color = body.ink_color if body.ink_color in valid_ink else "black"
-        lines  = compose_paragraph(
+        style_dict = {
+            "char_height":     body.style.char_height,
+            "letter_spacing":  body.style.letter_spacing,
+            "word_spacing":    body.style.word_spacing,
+            "baseline_jitter": body.style.baseline_jitter,
+            "slant":           body.style.slant,
+            "ink_blobs":       body.style.ink_blobs,
+        }
+        lines = await asyncio.to_thread(
+            compose_paragraph,
             body.text, picker,
             margin=_MARGIN,
-            style={
-                "char_height":     body.style.char_height,
-                "letter_spacing":  body.style.letter_spacing,
-                "word_spacing":    body.style.word_spacing,
-                "baseline_jitter": body.style.baseline_jitter,
-                "slant":           body.style.slant,
-                "ink_blobs":       body.style.ink_blobs,
-            },
+            style=style_dict,
             ink_color=ink_color,
         )
         logger.info("convert: synthesised %d lines for %d chars",
@@ -1149,8 +1472,8 @@ async def convert(body: ConvertRequest, uid: str = Depends(require_auth)):
         bg_type   = body.background if body.background in valid_bgs else "blank"
         background = load_background(bg_type)
 
-        # 5. Arrange lines onto pages
-        pages = render_full_page(lines, background, margin=_MARGIN, slant_px=body.style.slant, scan_mode=body.scan_mode)
+        # 5. Arrange lines onto pages (CPU-bound — run off the event loop)
+        pages = await asyncio.to_thread(render_full_page, lines, background, margin=_MARGIN, slant_px=body.style.slant, scan_mode=body.scan_mode)
 
         urls: list[str] = []
         timestamp = int(time.time())
@@ -1204,16 +1527,11 @@ async def convert(body: ConvertRequest, uid: str = Depends(require_auth)):
             "usage_remaining":  usage_remaining,
         }
 
+    except HTTPException:
+        raise
     except Exception as exc:
-        logger.error("convert: unhandled error for user=%s text=%r: %s",
-                     body.user_id, body.text[:60], exc, exc_info=True)
-        return {
-            "ok":    False,
-            "pages": 0,
-            "urls":  [],
-            "error": "שגיאת שרת פנימית. נסה שוב.",
-            "watermark_visible": True,
-        }
+        logger.error("convert: unhandled error text_len=%d: %s", len(body.text), exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="שגיאת שרת פנימית. נסה שוב.")
 
 
 class ConvertBothRequest(BaseModel):
@@ -1256,8 +1574,7 @@ async def convert_both(body: ConvertBothRequest, uid: str = Depends(require_auth
 
     try:
         bank = firebase_client.load_character_bank(body.user_id)
-        logger.info("convert-both: user=%s bank_chars=%s text=%r",
-                    body.user_id, sorted(bank.keys()), body.text[:60])
+        logger.info("convert-both: bank_size=%d text_len=%d", len(bank), len(body.text))
 
         result = validate_text(body.text, bank)
         if not result["ok"]:
@@ -1271,18 +1588,20 @@ async def convert_both(body: ConvertBothRequest, uid: str = Depends(require_auth
         _MARGIN = 200
         valid_ink = {"black", "blue", "red"}
         ink_color = body.ink_color if body.ink_color in valid_ink else "black"
+        style_dict = {
+            "char_height":     body.style.char_height,
+            "letter_spacing":  body.style.letter_spacing,
+            "word_spacing":    body.style.word_spacing,
+            "baseline_jitter": body.style.baseline_jitter,
+            "slant":           body.style.slant,
+            "ink_blobs":       body.style.ink_blobs,
+        }
 
-        lines = compose_paragraph(
+        lines = await asyncio.to_thread(
+            compose_paragraph,
             body.text, picker,
             margin=_MARGIN,
-            style={
-                "char_height":     body.style.char_height,
-                "letter_spacing":  body.style.letter_spacing,
-                "word_spacing":    body.style.word_spacing,
-                "baseline_jitter": body.style.baseline_jitter,
-                "slant":           body.style.slant,
-                "ink_blobs":       body.style.ink_blobs,
-            },
+            style=style_dict,
             ink_color=ink_color,
         )
         logger.info("convert-both: synthesised %d lines", len(lines))
@@ -1295,14 +1614,17 @@ async def convert_both(body: ConvertBothRequest, uid: str = Depends(require_auth
         bg_type   = body.background if body.background in valid_bgs else "blank"
         background = load_background(bg_type)
 
-        # Render clean pages once
-        clean_pages = render_full_page(
+        # Render clean pages once (CPU-bound — run off the event loop)
+        clean_pages = await asyncio.to_thread(
+            render_full_page,
             lines, background, margin=_MARGIN,
             slant_px=body.style.slant, scan_mode='clean',
         )
 
         # Derive photo pages from clean pages (avoids second synthesis pass)
-        photo_pages = [apply_photo_effect(p.copy()) for p in clean_pages]
+        photo_pages = await asyncio.to_thread(
+            lambda: [apply_photo_effect(p.copy()) for p in clean_pages]
+        )
 
         timestamp = int(time.time())
         clean_urls: list[str] = []
@@ -1362,15 +1684,12 @@ async def convert_both(body: ConvertBothRequest, uid: str = Depends(require_auth
             "usage_remaining":  usage_remaining,
         }
 
+    except HTTPException:
+        raise
     except Exception as exc:
-        logger.error("convert-both: unhandled error for user=%s: %s",
-                     body.user_id, exc, exc_info=True)
-        return {
-            "ok": False, "pages": 0,
-            "clean_urls": [], "photo_urls": [],
-            "error": "שגיאת שרת פנימית. נסה שוב.",
-            "watermark_visible": True,
-        }
+        logger.error("convert-both: unhandled error for user_tag=%s: %s",
+                     _uid_tag(body.user_id), exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="שגיאת שרת פנימית. נסה שוב.")
 
 
 @app.delete("/character/{user_id}/{char}")
@@ -1410,6 +1729,7 @@ async def get_glyphs(body: GlyphsRequest, uid: str = Depends(require_auth)):
     """
     assert_same_user(uid, body.user_id)
     _check_rate_limit(body.user_id)
+    logger.info("[glyphs] text_len=%d", len(body.text))
     from modules.synthesizer import normalize_char
 
     bank = firebase_client.load_character_bank(body.user_id)
@@ -1435,6 +1755,7 @@ async def get_glyphs(body: GlyphsRequest, uid: str = Depends(require_auth)):
 async def get_bank(user_id: str, uid: str = Depends(require_auth)):
     """Return the user's current character bank (characters list)."""
     assert_same_user(uid, user_id)
+    logger.info("[bank] user_tag=%s", _uid_tag(uid))
     bank = firebase_client.load_character_bank(user_id)
     chars = list(bank.keys())
     return {"user_id": user_id, "characters": chars, "count": len(chars)}

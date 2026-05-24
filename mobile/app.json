@@ -16,14 +16,17 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.roey.handscript",
+      "buildNumber": "1",
       "infoPlist": {
-        "NSPhotoLibraryAddUsageDescription": "האפליקציה שומרת את דפי כתב היד שלך לגלריה.",
-        "NSPhotoLibraryUsageDescription": "האפליקציה צריכה גישה לגלריה כדי לשמור ולשתף דפים.",
+        "NSCameraUsageDescription": "HandScript משתמש במצלמה כדי לצלם את כתב היד שלך וליצור פונט אישי.",
+        "NSPhotoLibraryAddUsageDescription": "HandScript שומר את הדפים שיצרת כתמונות בגלריה כדי שתוכלו לשתף בקלות.",
+        "NSPhotoLibraryUsageDescription": "HandScript טוען תמונות של דפי כתב יד מהגלריה כדי לאמן את הפונט האישי, ושומר את הדפים שהפכת לכתב יד.",
         "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
       "package": "com.roey.handscript",
+      "versionCode": 1,
       "allowBackup": false,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
@@ -33,12 +36,8 @@
       "predictiveBackGestureEnabled": false,
       "permissions": [
         "android.permission.CAMERA",
-        "android.permission.RECORD_AUDIO",
         "android.permission.READ_MEDIA_IMAGES",
-        "android.permission.READ_MEDIA_AUDIO",
         "android.permission.READ_MEDIA_VIDEO",
-        "android.permission.WRITE_EXTERNAL_STORAGE",
-        "android.permission.READ_EXTERNAL_STORAGE",
         "android.permission.READ_MEDIA_VISUAL_USER_SELECTED"
       ]
     },
@@ -46,18 +45,28 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
+      ["expo-build-properties", {
+        "android": {
+          "enableDeveloperMode": false,
+          "minifyEnabled": true,
+          "usesCleartextTraffic": false
+        },
+        "ios": {
+          "deploymentTarget": "15.1"
+        }
+      }],
       [
         "expo-camera",
         {
-          "cameraPermission": "האפליקציה צריכה גישה למצלמה כדי לסרוק את כתב היד שלך."
+          "cameraPermission": "HandScript משתמש במצלמה כדי לצלם את כתב היד שלך וליצור ממנו פונט אישי."
         }
       ],
       "expo-font",
       [
         "expo-media-library",
         {
-          "photosPermission": "האפליקציה שומרת את דפי כתב היד שלך לגלריה.",
-          "savePhotosPermission": "האפליקציה שומרת את דפי כתב היד שלך לגלריה.",
+          "photosPermission": "HandScript שומרת את דפי כתב היד שלך לגלריה כדי שתוכל לשתף אותם בקלות.",
+          "savePhotosPermission": "HandScript שומרת את דפי כתב היד שלך לגלריה כדי שתוכל לשתף אותם בקלות.",
           "isAccessMediaLocationEnabled": false
         }
       ],
@@ -66,7 +75,8 @@
     "extra": {
       "eas": {
         "projectId": "28b061a5-77c0-4634-871b-f9e473e9ba81"
-      }
+      },
+      "BACKEND_URL": "https://api.handscript.co.il"
     }
   }
 }

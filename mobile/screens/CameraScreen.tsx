@@ -1,7 +1,9 @@
 import React, { useRef, useState, useMemo } from 'react';
+import * as ImageManipulator from 'expo-image-manipulator';
 import {
   Alert,
   Image,
+  Linking,
   Pressable,
   StyleSheet,
   Text,
@@ -36,19 +38,21 @@ export default function CameraScreen({ navigation }: Props) {
   const guideW = W * GUIDE_W_RATIO;
   const guideH = H * GUIDE_H_RATIO;
   const guideX = (W - guideW) / 2;
-  const guideY = (H - guideH) / 2 - 36; // shift up so button fits below
+  const guideY = Math.max(0, (H - guideH) / 2 - 36); // shift up so button fits below (B27: clamp to 0)
 
   // ── Capture ────────────────────────────────────────────────────────────────
   async function handleCapture() {
     if (!cameraRef.current || !ready) return;
     impactMedium();
     try {
-      const photo = await cameraRef.current.takePictureAsync({
-        quality: 1,
-        base64: false,
-      });
+      const photo = await cameraRef.current.takePictureAsync({ quality: 0.85, base64: false });
       if (!photo?.uri) throw new Error('no uri');
-      setPhotoUri(photo.uri);
+      const resized = await ImageManipulator.manipulateAsync(
+        photo.uri,
+        [{ resize: { width: 1600 } }],
+        { compress: 0.85, format: ImageManipulator.SaveFormat.JPEG },
+      );
+      setPhotoUri(resized.uri);
     } catch {
       Alert.alert('שגיאה', 'הצילום נכשל, נסה שוב');
     }
@@ -77,9 +81,14 @@ export default function CameraScreen({ navigation }: Props) {
         </Text>
         <Pressable
           style={({ pressed }) => [styles.permBtn, pressed && { opacity: 0.82 }]}
-          onPress={requestPermission}
+          onPress={async () => {
+            if (permission.canAskAgain) await requestPermission();
+            else Linking.openSettings();
+          }}
         >
-          <Text style={styles.permBtnText}>אפשר גישה</Text>
+          <Text style={styles.permBtnText}>
+            {permission.canAskAgain ? 'אפשר גישה' : 'פתח הגדרות'}
+          </Text>
         </Pressable>
       </View>
     );
@@ -151,6 +160,8 @@ export default function CameraScreen({ navigation }: Props) {
         <Pressable
           onPress={handleCapture}
           disabled={!ready}
+          accessibilityRole="button"
+          accessibilityLabel={ready ? 'צלם תמונה' : 'ממתין למצלמה'}
           style={({ pressed }) => [
             styles.captureBtn,
             !ready  && styles.captureBtnOff,

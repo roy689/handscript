@@ -19,10 +19,27 @@ from fastapi import Header, HTTPException, status
 logger = logging.getLogger(__name__)
 
 _SKIP_AUTH = os.getenv("SKIP_AUTH", "false").lower() == "true"
+if _SKIP_AUTH and os.getenv("APP_ENV") == "production":
+    raise RuntimeError("SKIP_AUTH cannot be enabled in production — remove it from Railway env vars")
 
 # ── Firebase Admin initialisation ───────────────────────────────────────────
 
 _firebase_app = None
+
+
+def _resolve_key_path() -> str | None:
+    """Find serviceAccountKey.json, preferring out-of-repo locations."""
+    candidates = [
+        os.getenv("FIREBASE_KEY_PATH"),
+        os.getenv("GOOGLE_APPLICATION_CREDENTIALS"),
+        os.path.join(os.getenv("LOCALAPPDATA", ""), "handscript", "serviceAccountKey.json"),
+        "./serviceAccountKey.json",
+    ]
+    for p in candidates:
+        if p and os.path.exists(p):
+            return p
+    return None
+
 
 def _get_firebase_app():
     global _firebase_app
@@ -32,12 +49,18 @@ def _get_firebase_app():
         import firebase_admin
         from firebase_admin import credentials
 
-        key_path = os.getenv("FIREBASE_KEY_PATH", "./serviceAccountKey.json")
-        if not os.path.exists(key_path):
+        key_path = _resolve_key_path()
+        if not key_path:
+            if os.getenv("APP_ENV") == "production":
+                raise RuntimeError(
+                    "serviceAccountKey.json not found in production. "
+                    "Set FIREBASE_KEY_PATH or GOOGLE_APPLICATION_CREDENTIALS env var, "
+                    "or place the key at %LOCALAPPDATA%/handscript/serviceAccountKey.json. "
+                    "Without this, all auth requests will fail."
+                )
             logger.warning(
-                "auth: serviceAccountKey.json not found at %s — "
+                "auth: serviceAccountKey.json not found — "
                 "token verification will be disabled. Set SKIP_AUTH=true for dev.",
-                key_path,
             )
             return None
 
@@ -49,7 +72,9 @@ def _get_firebase_app():
         logger.warning("auth: firebase_admin not installed — run `pip install firebase-admin`")
         return None
     except Exception as exc:
-        logger.error("auth: failed to initialise Firebase Admin: %s", exc)
+        logger.error("auth: failed to initialise Firebase Admin: %s", exc, exc_info=True)
+        if os.getenv("APP_ENV") == "production":
+            raise
         return None
 
 
@@ -89,10 +114,6 @@ async def require_auth(
         logger.debug("auth: verified uid=%s", uid)
         return uid
     except ImportError:
-        # firebase_admin not installed — fail open only if running locally
-        if os.getenv("APP_ENV", "production") == "development":
-            logger.warning("auth: firebase_admin unavailable, failing open in dev mode")
-            return token  # trust the raw token in dev
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="שירות האימות אינו זמין",

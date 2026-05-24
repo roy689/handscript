@@ -23,6 +23,7 @@ import {
   ActivityIndicator,
   Alert,
   Image,
+  Linking,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -41,6 +42,7 @@ import { fonts, radius }               from '../src/theme';
 import { useTheme, type ThemeColors }  from '../src/contexts/ThemeContext';
 import { BACKEND_URL }                 from '../src/config';
 import { getCurrentUserId }            from '../src/services/auth';
+import { getAuthToken }               from '../src/utils/api';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'FinalView'>;
 
@@ -69,11 +71,11 @@ async function fetchBothModes(
   style: GlyphStyle,
   inkColor: string,
 ): Promise<{ cleanUrls: string[]; photoUrls: string[] }> {
-  const { auth: firebaseAuth } = await import('../src/services/firebase');
-  const token = await firebaseAuth.currentUser?.getIdToken();
-  const authHeaders: Record<string, string> = token
-    ? { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }
-    : { 'Content-Type': 'application/json' };
+  const token = await getAuthToken();
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 90_000); // 90s — image generation is heavy
@@ -81,7 +83,7 @@ async function fetchBothModes(
   try {
     const res = await fetch(`${BACKEND_URL}/convert-both`, {
       method:  'POST',
-      headers: authHeaders,
+      headers,
       signal:  controller.signal,
       body:    JSON.stringify({
         text,
@@ -257,7 +259,10 @@ export default function FinalViewScreen({ navigation, route }: Props) {
     try {
       const { status } = await MediaLibrary.requestPermissionsAsync(true);
       if (status !== 'granted') {
-        Alert.alert('הרשאה נדרשת', 'יש לאשר גישה לגלריה בהגדרות');
+        Alert.alert('הרשאה נדרשת', 'יש לאשר גישה לגלריה בהגדרות', [
+          { text: 'ביטול', style: 'cancel' },
+          { text: 'פתח הגדרות', onPress: () => Linking.openSettings() },
+        ]);
         return;
       }
       for (const url of pageUrls) {

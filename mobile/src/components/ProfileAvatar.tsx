@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Modal,
   Pressable,
@@ -20,7 +20,8 @@ export default function ProfileAvatar({ navigation }: Props) {
   const [menuOpen, setMenuOpen] = useState(false);
   const { colors } = useTheme();
 
-  const user = auth.currentUser;
+  const [user, setUser] = useState(auth.currentUser);
+  useEffect(() => auth.onAuthStateChanged(setUser), []);
   if (!user) return null;
 
   const initial = (
@@ -34,14 +35,14 @@ export default function ProfileAvatar({ navigation }: Props) {
   const menuItems: { label: string; onPress: () => void }[] = [
     {
       label: 'הפרופיל שלי',
-      onPress: () => { close(); navigation.navigate('Profile' as never); },
+      onPress: () => { close(); navigation.navigate('Profile'); },
     },
     {
       label: 'הגדרות',
-      onPress: () => { close(); navigation.navigate('Settings' as never); },
+      onPress: () => { close(); navigation.navigate('Settings'); },
     },
-    { label: 'תנאי שימוש',       onPress: close },
-    { label: 'מדיניות הפרטיות', onPress: close },
+    { label: 'תנאי שימוש',       onPress: () => { close(); navigation.navigate('TermsOfService'); } },
+    { label: 'מדיניות הפרטיות', onPress: () => { close(); navigation.navigate('PrivacyPolicy'); } },
   ];
 
   return (

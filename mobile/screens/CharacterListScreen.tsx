@@ -17,8 +17,8 @@ import type { RootStackParamList } from '../navigation/types';
 import { fonts, radius, shadow } from '../src/theme';
 import { useTheme, type ThemeColors } from '../src/contexts/ThemeContext';
 import { getCurrentUserId } from '../src/services/auth';
-import { auth as firebaseAuth } from '../src/services/firebase';
 import { impactLight, impactMedium } from '../src/utils/haptics';
+import { getAuthToken } from '../src/utils/api';
 import { BACKEND_URL } from '../src/config';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'CharacterList'>;
@@ -68,7 +68,7 @@ export default function CharacterListScreen({ navigation }: Props) {
       AsyncStorage.getItem('character_status').then(raw => {
         try { if (raw) setStatus(JSON.parse(raw)); }
         catch { setStatus({}); }
-      });
+      }).catch(() => {});
 
       headerAnim.setValue(0);
       sectionAnims.forEach(a => a.setValue(0));
@@ -145,7 +145,7 @@ export default function CharacterListScreen({ navigation }: Props) {
   const deleteCharacter = useCallback(async (char: string) => {
     try {
       const uid   = getCurrentUserId() ?? 'anonymous';
-      const token = await firebaseAuth.currentUser?.getIdToken();
+      const token = await getAuthToken();
       await fetch(`${BACKEND_URL}/character/${encodeURIComponent(uid)}/${encodeURIComponent(char)}`, {
         method: 'DELETE',
         headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -231,7 +231,7 @@ export default function CharacterListScreen({ navigation }: Props) {
           <TextInput
             style={styles.searchInput}
             value={searchChar}
-            onChangeText={t => setSearchChar(t.slice(-1))}
+            onChangeText={t => setSearchChar(Array.from(t).slice(-1).join(''))}
             maxLength={1}
             placeholder="חפש תו..."
             placeholderTextColor={isDark ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.3)'}

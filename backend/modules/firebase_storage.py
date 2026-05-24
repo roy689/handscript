@@ -17,6 +17,8 @@ import io
 import json
 import logging
 import os
+import urllib.parse
+import uuid
 from datetime import datetime, timezone
 
 import numpy as np
@@ -28,45 +30,84 @@ logger = logging.getLogger(__name__)
 _MAX_VARIANTS = 5
 
 
-# ── Initialisation ────────────────────────────────────────────────────────────
+# ── Lazy initialisation (Fix #4) ─────────────────────────────────────────────
 
-def _init() -> None:
-    if firebase_admin._apps:
+_initialised   = False
+_db_cache      = None    # google.cloud.firestore.Client
+_bucket_cache  = None    # google.cloud.storage.Bucket
+
+
+def _ensure_init() -> None:
+    """
+    Idempotent Firebase Admin SDK initialisation.
+
+    Runs on first call rather than at import time so that a missing/invalid
+    FIREBASE_SERVICE_ACCOUNT does not crash the entire server at startup —
+    instead, individual requests will fail with a clear error message.
+
+    Credential resolution order (most-secure → fallback):
+      1. FIREBASE_SERVICE_ACCOUNT   — raw JSON string (Railway secret)
+      2. FIREBASE_CREDENTIALS_JSON  — alias supported for legacy configs
+      3. firebase_credentials.json  — file in cwd
+      4. serviceAccountKey.json     — file in cwd
+      5. GOOGLE_APPLICATION_CREDENTIALS — gcloud ADC
+    """
+    global _initialised
+    if _initialised:
         return
 
-    sa_json = os.getenv("FIREBASE_SERVICE_ACCOUNT")
+    # If another module already initialised the SDK, just mark and exit
+    if firebase_admin._apps:
+        _initialised = True
+        return
+
+    sa_json = os.getenv("FIREBASE_SERVICE_ACCOUNT") or os.getenv("FIREBASE_CREDENTIALS_JSON")
     if sa_json:
         try:
-            sa_dict = json.loads(sa_json)
-            cred = credentials.Certificate(sa_dict)
+            cred = credentials.Certificate(json.loads(sa_json))
         except Exception as exc:
             logger.error("Failed to parse FIREBASE_SERVICE_ACCOUNT env var: %s", exc)
-            raise
+            raise RuntimeError(f"Invalid FIREBASE_SERVICE_ACCOUNT JSON: {exc}") from exc
     elif os.path.exists("firebase_credentials.json"):
         cred = credentials.Certificate("firebase_credentials.json")
     elif os.path.exists("serviceAccountKey.json"):
         cred = credentials.Certificate("serviceAccountKey.json")
     else:
-        cred = credentials.ApplicationDefault()
+        try:
+            cred = credentials.ApplicationDefault()
+        except Exception as exc:
+            raise RuntimeError(
+                "No Firebase credentials available. Set FIREBASE_SERVICE_ACCOUNT "
+                "(JSON contents) in Railway, or GOOGLE_APPLICATION_CREDENTIALS to a "
+                "service account file path."
+            ) from exc
 
     bucket_name = os.getenv(
         "FIREBASE_STORAGE_BUCKET", "a-written-scanner.firebasestorage.app"
     )
     firebase_admin.initialize_app(cred, {"storageBucket": bucket_name})
     logger.info("Firebase Admin initialised — bucket: %s", bucket_name)
+    _initialised = True
 
 
-_init()
-
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Cached client accessors (Fix #6 — avoid connection storm) ────────────────
 
 def _db():
-    return firestore.client()
+    """Return a cached Firestore client (one per process)."""
+    global _db_cache
+    _ensure_init()
+    if _db_cache is None:
+        _db_cache = firestore.client()
+    return _db_cache
 
 
 def _bucket():
-    return storage.bucket()
+    """Return a cached Storage bucket (one per process)."""
+    global _bucket_cache
+    _ensure_init()
+    if _bucket_cache is None:
+        _bucket_cache = storage.bucket()
+    return _bucket_cache
 
 
 def _char_hex(char: str) -> str:
@@ -95,10 +136,30 @@ def _to_png_bytes(img) -> bytes:
 
 
 def _upload_blob(blob_name: str, data: bytes, content_type: str = "image/png") -> str:
+    """
+    Upload bytes to Cloud Storage and return a tokenized download URL.
+
+    Uses Firebase's `firebaseStorageDownloadTokens` metadata field so the
+    resulting URL contains a UUID-v4 token that must match for the file to be
+    served.  Knowing the storage path alone is no longer enough — the token is
+    cryptographically unguessable (122 bits of entropy).
+
+    Replaces the previous `blob.make_public()` which made every uploaded file
+    world-readable by URL.  That leaked user signatures to anyone who could
+    guess a Firebase uid.
+
+    Metadata is set BEFORE upload (single API call) instead of using a
+    follow-up `blob.patch()` — saves a round-trip per upload.
+    """
+    token = str(uuid.uuid4())
     blob = _bucket().blob(blob_name)
+    blob.metadata = {"firebaseStorageDownloadTokens": token}
     blob.upload_from_string(data, content_type=content_type)
-    blob.make_public()
-    return blob.public_url
+    encoded_path = urllib.parse.quote(blob_name, safe="")
+    return (
+        f"https://firebasestorage.googleapis.com/v0/b/{_bucket().name}"
+        f"/o/{encoded_path}?alt=media&token={token}"
+    )
 
 
 # ── Public interface (mirrors local_storage.py) ───────────────────────────────

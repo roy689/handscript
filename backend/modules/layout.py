@@ -1,5 +1,6 @@
 """Page layout and compositing of synthesised glyphs onto paper backgrounds."""
 
+import hashlib
 import logging
 import struct
 import time
@@ -445,7 +446,7 @@ def embed_watermark(image: np.ndarray, user_id: str) -> np.ndarray:
 
     Payload (8 bytes)
     -----------------
-    Bytes 0-3 : first 4 ASCII characters of *user_id* (space-padded / truncated)
+    Bytes 0-3 : first 4 bytes of SHA-256(user_id) — not reversible to the original ID
     Bytes 4-7 : ``int(time.time()) % 9999`` packed as a big-endian 32-bit int
 
     The watermark is written using the ``dwtDct`` method from the
@@ -478,7 +479,7 @@ def embed_watermark(image: np.ndarray, user_id: str) -> np.ndarray:
 
     try:
         # Build 8-byte payload
-        uid_bytes = user_id[:4].encode("ascii", errors="replace").ljust(4, b" ")
+        uid_bytes = hashlib.sha256(user_id.encode()).digest()[:4]
         ts_int    = int(time.time()) % 9999
         payload   = uid_bytes + struct.pack(">I", ts_int)  # 4 + 4 = 8 bytes
 

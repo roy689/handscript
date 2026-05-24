@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import {
   Alert,
   KeyboardAvoidingView,
@@ -21,6 +21,9 @@ import HandwritingOverlay   from '../src/components/HandwritingOverlay';
 import { impactMedium } from '../src/utils/haptics';
 import { fetchJSON, withRetry, toErrorMessage, OfflineError } from '../src/utils/api';
 import { BACKEND_URL } from '../src/config';
+import NetInfo from '@react-native-community/netinfo';
+import { savePendingConversion, getPendingConversion, clearPendingConversion } from '../src/utils/offlineQueue';
+import { logError } from '../src/utils/telemetry';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Editor'>;
 type InkColor   = 'black' | 'blue' | 'red';
@@ -45,8 +48,11 @@ export default function EditorScreen({ navigation }: Props) {
 
   // Style settings — paper & ink live in PreviewScreen UI,
   // but we carry them through navigation so Preview pre-selects them.
-  const [paperStyle,    setPaperStyle]    = useState<PaperStyle>('lines');
-  const [inkColor,      setInkColor]      = useState<InkColor>('black');
+  const [paperStyle] = useState<PaperStyle>('lines');
+  const [inkColor]   = useState<InkColor>('black');
+
+  const [lastConvertTime, setLastConvertTime] = useState(0);
+  const MIN_INTERVAL_MS = 2000;
 
   // Default style values passed to Preview (user adjusts them there via sliders)
   const textSize      = 85;
@@ -54,15 +60,69 @@ export default function EditorScreen({ navigation }: Props) {
   const wordSpacing   = 35;
   const lineJitter    = 3;
 
+  // ── Offline queue: restore pending conversion when connectivity returns ──────
+  useEffect(() => {
+    let mounted = true;
+    let alerted = false;
+    const unsub = NetInfo.addEventListener(async state => {
+      if (!mounted || !state.isConnected || alerted) return;
+      const pending = await getPendingConversion();
+      if (!mounted || !pending) return;
+      alerted = true;
+      Alert.alert(
+        'החיבור חזר',
+        'נמצאה המרה שנשמרה בזמן הניתוק. לשחזר את הטקסט?',
+        [
+          {
+            text: 'מחק',
+            style: 'destructive',
+            onPress: async () => { await clearPendingConversion(); alerted = false; },
+          },
+          {
+            text: 'שחזר',
+            onPress: async () => {
+              if (mounted) setText(pending.text);
+              await clearPendingConversion();
+              alerted = false;
+            },
+          },
+        ],
+      );
+    });
+    return () => { mounted = false; unsub(); };
+  }, []);
+
   const charCount  = text.length;
   const canConvert = text.trim().length > 0 && !loading;
 
   const handleConvert = useCallback(async () => {
-    if (!canConvert) return;
+    const now = Date.now();
+    if (now - lastConvertTime < MIN_INTERVAL_MS) {
+      setError(`אנא חכה ${Math.ceil((MIN_INTERVAL_MS - (now - lastConvertTime)) / 1000)} שניות`);
+      return;
+    }
+    setLastConvertTime(now);
+
+    // Validation #1: Text validation
+    const sanitizedText = text.trim();
+    if (sanitizedText.length === 0) {
+      setError('כתוב משהו קודם');
+      return;
+    }
+    if (sanitizedText.length > 5000) {
+      setError('הטקסט ארוך מדי (max 5000 תווים)');
+      return;
+    }
+
+    // Validation #2: User ID validation
+    const userId = getCurrentUserId();
+    if (!userId) {
+      setError('עליך להתחבר תחילה');
+      return;
+    }
+
     setError(null);
     setLoading(true);
-
-    const userId = getCurrentUserId() ?? 'anonymous';
 
     try {
       setLoadingMsg('בודק הרשאות...');
@@ -70,7 +130,7 @@ export default function EditorScreen({ navigation }: Props) {
       if (!check.allowed) {
         Alert.alert(
           'מגבלת שימוש',
-          check.reason,
+          check.reason ?? 'לא ניתן להמיר כעת',
           [
             { text: 'ביטול', style: 'cancel' },
             { text: 'שדרג עכשיו', onPress: () => navigation.navigate('Paywall') },
@@ -79,20 +139,13 @@ export default function EditorScreen({ navigation }: Props) {
         return;
       }
 
-      const { auth: firebaseAuth } = await import('../src/services/firebase');
-      const token = await firebaseAuth.currentUser?.getIdToken();
-      const authHeaders: Record<string, string> = token
-        ? { Authorization: `Bearer ${token}` }
-        : {};
-
       setLoadingMsg('מאמת תווים...');
       const vData = await withRetry(
         () => fetchJSON<{ ok: boolean; missing: string[] }>(
           `${BACKEND_URL}/validate`,
           {
-            method:  'POST',
-            headers: { 'Content-Type': 'application/json', ...authHeaders },
-            body:    JSON.stringify({ text, user_id: userId }),
+            method: 'POST',
+            body:   JSON.stringify({ text: sanitizedText, user_id: userId }),
           },
         ),
         2,
@@ -119,19 +172,19 @@ export default function EditorScreen({ navigation }: Props) {
         () => fetchJSON<{ glyphs: Record<string, string>; missing: string[] }>(
           `${BACKEND_URL}/glyphs`,
           {
-            method:  'POST',
-            headers: { 'Content-Type': 'application/json', ...authHeaders },
-            body:    JSON.stringify({ text, user_id: userId }),
+            method: 'POST',
+            body:   JSON.stringify({ text: sanitizedText, user_id: userId }),
           },
         ),
         2,
       );
 
       await incrementUsage(userId);
+      await clearPendingConversion(); // discard any queued item — we just succeeded
 
       // Navigate first — the overlay unmounts with EditorScreen so no flicker
       navigation.navigate('Preview', {
-        text,
+        text: sanitizedText,
         background: paperStyle,
         inkColor,
         glyphMap: gData.glyphs,
@@ -148,8 +201,15 @@ export default function EditorScreen({ navigation }: Props) {
     } catch (err: unknown) {
       const msg = toErrorMessage(err);
       if (err instanceof OfflineError) {
-        Alert.alert('אין חיבור לאינטרנט', msg, [{ text: 'אישור' }]);
+        // Save to offline queue — NetInfo listener will restore on reconnect
+        await savePendingConversion({ text: sanitizedText, paperStyle, inkColor });
+        Alert.alert(
+          'אין חיבור לאינטרנט',
+          'הטקסט נשמר ויוצג שוב כשהחיבור יחזור.',
+          [{ text: 'אישור' }],
+        );
       } else {
+        await logError(err, 'handleConvert');
         setError(msg);
       }
     } finally {
@@ -157,7 +217,7 @@ export default function EditorScreen({ navigation }: Props) {
       setLoadingMsg('');
       setConverting(false);
     }
-  }, [text, paperStyle, inkColor, canConvert, navigation]);
+  }, [text, paperStyle, inkColor, navigation, lastConvertTime]);
 
   return (
     <KeyboardAvoidingView

@@ -5,6 +5,7 @@ import math
 import random
 from collections import OrderedDict
 from typing import Optional
+from urllib.parse import urlparse
 
 import cv2
 import numpy as np
@@ -306,9 +307,21 @@ class VariantPicker:
         # 4-channel: assume RGBA (caller must convert BGRA→RGBA before calling)
         return img
 
+    # Allowed hosts for variant image downloads (B23 — SSRF prevention)
+    _ALLOWED_DOWNLOAD_HOSTS = frozenset({
+        "firebasestorage.googleapis.com",
+        "storage.googleapis.com",
+        "localhost",
+        "127.0.0.1",
+    })
+
     @staticmethod
     def _download(url: str) -> np.ndarray:
         """Fetch an image from *url* and decode to an RGBA numpy array."""
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+        if host not in VariantPicker._ALLOWED_DOWNLOAD_HOSTS:
+            raise ValueError(f"Download from disallowed host: {host!r}")
         try:
             resp = requests.get(url, timeout=10)
             resp.raise_for_status()

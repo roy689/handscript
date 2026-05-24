@@ -1,43 +1,62 @@
+import Constants from 'expo-constants';
 import { Platform } from 'react-native';
 
+type ExtraConfig = { BACKEND_URL?: string } | undefined;
+
+const fromExtra =
+  (Constants.expoConfig?.extra as ExtraConfig)?.BACKEND_URL ??
+  (Constants.expoConfig as { extra?: ExtraConfig })?.extra?.BACKEND_URL;
+
+const fromEnv = process.env.EXPO_PUBLIC_BACKEND_URL;
+const prodFallback = 'https://api.handscript.co.il';
+
 /**
- * Resolves the dev backend URL for the current environment:
- *   - Physical device via Expo Go: reads the bundler host IP from expo-constants
- *     so the phone can reach your Mac on the same WiFi automatically.
- *   - Android emulator:  10.0.2.2  (emulator's alias for host machine)
- *   - iOS simulator:     localhost
- *   - Production:        EXPO_PUBLIC_BACKEND_URL env var
+ * In dev (Expo Go on a physical phone or emulator), we cannot use the
+ * production URL — the domain doesn't exist yet, and `localhost`/`10.0.2.2`
+ * won't reach the dev machine from a real phone on the same WiFi.
+ *
+ * Expo populates `hostUri` with the Metro bundler's LAN host
+ * (e.g. "10.241.237.248:8081"). We extract the IP and point at port 8000
+ * (FastAPI default).  This lets a real phone scanning the QR code talk to
+ * the backend running on the dev laptop, with zero configuration.
+ *
+ * iOS Simulator: uses localhost (loopback).
+ * Android Emulator: 10.0.2.2 is the host machine.
+ * Real device (Expo Go): hostUri gives the laptop's LAN IP.
  */
-function resolveDevUrl(): string {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const Constants = require('expo-constants').default;
+function devBackendUrl(): string {
+  const hostUri =
+    Constants.expoConfig?.hostUri ??
+    (Constants as unknown as { manifest2?: { extra?: { expoGo?: { developer?: { tool?: string } } } } })
+      .manifest2?.extra?.expoGo?.developer?.tool ??
+    '';
 
-    // Try every known location where Expo embeds the bundler host IP.
-    // Order matters: prefer the most specific / newest SDK path first.
-    const rawHost: string =
-      Constants?.expoGoConfig?.debuggerHost ??          // SDK 49+ Expo Go
-      Constants?.expoConfig?.hostUri ??                 // SDK 50+ generic
-      Constants?.manifest2?.extra?.expoClient?.debuggerHost ?? // SDK 46-48
-      Constants?.manifest?.debuggerHost ??              // SDK < 46
-      '';
+  // hostUri looks like "10.241.237.248:8081" — strip the port
+  const host = hostUri.split(':')[0];
 
-    // rawHost is "192.168.x.x:8081" — strip the Metro port, use backend port
-    const ip = rawHost.split(':')[0];
-    if (ip && ip !== 'localhost' && ip !== '127.0.0.1' && ip !== '') {
-      return `http://${ip}:8000`;
-    }
-  } catch {
-    // expo-constants unavailable — fall through
+  if (host && host !== 'localhost' && host !== '127.0.0.1') {
+    return `http://${host}:8000`;
   }
-
-  // Emulator shortcuts (never reached on a physical device in Expo Go)
-  return Platform.select({
-    android: 'http://10.0.2.2:8000',
-    ios:     'http://localhost:8000',
-    default: 'http://localhost:8000',
-  }) as string;
+  // Fallback per platform
+  if (Platform.OS === 'android') return 'http://10.0.2.2:8000';
+  return 'http://localhost:8000';
 }
 
+/**
+ * Priority order:
+ *   1. EXPO_PUBLIC_BACKEND_URL from mobile/.env  ← explicit dev choice (Railway, staging)
+ *   2. extra.BACKEND_URL from app.json           ← prod build default
+ *   3. dev auto-derive from Metro host           ← truly empty .env in dev
+ *   4. prod fallback                              ← last resort
+ */
 export const BACKEND_URL: string =
-  process.env.EXPO_PUBLIC_BACKEND_URL || resolveDevUrl();
+  fromEnv ??
+  fromExtra ??
+  (__DEV__ ? devBackendUrl() : prodFallback);
+
+if (!__DEV__ && BACKEND_URL.startsWith('http://')) {
+  console.warn('[config] Production build is using HTTP — iOS ATS will block requests');
+}
+
+// Helpful breadcrumb in Metro logs
+console.log('[config] BACKEND_URL =', BACKEND_URL);

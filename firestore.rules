@@ -1,0 +1,32 @@
+rules_version = '2';
+
+// HandScript Firestore Security Rules
+//
+// Strategy: deny everything by default.  The backend FastAPI server uses the
+// Firebase Admin SDK, which BYPASSES these rules — that is intentional and
+// the only path that should ever write data.
+//
+// The mobile app never reads/writes Firestore directly — it only talks to the
+// FastAPI proxy.  Anyone bypassing the proxy must be blocked here.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Deny all reads & writes from client SDKs.
+    // Admin SDK (server-side) is exempt and continues to work.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ── Future expansion ─────────────────────────────────────────────────────
+    // If you ever want users to read their own data directly (without going
+    // through the backend), uncomment and adapt:
+    //
+    // match /character_banks/{userId}/chars/{charId} {
+    //   allow read: if request.auth != null && request.auth.uid == userId;
+    // }
+    // match /subscriptions/{userId} {
+    //   allow read: if request.auth != null && request.auth.uid == userId;
+    // }
+  }
+}

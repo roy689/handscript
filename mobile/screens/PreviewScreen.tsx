@@ -504,6 +504,11 @@ export default function PreviewScreen({ navigation, route }: Props) {
   const throttleRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
   const draftDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  useEffect(() => () => {
+    if (throttleRef.current) { clearTimeout(throttleRef.current); throttleRef.current = null; }
+    if (draftDebounce.current) { clearTimeout(draftDebounce.current); draftDebounce.current = null; }
+  }, []);
+
   // Slider 0-100 → backend char_height → preview px (scaled to lineH)
   // pixelScale: ratio of preview px per backend px (constant for a given screen)
   // Use liveHs so the canvas responds immediately during drag
@@ -573,7 +578,7 @@ export default function PreviewScreen({ navigation, route }: Props) {
         if (draft.hs)       { setHs(draft.hs); setLiveHs(draft.hs); pendingHsRef.current = draft.hs; }
         if (draft.inkColor) setInkColor(draft.inkColor);
       } catch {}
-    });
+    }).catch(() => {});
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

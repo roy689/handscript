@@ -10,11 +10,13 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as StoreReview from 'expo-store-review';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
 import { useTheme, type ThemeColors } from '../src/contexts/ThemeContext';
 import { fonts, radius, shadow } from '../src/theme';
 import { auth } from '../src/services/firebase';
+import { getAuthToken } from '../src/utils/api';
 import { BACKEND_URL } from '../src/config';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Settings'>;
@@ -38,7 +40,7 @@ export default function SettingsScreen({ navigation }: Props) {
           onPress: async () => {
             setResetting(true);
             try {
-              const token = await auth.currentUser?.getIdToken();
+              const token = await getAuthToken();
               const res = await fetch(`${BACKEND_URL}/bank/${uid}`, {
                 method: 'DELETE',
                 headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -128,6 +130,20 @@ export default function SettingsScreen({ navigation }: Props) {
             <Text style={[styles.resetSub, { color: colors.inkLight }]}>
               מחיקת כל הדגימות שנסרקו
             </Text>
+          </Pressable>
+        </View>
+
+        {/* ── Rate the app ──────────────────────────────────────────── */}
+        <Text style={styles.sectionLabel}>כללי</Text>
+        <View style={styles.card}>
+          <Pressable
+            style={({ pressed }) => [styles.legalRow, pressed && styles.legalRowPressed]}
+            onPress={async () => {
+              if (await StoreReview.hasAction()) StoreReview.requestReview();
+            }}
+          >
+            <Text style={styles.legalArrow}>←</Text>
+            <Text style={styles.legalLabel}>דרג את האפליקציה</Text>
           </Pressable>
         </View>
 

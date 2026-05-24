@@ -70,8 +70,8 @@ export default function OnboardingScreen({ navigation }: Props) {
       }
       navigation.reset({ index: 0, routes: [{ name: 'MainTabs' }] });
     } catch (err: unknown) {
-      const code = (err as { code?: string }).code ?? '';
-      setError(translateFirebaseError(code));
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(msg || 'שגיאה בהתחברות. נסה שנית');
     } finally {
       setLoading(false);
     }

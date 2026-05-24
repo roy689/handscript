@@ -19,10 +19,10 @@ import { impactLight, impactMedium } from '../src/utils/haptics';
 import { BACKEND_URL } from '../src/config';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getCurrentUserId } from '../src/services/auth';
-import { auth as firebaseAuth } from '../src/services/firebase';
+import { getAuthToken } from '../src/utils/api';
 
 async function authHeaders(): Promise<Record<string, string>> {
-  const token = await firebaseAuth.currentUser?.getIdToken();
+  const token = await getAuthToken();
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
@@ -58,10 +58,12 @@ export default function CharacterVariantsScreen({ route, navigation }: Props) {
   // URL (re-indexed after deletion), the Image component sees a new URI.
   const loadVariants = useCallback(async () => {
     setLoading(true);
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), 15000);
     try {
       const res  = await fetch(
         `${BACKEND_URL}/character/${encodeURIComponent(uid)}/${encodeURIComponent(character)}/variants`,
-        { headers: await authHeaders() },
+        { headers: await authHeaders(), signal: controller.signal },
       );
       const data = await res.json() as { variants: { index: number; url: string }[] };
       const ts      = Date.now();
@@ -70,6 +72,7 @@ export default function CharacterVariantsScreen({ route, navigation }: Props) {
     } catch {
       Alert.alert('שגיאה', 'לא ניתן לטעון את הדגמים');
     } finally {
+      clearTimeout(t);
       setLoading(false);
     }
   }, [uid, character]);
@@ -106,10 +109,17 @@ export default function CharacterVariantsScreen({ route, navigation }: Props) {
 
             try {
               // ── 3. DELETE on server ────────────────────────────────────────
-              const res = await fetch(
-                `${BACKEND_URL}/character/${encodeURIComponent(uid)}/${encodeURIComponent(character)}/variant/${variant.index}`,
-                { method: 'DELETE', headers: await authHeaders() },
-              );
+              const delCtrl = new AbortController();
+              const delT = setTimeout(() => delCtrl.abort(), 15000);
+              let res: Response;
+              try {
+                res = await fetch(
+                  `${BACKEND_URL}/character/${encodeURIComponent(uid)}/${encodeURIComponent(character)}/variant/${variant.index}`,
+                  { method: 'DELETE', headers: await authHeaders(), signal: delCtrl.signal },
+                );
+              } finally {
+                clearTimeout(delT);
+              }
               if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
               // ── 4. Update AsyncStorage if no variants remain ───────────────

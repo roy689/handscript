@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -9,7 +9,6 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { deleteUser } from 'firebase/auth';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
 import { auth } from '../src/services/firebase';
@@ -24,7 +23,8 @@ export default function ProfileScreen({ navigation }: Props) {
   const { colors } = useTheme();
   const styles = useMemo(() => getStyles(colors), [colors]);
 
-  const user = auth.currentUser;
+  const [user, setUser] = useState(auth.currentUser);
+  useEffect(() => auth.onAuthStateChanged(setUser), []);
   const uid  = user?.uid ?? 'anonymous';
 
   const [signingOut,  setSigningOut]  = useState(false);
@@ -72,23 +72,19 @@ export default function ProfileScreen({ navigation }: Props) {
             setDeletingAcc(true);
             try {
               const token = await auth.currentUser?.getIdToken();
-              await fetch(`${BACKEND_URL}/user/${uid}`, {
-                method:  'DELETE',
-                headers: token ? { Authorization: `Bearer ${token}` } : {},
-              });
-              if (user) await deleteUser(user);
+              const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+              // Delete user data + Firebase Auth account via backend
+              const [r1, r2] = await Promise.all([
+                fetch(`${BACKEND_URL}/user/${uid}`,      { method: 'DELETE', headers }),
+                fetch(`${BACKEND_URL}/auth/account`,     { method: 'DELETE', headers }),
+              ]);
+              if (!r1.ok || !r2.ok) {
+                throw new Error('המחיקה נכשלה. נסו שוב או צרו קשר.');
+              }
+              await auth.signOut();
               navigation.reset({ index: 0, routes: [{ name: 'Onboarding' }] });
             } catch (err: unknown) {
-              const code = (err as { code?: string }).code;
-              if (code === 'auth/requires-recent-login') {
-                Alert.alert(
-                  'נדרשת אימות מחדש',
-                  'לאבטחתך עליך להתחבר מחדש לפני מחיקת החשבון.',
-                  [{ text: 'הבנתי' }],
-                );
-              } else {
-                Alert.alert('שגיאה', 'מחיקת החשבון נכשלה. נסה שנית.');
-              }
+              Alert.alert('שגיאה', 'מחיקת החשבון נכשלה. נסה שנית.');
             } finally {
               setDeletingAcc(false);
             }

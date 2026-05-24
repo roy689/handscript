@@ -23,9 +23,9 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [theme, setTheme] = useState<ThemeMode>('light');
 
   useEffect(() => {
-    AsyncStorage.getItem(STORAGE_KEY).then(v => {
-      if (v === 'dark') setTheme('dark');
-    });
+    AsyncStorage.getItem(STORAGE_KEY)
+      .then(v => { if (v === 'dark') setTheme('dark'); })
+      .catch(() => {});
   }, []);
 
   const toggleTheme = useCallback(async () => {

@@ -48,16 +48,18 @@ _CARD_BG   = (248, 248, 248)  # very-light-gray card background
 # Where generated pages are saved (relative to backend root)
 _STATIC_DIR = Path(__file__).parent.parent / "static" / "sample_pages"
 
-# Font search order: Windows first, then common Linux/macOS paths.
+# Font search order: Linux (production/Docker) first, then macOS, then Windows.
 # All candidates have full Hebrew Unicode coverage.
 _FONT_CANDIDATES = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",          # Debian/Ubuntu (fonts-dejavu)
+    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",      # Debian/Ubuntu (fonts-noto-core)
+    "/usr/share/fonts/noto/NotoSans-Regular.ttf",               # alternate Noto path
+    "/System/Library/Fonts/Helvetica.ttc",                      # macOS
     r"C:\Windows\Fonts\arialuni.ttf",    # Arial Unicode MS (Office install)
     r"C:\Windows\Fonts\arial.ttf",       # Arial — standard Hebrew block
     r"C:\Windows\Fonts\calibri.ttf",     # Calibri — Hebrew block
     r"C:\Windows\Fonts\times.ttf",       # Times New Roman
     r"C:\Windows\Fonts\tahoma.ttf",      # Tahoma — good for small sizes
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",   # Debian/Ubuntu
-    "/System/Library/Fonts/Helvetica.ttc",               # macOS
 ]
 
 

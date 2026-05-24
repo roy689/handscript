@@ -1,0 +1,40 @@
+rules_version = '2';
+
+// HandScript Cloud Storage Security Rules
+//
+// Strategy: deny everything by default.
+//
+// The mobile app fetches images via tokenized download URLs that include a
+// `?token=...` query parameter (firebaseStorageDownloadTokens metadata).
+// Those URLs are served by Firebase's hosted file endpoint, which honours
+// the token without invoking these rules.
+//
+// The backend FastAPI server uses Admin SDK to upload/delete blobs and
+// bypasses these rules entirely.
+//
+// Direct, unauthenticated `gs://` or storage.googleapis.com browsing must
+// remain blocked, which is what `if false` ensures.
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // Deny all reads & writes from client SDKs and unauthenticated browsers.
+    // Token-based downloads continue to work via the v0/b/.../o endpoint.
+    // Admin SDK (server-side) continues to work.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+
+    // ── Future expansion ─────────────────────────────────────────────────────
+    // If you ever want authenticated users to upload their own avatars or
+    // similar, uncomment and scope tightly:
+    //
+    // match /avatars/{userId}/{fileName} {
+    //   allow write: if request.auth != null
+    //                && request.auth.uid == userId
+    //                && request.resource.size < 5 * 1024 * 1024
+    //                && request.resource.contentType.matches('image/.*');
+    //   allow read:  if request.auth != null;
+    // }
+  }
+}

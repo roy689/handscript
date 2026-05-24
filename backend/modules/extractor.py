@@ -56,9 +56,11 @@ def preprocess_image(image_path: str) -> np.ndarray:
     """
     logger.info("preprocess_image: loading %s", image_path)
 
-    image = cv2.imread(image_path, cv2.IMREAD_COLOR)
+    # Use imdecode to handle Unicode/non-ASCII paths correctly on Windows (B9)
+    data = np.fromfile(image_path, dtype=np.uint8)
+    image = cv2.imdecode(data, cv2.IMREAD_COLOR)
     if image is None:
-        raise FileNotFoundError(f"Could not load image: {image_path}")
+        raise FileNotFoundError(f"Could not decode image: {image_path}")
 
     h0, w0 = image.shape[:2]
     logger.info("preprocess_image: original size %dx%d", w0, h0)
@@ -480,8 +482,9 @@ def _load_upright(image_path: str) -> np.ndarray | None:
             logger.info("_load_upright: loaded via Pillow (EXIF-corrected)")
             return bgr
     except Exception as exc:
-        logger.warning("_load_upright: Pillow failed (%s) — falling back to cv2.imread", exc)
-        return cv2.imread(image_path, cv2.IMREAD_COLOR)
+        logger.warning("_load_upright: Pillow failed (%s) — falling back to cv2.imdecode", exc)
+        data = np.fromfile(image_path, dtype=np.uint8)
+        return cv2.imdecode(data, cv2.IMREAD_COLOR)
 
 
 # ---------------------------------------------------------------------------

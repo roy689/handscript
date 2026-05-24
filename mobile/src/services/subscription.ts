@@ -1,35 +1,52 @@
-import { doc, getDoc, setDoc, increment } from 'firebase/firestore';
-import { db } from './firebase';
+/**
+ * subscription.ts — Usage and subscription checks
+ *
+ * Previously read Firestore directly (db from firebase.ts).
+ * Now calls backend endpoints — the mobile client never touches Firestore.
+ * Public function signatures are unchanged.
+ */
+
+import { BACKEND_URL } from '../config';
+import { auth } from './firebase';
 
 export const FREE_DAILY_LIMIT = 5;
 
-function todayKey(): string {
-  return new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+async function _authHeaders(): Promise<Record<string, string>> {
+  try {
+    const token = await auth.currentUser?.getIdToken();
+    if (!token) throw new Error('Not signed in');
+    return { Authorization: `Bearer ${token}` };
+  } catch (err) {
+    console.error('[subscription] Token fetch failed:', err);
+    throw err;
+  }
 }
 
-export async function checkIsProUser(userId: string): Promise<boolean> {
+async function _get<T>(path: string): Promise<T | null> {
+  // Auth errors from _authHeaders propagate up — not caught here.
+  // Only network/fetch errors are swallowed and returned as null.
+  const headers = await _authHeaders();
   try {
-    const snap = await getDoc(doc(db, 'subscriptions', userId));
-    if (!snap.exists()) return false;
-    const data = snap.data();
-    if (data.status !== 'active') return false;
-    if (data.expiresAt && data.expiresAt.toDate() < new Date()) return false;
-    return true;
+    const res = await fetch(`${BACKEND_URL}${path}`, { headers });
+    if (!res.ok) return null;
+    return res.json() as Promise<T>;
   } catch {
-    return false;
+    return null;
   }
+}
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
+export async function checkIsProUser(userId: string): Promise<boolean> {
+  const data = await _get<{ isPro: boolean }>(`/subscription/${userId}`);
+  return data?.isPro ?? false;
 }
 
 export async function getDailyUsageCount(userId: string): Promise<number> {
-  try {
-    const ref = doc(db, 'usage', userId, 'days', todayKey());
-    const snap = await getDoc(ref);
-    if (!snap.exists()) return 0;
-    const count = snap.data()?.count;
-    return typeof count === 'number' ? count : 0;
-  } catch {
-    return 0;
-  }
+  const data = await _get<{ today_count: number }>(`/usage/${userId}`);
+  return data?.today_count ?? 0;
 }
 
 export async function checkCanConvert(
@@ -52,10 +69,7 @@ export async function checkCanConvert(
   }
 }
 
-export async function incrementUsage(userId: string): Promise<void> {
-  if (__DEV__) return;
-  try {
-    const ref = doc(db, 'usage', userId, 'days', todayKey());
-    await setDoc(ref, { count: increment(1) }, { merge: true });
-  } catch { /* best-effort */ }
+export async function incrementUsage(_userId: string): Promise<void> {
+  // Usage is incremented server-side inside /convert and /convert-both.
+  // This function is kept for API compatibility but is now a no-op on the client.
 }

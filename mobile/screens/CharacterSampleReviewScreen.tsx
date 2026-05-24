@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useEffect, useRef, useState, useMemo } from 'react';
 import {
   View,
   Text,
@@ -18,7 +18,7 @@ import { fonts, radius, shadow } from '../src/theme';
 import { useTheme, type ThemeColors } from '../src/contexts/ThemeContext';
 import { impactLight, impactMedium } from '../src/utils/haptics';
 import { BACKEND_URL } from '../src/config';
-import { auth } from '../src/services/firebase';
+import { getAuthToken } from '../src/utils/api';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'CharacterSampleReview'>;
 
@@ -30,6 +30,8 @@ export default function CharacterSampleReviewScreen({ route, navigation }: Props
 
   const [uris,       setUris]       = useState<string[]>(samples);
   const [uploading,  setUploading]  = useState(false);
+  const mountedRef = useRef(true);
+  useEffect(() => () => { mountedRef.current = false; }, []);
 
   const cardSize = (W - 48) / 2; // 2 columns, 16px side padding + 8px gap each side
 
@@ -114,7 +116,7 @@ export default function CharacterSampleReviewScreen({ route, navigation }: Props
 
       let res: Response;
       try {
-        const token = await auth.currentUser?.getIdToken();
+        const token = await getAuthToken();
         res = await fetch(`${BACKEND_URL}/save-character-samples`, {
           method:  'POST',
           headers: {
@@ -160,6 +162,7 @@ export default function CharacterSampleReviewScreen({ route, navigation }: Props
         {
           text: 'אישור',
           onPress: () => {
+            if (!mountedRef.current) return;
             if (returnTo === 'CharacterVariants') {
               navigation.navigate('CharacterVariants', { character });
             } else {

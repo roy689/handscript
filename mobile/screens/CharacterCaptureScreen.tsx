@@ -1,18 +1,20 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
-  View,
-  Text,
+  Alert,
+  Image,
+  Linking,
   Pressable,
   StyleSheet,
-  Image,
-  Alert,
+  Text,
+  View,
   useWindowDimensions,
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImageManipulator from 'expo-image-manipulator';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
-import { colors, fonts, radius } from '../src/theme';
+import { fonts, radius } from '../src/theme';
+import { useTheme, type ThemeColors } from '../src/contexts/ThemeContext';
 import { impactMedium, impactLight } from '../src/utils/haptics';
 import DrawingCanvas, { DrawingCanvasRef } from '../components/DrawingCanvas';
 
@@ -22,11 +24,19 @@ type CaptureMode = 'camera' | 'draw';
 
 export default function CharacterCaptureScreen({ route, navigation }: Props) {
   const { character, totalSamples, existingSamples = [], returnTo } = route.params;
+  const { colors } = useTheme();
   const { width: W, height: H }     = useWindowDimensions();
 
+  const styles = React.useMemo(() => getStyles(colors), [colors]);
+
   const [permission, requestPermission] = useCameraPermissions();
-  const cameraRef    = useRef<CameraView>(null);
-  const drawingRef   = useRef<DrawingCanvasRef>(null);
+  const cameraRef       = useRef<CameraView>(null);
+  const drawingRef      = useRef<DrawingCanvasRef>(null);
+  const clearTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    if (clearTimeoutRef.current) clearTimeout(clearTimeoutRef.current);
+  }, []);
 
   const [ready,       setReady]       = useState(false);
   const [previewUri,  setPreviewUri]  = useState<string | null>(null);
@@ -48,8 +58,18 @@ export default function CharacterCaptureScreen({ route, navigation }: Props) {
       return (
         <View style={[styles.root, styles.center]}>
           <Text style={styles.permText}>נדרשת גישה למצלמה</Text>
-          <Pressable style={styles.permBtn} onPress={requestPermission}>
-            <Text style={styles.permBtnText}>אפשר גישה</Text>
+          <Pressable
+            style={styles.permBtn}
+            accessibilityRole="button"
+            accessibilityLabel={permission.canAskAgain ? 'אפשר גישה למצלמה' : 'פתח הגדרות מצלמה'}
+            onPress={async () => {
+              if (permission.canAskAgain) await requestPermission();
+              else Linking.openSettings();
+            }}
+          >
+            <Text style={styles.permBtnText}>
+              {permission.canAskAgain ? 'אפשר גישה' : 'פתח הגדרות'}
+            </Text>
           </Pressable>
         </View>
       );
@@ -157,7 +177,7 @@ export default function CharacterCaptureScreen({ route, navigation }: Props) {
     setPreviewUri(null);
     setCaptureMode(mode);
     if (mode === 'draw') {
-      setTimeout(() => drawingRef.current?.clear(), 100);
+      clearTimeoutRef.current = setTimeout(() => drawingRef.current?.clear(), 100);
     }
   }
 
@@ -177,6 +197,8 @@ export default function CharacterCaptureScreen({ route, navigation }: Props) {
         <View style={styles.previewActions}>
           <Pressable
             style={({ pressed }) => [styles.btn, styles.btnGrey, pressed && { opacity: 0.8 }]}
+            accessibilityRole="button"
+            accessibilityLabel={captureMode === 'draw' ? 'צייר שוב' : 'צלם שוב'}
             onPress={handleRetake}
           >
             <Text style={styles.btnText}>
@@ -185,6 +207,8 @@ export default function CharacterCaptureScreen({ route, navigation }: Props) {
           </Pressable>
           <Pressable
             style={({ pressed }) => [styles.btn, styles.btnGreen, pressed && { opacity: 0.85 }]}
+            accessibilityRole="button"
+            accessibilityLabel={currentSample < totalSamples ? 'שמור והמשך' : 'שמור וסיים'}
             onPress={handleSave}
           >
             <Text style={styles.btnText}>
@@ -266,6 +290,8 @@ export default function CharacterCaptureScreen({ route, navigation }: Props) {
           <Pressable
             onPress={handleDrawCapture}
             disabled={capturing}
+            accessibilityRole="button"
+            accessibilityLabel={capturing ? 'שומר ציור...' : 'שמור ציור'}
             style={({ pressed }) => [
               styles.captureBtn,
               capturing && styles.captureBtnOff,
@@ -320,6 +346,8 @@ export default function CharacterCaptureScreen({ route, navigation }: Props) {
         <Pressable
           onPress={handleCameraCapture}
           disabled={!ready}
+          accessibilityRole="button"
+          accessibilityLabel={ready ? 'צלם תמונה' : 'ממתין למצלמה'}
           style={({ pressed }) => [
             styles.captureBtn,
             !ready && styles.captureBtnOff,
@@ -337,142 +365,144 @@ export default function CharacterCaptureScreen({ route, navigation }: Props) {
   );
 }
 
-const styles = StyleSheet.create({
-  root:   { flex: 1, backgroundColor: '#000' },
-  center: { justifyContent: 'center', alignItems: 'center', paddingHorizontal: 32 },
+function getStyles(colors: ThemeColors) {
+  return StyleSheet.create({
+    root:   { flex: 1, backgroundColor: '#000' },
+    center: { justifyContent: 'center', alignItems: 'center', paddingHorizontal: 32 },
 
-  // Permission
-  permText:    { fontSize: 18, color: '#fff', textAlign: 'center', marginBottom: 20, fontFamily: fonts.semiBold },
-  permBtn:     { backgroundColor: colors.accent, paddingHorizontal: 32, paddingVertical: 14, borderRadius: radius.md },
-  permBtnText: { color: '#fff', fontSize: 16, fontFamily: fonts.bold },
+    // Permission
+    permText:    { fontSize: 18, color: '#fff', textAlign: 'center', marginBottom: 20, fontFamily: fonts.semiBold },
+    permBtn:     { backgroundColor: colors.accent, paddingHorizontal: 32, paddingVertical: 14, borderRadius: radius.md },
+    permBtnText: { color: '#fff', fontSize: 16, fontFamily: fonts.bold },
 
-  // Overlay strips
-  strip: { position: 'absolute', backgroundColor: 'rgba(0,0,0,0.62)' },
+    // Overlay strips
+    strip: { position: 'absolute', backgroundColor: 'rgba(0,0,0,0.62)' },
 
-  // Character label above frame
-  charLabel: {
-    position: 'absolute',
-    left: 0, right: 0,
-    alignItems: 'center',
-  },
-  charLabelGlyph: {
-    fontSize: 56,
-    fontFamily: fonts.extraBold,
-    color: '#fff',
-    textShadowColor: 'rgba(0,0,0,0.8)',
-    textShadowOffset: { width: 0, height: 2 },
-    textShadowRadius: 6,
-  },
+    // Character label above frame
+    charLabel: {
+      position: 'absolute',
+      left: 0, right: 0,
+      alignItems: 'center',
+    },
+    charLabelGlyph: {
+      fontSize: 56,
+      fontFamily: fonts.extraBold,
+      color: '#fff',
+      textShadowColor: 'rgba(0,0,0,0.8)',
+      textShadowOffset: { width: 0, height: 2 },
+      textShadowRadius: 6,
+    },
 
-  // Guide frame
-  guideFrame: {
-    position: 'absolute',
-    borderWidth: 3,
-    borderColor: colors.accent,
-    borderRadius: radius.md,
-  },
+    // Guide frame
+    guideFrame: {
+      position: 'absolute',
+      borderWidth: 3,
+      borderColor: colors.accent,
+      borderRadius: radius.md,
+    },
 
-  // Drawing canvas wrapper (positioned same as guide frame)
-  canvasWrapper: {
-    position: 'absolute',
-    borderRadius: radius.md,
-    overflow: 'hidden',
-    borderWidth: 3,
-    borderColor: colors.accent,
-  },
+    // Drawing canvas wrapper (positioned same as guide frame)
+    canvasWrapper: {
+      position: 'absolute',
+      borderRadius: radius.md,
+      overflow: 'hidden',
+      borderWidth: 3,
+      borderColor: colors.accent,
+    },
 
-  // Clear button (top-right of canvas)
-  clearBtn: {
-    position: 'absolute',
-    top: 8,
-    right: 8,
-    backgroundColor: 'rgba(0,0,0,0.55)',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 16,
-  },
-  clearBtnText: {
-    color: '#fff',
-    fontSize: 13,
-    fontFamily: fonts.semiBold,
-  },
+    // Clear button (top-right of canvas)
+    clearBtn: {
+      position: 'absolute',
+      top: 8,
+      right: 8,
+      backgroundColor: 'rgba(0,0,0,0.55)',
+      paddingHorizontal: 12,
+      paddingVertical: 6,
+      borderRadius: 16,
+    },
+    clearBtnText: {
+      color: '#fff',
+      fontSize: 13,
+      fontFamily: fonts.semiBold,
+    },
 
-  // Progress
-  progressPill: {
-    position: 'absolute',
-    left: 0, right: 0,
-    alignItems: 'center',
-  },
-  progressText: {
-    fontSize: 14,
-    fontFamily: fonts.semiBold,
-    color: '#fff',
-    backgroundColor: 'rgba(0,0,0,0.55)',
-    paddingHorizontal: 16,
-    paddingVertical: 6,
-    borderRadius: 20,
-    overflow: 'hidden',
-  },
+    // Progress
+    progressPill: {
+      position: 'absolute',
+      left: 0, right: 0,
+      alignItems: 'center',
+    },
+    progressText: {
+      fontSize: 14,
+      fontFamily: fonts.semiBold,
+      color: '#fff',
+      backgroundColor: 'rgba(0,0,0,0.55)',
+      paddingHorizontal: 16,
+      paddingVertical: 6,
+      borderRadius: 20,
+      overflow: 'hidden',
+    },
 
-  // Capture button
-  captureRow: {
-    position: 'absolute', bottom: 104, left: 0, right: 0,
-    alignItems: 'center', gap: 8,
-  },
-  captureBtn: {
-    width: 76, height: 76, borderRadius: 38,
-    borderWidth: 4, borderColor: '#fff',
-    justifyContent: 'center', alignItems: 'center',
-  },
-  captureBtnOff:    { borderColor: 'rgba(255,255,255,0.3)' },
-  captureInner:     { width: 58, height: 58, borderRadius: 29, backgroundColor: '#fff' },
-  captureInnerOff:  { backgroundColor: 'rgba(255,255,255,0.3)' },
-  captureLbl:       { color: '#fff', fontSize: 14, fontFamily: fonts.semiBold },
+    // Capture button
+    captureRow: {
+      position: 'absolute', bottom: 104, left: 0, right: 0,
+      alignItems: 'center', gap: 8,
+    },
+    captureBtn: {
+      width: 76, height: 76, borderRadius: 38,
+      borderWidth: 4, borderColor: '#fff',
+      justifyContent: 'center', alignItems: 'center',
+    },
+    captureBtnOff:    { borderColor: 'rgba(255,255,255,0.3)' },
+    captureInner:     { width: 58, height: 58, borderRadius: 29, backgroundColor: '#fff' },
+    captureInnerOff:  { backgroundColor: 'rgba(255,255,255,0.3)' },
+    captureLbl:       { color: '#fff', fontSize: 14, fontFamily: fonts.semiBold },
 
-  // Mode toggle bar
-  modeBar: {
-    position: 'absolute',
-    bottom: 36,
-    alignSelf: 'center',
-    flexDirection: 'row',
-    backgroundColor: 'rgba(0,0,0,0.55)',
-    borderRadius: 24,
-    padding: 4,
-    gap: 4,
-  },
-  modeTab: {
-    paddingHorizontal: 20,
-    paddingVertical: 9,
-    borderRadius: 20,
-  },
-  modeTabActive: {
-    backgroundColor: colors.accent,
-  },
-  modeTabText: {
-    fontSize: 15,
-    fontFamily: fonts.semiBold,
-    color: 'rgba(255,255,255,0.65)',
-  },
-  modeTabTextActive: {
-    color: '#fff',
-  },
+    // Mode toggle bar
+    modeBar: {
+      position: 'absolute',
+      bottom: 36,
+      alignSelf: 'center',
+      flexDirection: 'row',
+      backgroundColor: 'rgba(0,0,0,0.55)',
+      borderRadius: 24,
+      padding: 4,
+      gap: 4,
+    },
+    modeTab: {
+      paddingHorizontal: 20,
+      paddingVertical: 9,
+      borderRadius: 20,
+    },
+    modeTabActive: {
+      backgroundColor: colors.accent,
+    },
+    modeTabText: {
+      fontSize: 15,
+      fontFamily: fonts.semiBold,
+      color: 'rgba(255,255,255,0.65)',
+    },
+    modeTabTextActive: {
+      color: '#fff',
+    },
 
-  // Preview
-  previewHdr: {
-    position: 'absolute', top: 0, left: 0, right: 0,
-    paddingTop: 52, paddingBottom: 16,
-    backgroundColor: 'rgba(0,0,0,0.65)',
-    alignItems: 'center',
-  },
-  previewChar:     { fontSize: 48, fontFamily: fonts.extraBold, color: '#fff' },
-  previewProgress: { fontSize: 14, fontFamily: fonts.semiBold, color: '#93C5FD', marginTop: 4 },
+    // Preview
+    previewHdr: {
+      position: 'absolute', top: 0, left: 0, right: 0,
+      paddingTop: 52, paddingBottom: 16,
+      backgroundColor: 'rgba(0,0,0,0.65)',
+      alignItems: 'center',
+    },
+    previewChar:     { fontSize: 48, fontFamily: fonts.extraBold, color: '#fff' },
+    previewProgress: { fontSize: 14, fontFamily: fonts.semiBold, color: colors.accent, marginTop: 4 },
 
-  previewActions: {
-    position: 'absolute', bottom: 44, left: 24, right: 24,
-    flexDirection: 'row', gap: 12,
-  },
-  btn:      { flex: 1, paddingVertical: 16, borderRadius: radius.md, alignItems: 'center' },
-  btnGrey:  { backgroundColor: 'rgba(255,255,255,0.15)', borderWidth: 1.5, borderColor: 'rgba(255,255,255,0.4)' },
-  btnGreen: { backgroundColor: colors.success },
-  btnText:  { color: '#fff', fontSize: 16, fontFamily: fonts.bold },
-});
+    previewActions: {
+      position: 'absolute', bottom: 44, left: 24, right: 24,
+      flexDirection: 'row', gap: 12,
+    },
+    btn:      { flex: 1, paddingVertical: 16, borderRadius: radius.md, alignItems: 'center' },
+    btnGrey:  { backgroundColor: 'rgba(255,255,255,0.15)', borderWidth: 1.5, borderColor: 'rgba(255,255,255,0.4)' },
+    btnGreen: { backgroundColor: colors.success },
+    btnText:  { color: '#fff', fontSize: 16, fontFamily: fonts.bold },
+  });
+}

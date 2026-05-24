@@ -230,13 +230,18 @@ export default function HandwritingCustomizerScreen({ navigation: _navigation }:
       const chars = Array.from(new Set(PREVIEW_WORDS.join('')));
       const bankMap: Record<string, string> = {};
       await Promise.all(chars.map(async (ch) => {
+        const controller = new AbortController();
+        const t = setTimeout(() => controller.abort(), 10000);
         try {
           const res  = await fetch(
             `${BACKEND_URL}/character/${encodeURIComponent(uid)}/${encodeURIComponent(ch)}/variants`,
+            { signal: controller.signal },
           );
           const data = await res.json() as { variants: { index: number; url: string }[] };
           if (data.variants?.length) bankMap[ch] = data.variants[0].url;
-        } catch { /* char not in bank — placeholder shown */ }
+        } catch { /* char not in bank — placeholder shown */ } finally {
+          clearTimeout(t);
+        }
       }));
       setBank(bankMap);
     } catch {

@@ -7,7 +7,10 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import Constants from 'expo-constants';
 import { colors, fonts, radius, shadow } from '../theme';
+
+const SUPPORT_EMAIL = 'handscriptir@gmail.com';
 
 interface Props {
   children: ReactNode;
@@ -49,9 +52,9 @@ export default class ErrorBoundary extends Component<Props, State> {
       `שלום,\n\nנתקלתי בשגיאה הבאה:\n\n` +
       `${error?.toString() ?? 'Unknown error'}\n\n` +
       `Stack:\n${errorInfo?.componentStack ?? '—'}\n\n` +
-      `גרסה: 1.0.0`,
+      `גרסה: ${Constants.expoConfig?.version ?? 'unknown'}`,
     );
-    Linking.openURL(`mailto:support@handscript.app?subject=${subject}&body=${body}`).catch(
+    Linking.openURL(`mailto:${SUPPORT_EMAIL}?subject=${subject}&body=${body}`).catch(
       () => console.warn('Could not open mail client'),
     );
   };

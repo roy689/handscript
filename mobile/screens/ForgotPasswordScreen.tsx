@@ -64,9 +64,9 @@ export default function ForgotPasswordScreen({ navigation }: Props) {
         }).start();
       });
     } catch (err: unknown) {
-      const code = (err as { code?: string }).code ?? '';
+      const msg = err instanceof Error ? err.message : String(err);
       if (__DEV__) console.error('[ForgotPassword] error:', err);
-      setError(translateError(code));
+      setError(msg || 'שגיאה בשליחה. נסה שנית');
       setStep('idle');
     }
   }

@@ -1,4 +1,10 @@
-"""Firebase / Firestore and Storage operations for the Handscript glyph bank."""
+"""
+Firebase / Firestore and Storage operations for the Handscript glyph bank.
+
+DEPRECATED — this module is no longer imported by main.py.
+Production uses `firebase_storage.py`; development uses `local_storage.py`.
+Retained for reference until firebase_storage.py is fully validated.
+"""
 
 import logging
 import os
