@@ -1403,7 +1403,11 @@ async def upload_sample(
             "upload-sample: no Hebrew characters detected. "
             "Check debug_output/3_vision_boxes.png to see what Vision API found."
         )
-        return {}
+        # Return 422 so the mobile shows a clear error instead of an empty bank
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="לא זוהו אותיות עבריות בתמונה. ודא שהתאורה טובה, שהאותיות ברורות, ושהדף ללא רקע מודפס.",
+        )
 
     # Persist to Firebase and local JSON fallback
     firebase_client.save_character_bank(user_id, bank)

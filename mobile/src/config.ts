@@ -3,12 +3,25 @@ import { Platform } from 'react-native';
 
 type ExtraConfig = { BACKEND_URL?: string } | undefined;
 
-const fromExtra =
-  (Constants.expoConfig?.extra as ExtraConfig)?.BACKEND_URL ??
-  (Constants.expoConfig as { extra?: ExtraConfig })?.extra?.BACKEND_URL;
+/**
+ * `??` only catches null/undefined — but Expo's babel plugin replaces
+ * `process.env.EXPO_PUBLIC_BACKEND_URL=` (no value) with an empty string `""`,
+ * which would pass through the nullish coalescing chain and break every fetch.
+ * `nonEmpty()` normalises both to undefined so the chain falls through cleanly.
+ */
+function nonEmpty(s: unknown): string | undefined {
+  if (typeof s !== 'string') return undefined;
+  const trimmed = s.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
 
-const fromEnv = process.env.EXPO_PUBLIC_BACKEND_URL;
-const prodFallback = 'https://api.handscript.co.il';
+const fromExtra = nonEmpty(
+  (Constants.expoConfig?.extra as ExtraConfig)?.BACKEND_URL ??
+  (Constants.expoConfig as { extra?: ExtraConfig })?.extra?.BACKEND_URL,
+);
+
+const fromEnv      = nonEmpty(process.env.EXPO_PUBLIC_BACKEND_URL);
+const prodFallback = 'https://handscript-production-2667.up.railway.app';
 
 /**
  * In dev (Expo Go on a physical phone or emulator), we cannot use the

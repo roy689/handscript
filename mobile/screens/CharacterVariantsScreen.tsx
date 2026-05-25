@@ -180,6 +180,10 @@ export default function CharacterVariantsScreen({ route, navigation }: Props) {
           ]}
           onPress={() => handleDelete(item)}
           disabled={isThisDeleting || deletingIndex !== null}
+          accessibilityRole="button"
+          accessibilityLabel={`מחק דגם מספר ${item.index + 1}`}
+          accessibilityHint="מחיקה לצמיתות של הדגם הזה. הפעולה דורשת אישור"
+          accessibilityState={{ disabled: isThisDeleting || deletingIndex !== null, busy: isThisDeleting }}
         >
           {isThisDeleting
             ? <ActivityIndicator size="small" color="#fff" />
@@ -232,6 +236,9 @@ export default function CharacterVariantsScreen({ route, navigation }: Props) {
         <Pressable
           style={({ pressed }) => [styles.addBtn, pressed && { opacity: 0.85 }]}
           onPress={handleAdd}
+          accessibilityRole="button"
+          accessibilityLabel="צלם דגם חדש"
+          accessibilityHint={`הוסף דגם נוסף של התו ${character}`}
         >
           <Text style={styles.addBtnText}>+ צלם דגם חדש</Text>
         </Pressable>

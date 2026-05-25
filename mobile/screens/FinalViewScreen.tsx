@@ -43,6 +43,7 @@ import { useTheme, type ThemeColors }  from '../src/contexts/ThemeContext';
 import { BACKEND_URL }                 from '../src/config';
 import { getCurrentUserId }            from '../src/services/auth';
 import { getAuthToken }               from '../src/utils/api';
+import { impactLight, impactMedium }   from '../src/utils/haptics';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'FinalView'>;
 
@@ -72,6 +73,10 @@ async function fetchBothModes(
   inkColor: string,
 ): Promise<{ cleanUrls: string[]; photoUrls: string[] }> {
   const token = await getAuthToken();
+  const userId = getCurrentUserId();
+  if (!userId) {
+    throw new Error('משתמש לא מחובר — התחבר מחדש ונסה שוב');
+  }
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -87,6 +92,7 @@ async function fetchBothModes(
       signal:  controller.signal,
       body:    JSON.stringify({
         text,
+        user_id: userId,
         background,
         ink_color: inkColor,
         style: {
@@ -359,17 +365,38 @@ export default function FinalViewScreen({ navigation, route }: Props) {
         {totalPages > 1 && (
           <View style={styles.pageNav}>
             <Pressable
-              style={[styles.pageNavBtn, currentPage === 0 && styles.pageNavBtnOff]}
-              onPress={() => setCurrentPage(p => Math.max(0, p - 1))}
+              style={({ pressed }) => [
+                styles.pageNavBtn,
+                currentPage === 0 && styles.pageNavBtnOff,
+                pressed && currentPage > 0 && { opacity: 0.6, transform: [{ scale: 0.92 }] },
+              ]}
+              onPress={() => { impactLight(); setCurrentPage(p => Math.max(0, p - 1)); }}
               disabled={currentPage === 0}
+              hitSlop={12}
+              accessibilityRole="button"
+              accessibilityLabel="דף קודם"
+              accessibilityState={{ disabled: currentPage === 0 }}
             >
               <Text style={styles.pageNavArrow}>‹</Text>
             </Pressable>
-            <Text style={styles.pageNavLabel}>{currentPage + 1} / {totalPages}</Text>
+            <Text
+              style={styles.pageNavLabel}
+              accessibilityLabel={`דף ${currentPage + 1} מתוך ${totalPages}`}
+            >
+              {currentPage + 1} / {totalPages}
+            </Text>
             <Pressable
-              style={[styles.pageNavBtn, currentPage === totalPages - 1 && styles.pageNavBtnOff]}
-              onPress={() => setCurrentPage(p => Math.min(totalPages - 1, p + 1))}
+              style={({ pressed }) => [
+                styles.pageNavBtn,
+                currentPage === totalPages - 1 && styles.pageNavBtnOff,
+                pressed && currentPage < totalPages - 1 && { opacity: 0.6, transform: [{ scale: 0.92 }] },
+              ]}
+              onPress={() => { impactLight(); setCurrentPage(p => Math.min(totalPages - 1, p + 1)); }}
               disabled={currentPage === totalPages - 1}
+              hitSlop={12}
+              accessibilityRole="button"
+              accessibilityLabel="דף הבא"
+              accessibilityState={{ disabled: currentPage === totalPages - 1 }}
             >
               <Text style={styles.pageNavArrow}>›</Text>
             </Pressable>
@@ -379,18 +406,32 @@ export default function FinalViewScreen({ navigation, route }: Props) {
         {/* ── SCAN MODE TOGGLE ─────────────────────────────────────────── */}
         <View style={styles.modeToggleRow}>
           <Pressable
-            style={[styles.modeBtn, scanMode === 'clean' && styles.modeBtnActive]}
-            onPress={() => handleSwitchMode('clean')}
+            style={({ pressed }) => [
+              styles.modeBtn,
+              scanMode === 'clean' && styles.modeBtnActive,
+              pressed && scanMode !== 'clean' && { opacity: 0.7 },
+            ]}
+            onPress={() => { impactLight(); handleSwitchMode('clean'); }}
             disabled={isLoading || isBusy}
+            accessibilityRole="button"
+            accessibilityLabel="מצב סריקה נקייה"
+            accessibilityState={{ selected: scanMode === 'clean', disabled: isLoading || isBusy }}
           >
             <Text style={[styles.modeBtnText, scanMode === 'clean' && styles.modeBtnTextActive]}>
               סריקה נקייה
             </Text>
           </Pressable>
           <Pressable
-            style={[styles.modeBtn, scanMode === 'photo' && styles.modeBtnActive]}
-            onPress={() => handleSwitchMode('photo')}
+            style={({ pressed }) => [
+              styles.modeBtn,
+              scanMode === 'photo' && styles.modeBtnActive,
+              pressed && scanMode !== 'photo' && { opacity: 0.7 },
+            ]}
+            onPress={() => { impactLight(); handleSwitchMode('photo'); }}
             disabled={isLoading || isBusy}
+            accessibilityRole="button"
+            accessibilityLabel="מצב מראה צילום"
+            accessibilityState={{ selected: scanMode === 'photo', disabled: isLoading || isBusy }}
           >
             <Text style={[styles.modeBtnText, scanMode === 'photo' && styles.modeBtnTextActive]}>
               מראה צילום
@@ -402,17 +443,26 @@ export default function FinalViewScreen({ navigation, route }: Props) {
         <View style={styles.panel}>
 
           <Pressable
-            style={({ pressed }) => [styles.backRow, pressed && { opacity: 0.6 }]}
-            onPress={() => navigation.goBack()}
+            style={({ pressed }) => [styles.backRow, pressed && { opacity: 0.6, transform: [{ scale: 0.97 }] }]}
+            onPress={() => { impactLight(); navigation.goBack(); }}
             disabled={isBusy}
+            hitSlop={12}
+            accessibilityRole="button"
+            accessibilityLabel="חזור לעריכה"
+            accessibilityHint="עובר חזרה למסך התצוגה המקדימה כדי לערוך את הטקסט או הסגנון"
+            accessibilityState={{ disabled: isBusy }}
           >
             <Text style={styles.backText}>← חזור לעריכה</Text>
           </Pressable>
 
           <Pressable
             style={({ pressed }) => [styles.primaryBtn, pressed && styles.btnPressed, (isBusy || !pageUrls.length) && styles.btnDisabled]}
-            onPress={handleSaveGallery}
+            onPress={() => { impactMedium(); handleSaveGallery(); }}
             disabled={isBusy || !pageUrls.length}
+            accessibilityRole="button"
+            accessibilityLabel={savingGallery ? 'שומר לגלריה...' : 'שמור לגלריה'}
+            accessibilityHint="שומר את הדפים שיצרת כתמונות בגלריית המכשיר"
+            accessibilityState={{ disabled: isBusy || !pageUrls.length, busy: savingGallery }}
           >
             {savingGallery
               ? <ActivityIndicator size="small" color="#fff" />
@@ -422,8 +472,12 @@ export default function FinalViewScreen({ navigation, route }: Props) {
           <View style={styles.secondaryRow}>
             <Pressable
               style={({ pressed }) => [styles.secondaryBtn, pressed && styles.btnPressed, (isBusy || !pageUrls.length) && styles.btnDisabled]}
-              onPress={handleShare}
+              onPress={() => { impactLight(); handleShare(); }}
               disabled={isBusy || !pageUrls.length}
+              accessibilityRole="button"
+              accessibilityLabel={savingShare ? 'מכין שיתוף...' : 'שתף את הדף'}
+              accessibilityHint="פותח חלון שיתוף לאפליקציות אחרות"
+              accessibilityState={{ disabled: isBusy || !pageUrls.length, busy: savingShare }}
             >
               {savingShare
                 ? <ActivityIndicator size="small" color={colors.accent} />
@@ -432,8 +486,12 @@ export default function FinalViewScreen({ navigation, route }: Props) {
 
             <Pressable
               style={({ pressed }) => [styles.secondaryBtn, pressed && styles.btnPressed, (isBusy || !pageUrls.length) && styles.btnDisabled]}
-              onPress={handleExportPdf}
+              onPress={() => { impactLight(); handleExportPdf(); }}
               disabled={isBusy || !pageUrls.length}
+              accessibilityRole="button"
+              accessibilityLabel={savingPdf ? 'מייצא PDF...' : 'ייצא כקובץ PDF'}
+              accessibilityHint="יוצר קובץ PDF של כל הדפים יחד"
+              accessibilityState={{ disabled: isBusy || !pageUrls.length, busy: savingPdf }}
             >
               {savingPdf
                 ? <ActivityIndicator size="small" color={colors.accent} />

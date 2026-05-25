@@ -289,7 +289,11 @@ export default function App() {
         </Text>
         <Text
           style={{ color: '#93C5FD', fontSize: 14, textDecorationLine: 'underline' }}
-          onPress={() => Linking.openURL('mailto:handscriptir@gmail.com')}
+          onPress={() => {
+            Linking.openURL('mailto:handscriptir@gmail.com?subject=HandScript%20%E2%80%94%20%D7%A9%D7%92%D7%99%D7%90%D7%94%20%D7%91%D7%90%D7%A4%D7%9C%D7%99%D7%A7%D7%A6%D7%99%D7%94').catch(() => {});
+          }}
+          accessibilityRole="link"
+          accessibilityLabel="שלח אימייל לתמיכה"
         >
           handscriptir@gmail.com
         </Text>

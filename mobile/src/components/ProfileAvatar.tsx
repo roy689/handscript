@@ -11,6 +11,7 @@ import type { RootStackParamList } from '../../navigation/types';
 import { auth } from '../services/firebase';
 import { useTheme } from '../contexts/ThemeContext';
 import { fonts, radius } from '../theme';
+import { impactLight } from '../utils/haptics';
 
 interface Props {
   navigation: NavigationProp<RootStackParamList>;
@@ -49,12 +50,16 @@ export default function ProfileAvatar({ navigation }: Props) {
     <>
       {/* ── Avatar button ── */}
       <Pressable
-        onPress={() => setMenuOpen(true)}
-        style={[
+        onPress={() => { impactLight(); setMenuOpen(true); }}
+        style={({ pressed }) => [
           styles.avatar,
           { backgroundColor: colors.accentLight, borderColor: colors.accent },
+          pressed && { opacity: 0.7, transform: [{ scale: 0.94 }] },
         ]}
         hitSlop={8}
+        accessibilityRole="button"
+        accessibilityLabel="פתח תפריט פרופיל"
+        accessibilityHint="פותח תפריט עם קישורים לפרופיל, הגדרות, תנאי שימוש ומדיניות פרטיות"
       >
         <Text style={[styles.initial, { color: colors.accent }]}>{initial}</Text>
       </Pressable>
@@ -68,7 +73,13 @@ export default function ProfileAvatar({ navigation }: Props) {
         statusBarTranslucent
       >
         {/* Backdrop — tapping closes the menu */}
-        <Pressable style={styles.backdrop} onPress={close}>
+        <Pressable
+          style={styles.backdrop}
+          onPress={close}
+          accessibilityRole="button"
+          accessibilityLabel="סגור תפריט"
+          accessibilityHint="לחיצה מחוץ לתפריט סוגרת אותו"
+        >
           {/* Menu card — stop propagation so tapping menu doesn't close it */}
           <Pressable
             style={[
@@ -91,7 +102,9 @@ export default function ProfileAvatar({ navigation }: Props) {
                     styles.menuItem,
                     pressed && { backgroundColor: colors.bgPage },
                   ]}
-                  onPress={item.onPress}
+                  onPress={() => { impactLight(); item.onPress(); }}
+                  accessibilityRole="button"
+                  accessibilityLabel={item.label}
                 >
                   <Text style={[styles.menuLabel, { color: colors.inkDark }]}>
                     {item.label}

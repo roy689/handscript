@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react';
 import {
+  Alert,
   Linking,
   Pressable,
   ScrollView,
@@ -10,6 +11,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTheme, type ThemeColors } from '../src/contexts/ThemeContext';
 import { fonts, radius, shadow } from '../src/theme';
+import { impactLight } from '../src/utils/haptics';
 
 const EMAIL = 'handscriptir@gmail.com';
 
@@ -17,10 +19,27 @@ export default function ContactScreen() {
   const { colors } = useTheme();
   const styles = useMemo(() => getStyles(colors), [colors]);
 
-  const openEmail = (subject: string) => {
-    Linking.openURL(
-      `mailto:${EMAIL}?subject=${encodeURIComponent(subject)}`,
-    );
+  const openEmail = async (subject: string) => {
+    impactLight();
+    const url = `mailto:${EMAIL}?subject=${encodeURIComponent(subject)}`;
+    try {
+      const canOpen = await Linking.canOpenURL(url);
+      if (!canOpen) {
+        Alert.alert(
+          'לא נמצאה אפליקציית דואר',
+          `שלח אימייל ידנית לכתובת:\n${EMAIL}\n\nנושא: ${subject}`,
+          [{ text: 'אישור' }],
+        );
+        return;
+      }
+      await Linking.openURL(url);
+    } catch {
+      Alert.alert(
+        'לא ניתן לפתוח דואר',
+        `שלח אימייל ידנית לכתובת:\n${EMAIL}`,
+        [{ text: 'אישור' }],
+      );
+    }
   };
 
   return (
@@ -88,6 +107,9 @@ export default function ContactScreen() {
           <Pressable
             style={({ pressed }) => [styles.actionRow, pressed && styles.actionRowPressed]}
             onPress={() => openEmail('תמיכה טכנית – HandScript')}
+            accessibilityRole="button"
+            accessibilityLabel="פנייה לתמיכה טכנית"
+            accessibilityHint="פותח אפליקציית דואר עם פנייה לתמיכה"
           >
             <Text style={styles.actionArrow}>←</Text>
             <Text style={styles.actionLabel}>תמיכה טכנית</Text>
@@ -96,6 +118,9 @@ export default function ContactScreen() {
           <Pressable
             style={({ pressed }) => [styles.actionRow, pressed && styles.actionRowPressed]}
             onPress={() => openEmail('בקשת מחיקת נתונים – HandScript')}
+            accessibilityRole="button"
+            accessibilityLabel="בקשה למחיקת נתונים אישיים"
+            accessibilityHint="פותח דואר לבקשה למחיקה כללית של החשבון"
           >
             <Text style={styles.actionArrow}>←</Text>
             <Text style={styles.actionLabel}>בקשת מחיקת נתונים</Text>
@@ -104,6 +129,9 @@ export default function ContactScreen() {
           <Pressable
             style={({ pressed }) => [styles.actionRow, pressed && styles.actionRowPressed]}
             onPress={() => openEmail('בקשת עיון במידע (GDPR/CCPA) – HandScript')}
+            accessibilityRole="button"
+            accessibilityLabel="בקשת עיון במידע אישי"
+            accessibilityHint="פותח דואר לבקשה לקבל את כל המידע שנשמר"
           >
             <Text style={styles.actionArrow}>←</Text>
             <Text style={styles.actionLabel}>עיון במידע שלי</Text>
@@ -112,6 +140,9 @@ export default function ContactScreen() {
           <Pressable
             style={({ pressed }) => [styles.actionRow, pressed && styles.actionRowPressed]}
             onPress={() => openEmail('דיווח על שימוש לרעה – HandScript')}
+            accessibilityRole="button"
+            accessibilityLabel="דיווח על שימוש לרעה"
+            accessibilityHint="פותח דואר לדיווח על תוכן לא הולם או שימוש לרעה"
           >
             <Text style={styles.actionArrow}>←</Text>
             <Text style={styles.actionLabel}>דיווח על שימוש לרעה</Text>
@@ -120,6 +151,9 @@ export default function ContactScreen() {
           <Pressable
             style={({ pressed }) => [styles.actionRow, pressed && styles.actionRowPressed]}
             onPress={() => openEmail('הצעה לשיפור – HandScript')}
+            accessibilityRole="button"
+            accessibilityLabel="הצעה לשיפור האפליקציה"
+            accessibilityHint="פותח דואר לשליחת רעיונות לשיפור"
           >
             <Text style={styles.actionArrow}>←</Text>
             <Text style={styles.actionLabel}>הצעה לשיפור</Text>

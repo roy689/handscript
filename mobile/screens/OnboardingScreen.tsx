@@ -131,16 +131,30 @@ export default function OnboardingScreen({ navigation }: Props) {
 
           <View style={styles.modeTabs}>
             <Pressable
-              style={[styles.modeTab, mode === 'signin' && styles.modeTabActive]}
+              style={({ pressed }) => [
+                styles.modeTab,
+                mode === 'signin' && styles.modeTabActive,
+                pressed && mode !== 'signin' && { opacity: 0.7 },
+              ]}
               onPress={() => { if (mode !== 'signin') { impactLight(); toggleMode(); } }}
+              accessibilityRole="button"
+              accessibilityLabel="עבור למסך התחברות"
+              accessibilityState={{ selected: mode === 'signin' }}
             >
               <Text style={[styles.modeTabText, mode === 'signin' && styles.modeTabTextActive]}>
                 התחברות
               </Text>
             </Pressable>
             <Pressable
-              style={[styles.modeTab, mode === 'signup' && styles.modeTabActive]}
+              style={({ pressed }) => [
+                styles.modeTab,
+                mode === 'signup' && styles.modeTabActive,
+                pressed && mode !== 'signup' && { opacity: 0.7 },
+              ]}
               onPress={() => { if (mode !== 'signup') { impactLight(); toggleMode(); } }}
+              accessibilityRole="button"
+              accessibilityLabel="עבור למסך הרשמה"
+              accessibilityState={{ selected: mode === 'signup' }}
             >
               <Text style={[styles.modeTabText, mode === 'signup' && styles.modeTabTextActive]}>
                 הרשמה
@@ -194,6 +208,11 @@ export default function OnboardingScreen({ navigation }: Props) {
               ]}
               onPress={() => { impactMedium(); handleSubmit(); }}
               disabled={loading}
+              accessibilityRole="button"
+              accessibilityLabel={loading
+                ? (mode === 'signin' ? 'מתחבר...' : 'נרשם...')
+                : (mode === 'signin' ? 'התחבר' : 'הירשם')}
+              accessibilityState={{ disabled: loading, busy: loading }}
             >
               <Text style={styles.submitBtnText}>
                 {loading ? 'טוען...' : mode === 'signup' ? 'צור חשבון' : 'כניסה'}
@@ -202,8 +221,15 @@ export default function OnboardingScreen({ navigation }: Props) {
 
             {mode === 'signin' && (
               <Pressable
-                style={styles.forgotBtn}
-                onPress={() => navigation.navigate('ForgotPassword')}
+                style={({ pressed }) => [
+                  styles.forgotBtn,
+                  pressed && { opacity: 0.6 },
+                ]}
+                onPress={() => { impactLight(); navigation.navigate('ForgotPassword'); }}
+                hitSlop={12}
+                accessibilityRole="button"
+                accessibilityLabel="שכחת סיסמה"
+                accessibilityHint="עובר למסך איפוס סיסמה דרך אימייל"
               >
                 <Text style={styles.forgotText}>שכחת סיסמה?</Text>
               </Pressable>

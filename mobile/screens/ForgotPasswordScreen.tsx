@@ -15,7 +15,7 @@ import type { RootStackParamList } from '../navigation/types';
 import { resetPassword } from '../src/services/auth';
 import { fonts, radius } from '../src/theme';
 import { useTheme } from '../src/contexts/ThemeContext';
-import { impactMedium } from '../src/utils/haptics';
+import { impactLight, impactMedium } from '../src/utils/haptics';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'ForgotPassword'>;
 type Step = 'idle' | 'loading' | 'sent';
@@ -126,6 +126,10 @@ export default function ForgotPasswordScreen({ navigation }: Props) {
                 ]}
                 onPress={() => { impactMedium(); handleSend(); }}
                 disabled={step !== 'idle'}
+                accessibilityRole="button"
+                accessibilityLabel={step === 'loading' ? 'שולח...' : 'שלח קישור לאיפוס סיסמה'}
+                accessibilityHint="שולח אימייל עם קישור לאיפוס הסיסמה"
+                accessibilityState={{ disabled: step !== 'idle', busy: step === 'loading' }}
               >
                 <Text style={styles.btnText}>
                   {step === 'loading' ? 'שולח...' : 'שלח קישור לאיפוס'}
@@ -133,8 +137,14 @@ export default function ForgotPasswordScreen({ navigation }: Props) {
               </Pressable>
 
               <Pressable
-                style={styles.backLink}
-                onPress={() => navigation.goBack()}
+                style={({ pressed }) => [
+                  styles.backLink,
+                  pressed && { opacity: 0.6 },
+                ]}
+                onPress={() => { impactLight(); navigation.goBack(); }}
+                hitSlop={12}
+                accessibilityRole="button"
+                accessibilityLabel="חזרה למסך ההתחברות"
               >
                 <Text style={styles.backLinkText}>חזרה להתחברות</Text>
               </Pressable>
@@ -154,7 +164,9 @@ export default function ForgotPasswordScreen({ navigation }: Props) {
                   styles.btn,
                   pressed && { transform: [{ scale: 0.97 }], opacity: 0.9 },
                 ]}
-                onPress={() => navigation.goBack()}
+                onPress={() => { impactLight(); navigation.goBack(); }}
+                accessibilityRole="button"
+                accessibilityLabel="חזרה למסך ההתחברות"
               >
                 <Text style={styles.btnText}>חזרה להתחברות</Text>
               </Pressable>

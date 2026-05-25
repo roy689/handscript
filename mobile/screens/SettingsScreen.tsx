@@ -2,6 +2,8 @@ import React, { useMemo, useState } from 'react';
 import {
   Alert,
   ActivityIndicator,
+  Linking,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -18,6 +20,7 @@ import { fonts, radius, shadow } from '../src/theme';
 import { auth } from '../src/services/firebase';
 import { getAuthToken } from '../src/utils/api';
 import { BACKEND_URL } from '../src/config';
+import { impactLight } from '../src/utils/haptics';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Settings'>;
 
@@ -71,12 +74,17 @@ export default function SettingsScreen({ navigation }: Props) {
         <View style={styles.card}>
           <View style={styles.themeRow}>
             <Pressable
-              style={[
+              style={({ pressed }) => [
                 styles.themeOption,
                 theme === 'light' && styles.themeOptionActive,
                 { borderColor: theme === 'light' ? colors.accent : colors.border },
+                pressed && theme !== 'light' && { opacity: 0.7, transform: [{ scale: 0.97 }] },
               ]}
-              onPress={() => theme !== 'light' && toggleTheme()}
+              onPress={() => { if (theme !== 'light') { impactLight(); toggleTheme(); } }}
+              accessibilityRole="button"
+              accessibilityLabel="מצב בהיר"
+              accessibilityHint="עבור לתצוגה בהירה"
+              accessibilityState={{ selected: theme === 'light' }}
             >
               <Text style={styles.themeIcon}>☀</Text>
               <Text style={[
@@ -88,12 +96,17 @@ export default function SettingsScreen({ navigation }: Props) {
             </Pressable>
 
             <Pressable
-              style={[
+              style={({ pressed }) => [
                 styles.themeOption,
                 theme === 'dark' && styles.themeOptionActive,
                 { borderColor: theme === 'dark' ? colors.accent : colors.border },
+                pressed && theme !== 'dark' && { opacity: 0.7, transform: [{ scale: 0.97 }] },
               ]}
-              onPress={() => theme !== 'dark' && toggleTheme()}
+              onPress={() => { if (theme !== 'dark') { impactLight(); toggleTheme(); } }}
+              accessibilityRole="button"
+              accessibilityLabel="מצב כהה"
+              accessibilityHint="עבור לתצוגה כהה"
+              accessibilityState={{ selected: theme === 'dark' }}
             >
               <Text style={styles.themeIcon}>◗</Text>
               <Text style={[
@@ -116,6 +129,10 @@ export default function SettingsScreen({ navigation }: Props) {
             ]}
             onPress={handleReset}
             disabled={resetting}
+            accessibilityRole="button"
+            accessibilityLabel={resetting ? 'מאפס...' : 'איפוס מלא של כתב היד'}
+            accessibilityHint="מחיקה לצמיתות של כל הדגימות שצולמו. הפעולה דורשת אישור"
+            accessibilityState={{ disabled: resetting, busy: resetting }}
           >
             <View style={styles.resetInner}>
               {resetting ? (
@@ -139,8 +156,28 @@ export default function SettingsScreen({ navigation }: Props) {
           <Pressable
             style={({ pressed }) => [styles.legalRow, pressed && styles.legalRowPressed]}
             onPress={async () => {
-              if (await StoreReview.hasAction()) StoreReview.requestReview();
+              impactLight();
+              try {
+                if (await StoreReview.hasAction()) {
+                  await StoreReview.requestReview();
+                  return;
+                }
+              } catch {}
+              // Fallback: open the store listing directly
+              const url = Platform.OS === 'ios'
+                ? 'itms-apps://itunes.apple.com/app/idYOUR_APPLE_ID?action=write-review'
+                : 'market://details?id=com.roey.handscript';
+              Linking.openURL(url).catch(() => {
+                Alert.alert(
+                  'תודה!',
+                  'הדירוג זמין רק מתוך חנות האפליקציות. נסה שוב אחרי שתתקין מהחנות.',
+                  [{ text: 'אישור' }],
+                );
+              });
             }}
+            accessibilityRole="button"
+            accessibilityLabel="דרג את האפליקציה"
+            accessibilityHint="פותח את חלון הדירוג בחנות"
           >
             <Text style={styles.legalArrow}>←</Text>
             <Text style={styles.legalLabel}>דרג את האפליקציה</Text>
@@ -152,7 +189,9 @@ export default function SettingsScreen({ navigation }: Props) {
         <View style={styles.card}>
           <Pressable
             style={({ pressed }) => [styles.legalRow, pressed && styles.legalRowPressed]}
-            onPress={() => navigation.navigate('PrivacyPolicy')}
+            onPress={() => { impactLight(); navigation.navigate('PrivacyPolicy'); }}
+            accessibilityRole="button"
+            accessibilityLabel="מדיניות פרטיות"
           >
             <Text style={styles.legalArrow}>←</Text>
             <Text style={styles.legalLabel}>מדיניות פרטיות</Text>
@@ -160,7 +199,9 @@ export default function SettingsScreen({ navigation }: Props) {
           <View style={styles.legalDivider} />
           <Pressable
             style={({ pressed }) => [styles.legalRow, pressed && styles.legalRowPressed]}
-            onPress={() => navigation.navigate('TermsOfService')}
+            onPress={() => { impactLight(); navigation.navigate('TermsOfService'); }}
+            accessibilityRole="button"
+            accessibilityLabel="תנאי שימוש"
           >
             <Text style={styles.legalArrow}>←</Text>
             <Text style={styles.legalLabel}>תנאי שימוש</Text>
@@ -168,7 +209,9 @@ export default function SettingsScreen({ navigation }: Props) {
           <View style={styles.legalDivider} />
           <Pressable
             style={({ pressed }) => [styles.legalRow, pressed && styles.legalRowPressed]}
-            onPress={() => navigation.navigate('Contact')}
+            onPress={() => { impactLight(); navigation.navigate('Contact'); }}
+            accessibilityRole="button"
+            accessibilityLabel="יצירת קשר"
           >
             <Text style={styles.legalArrow}>←</Text>
             <Text style={styles.legalLabel}>יצירת קשר</Text>

@@ -289,6 +289,9 @@ export default function ReviewScreen({ navigation, route }: Props) {
               style={styles.emptyBtn}
               onPress={() => { impactLight(); navigation.navigate('Camera'); }}
               activeOpacity={0.8}
+              accessibilityRole="button"
+              accessibilityLabel="צלם שוב"
+              accessibilityHint="חזרה למצלמה לצילום מחדש של הדף"
             >
               <Text style={styles.emptyBtnText}>צלם שוב</Text>
             </TouchableOpacity>
@@ -328,6 +331,9 @@ export default function ReviewScreen({ navigation, route }: Props) {
           style={styles.addBtn}
           onPress={() => { impactLight(); navigation.navigate('Camera'); }}
           activeOpacity={0.8}
+          accessibilityRole="button"
+          accessibilityLabel="הוסף עוד דוגמאות"
+          accessibilityHint="חזרה למצלמה לצילום דף נוסף"
         >
           <Text style={styles.addBtnText}>הוסף דוגמאות</Text>
         </TouchableOpacity>
@@ -337,6 +343,12 @@ export default function ReviewScreen({ navigation, route }: Props) {
           disabled={!canProceed}
           onPress={() => { impactMedium(); navigation.navigate('Editor'); }}
           activeOpacity={0.8}
+          accessibilityRole="button"
+          accessibilityLabel="המשך — נראה טוב"
+          accessibilityHint={canProceed
+            ? 'מעבר לעורך הטקסט'
+            : 'מנוטרל — חסרות דוגמאות'}
+          accessibilityState={{ disabled: !canProceed }}
         >
           <Text style={[styles.looksGoodText, !canProceed && styles.looksGoodTextDisabled]}>
             נראה טוב
@@ -351,7 +363,12 @@ export default function ReviewScreen({ navigation, route }: Props) {
         animationType="fade"
         onRequestClose={() => setModalEntry(null)}
       >
-        <Pressable style={styles.backdrop} onPress={() => setModalEntry(null)}>
+        <Pressable
+          style={styles.backdrop}
+          onPress={() => setModalEntry(null)}
+          accessibilityRole="button"
+          accessibilityLabel="סגור חלון"
+        >
           <Pressable style={styles.modalCard} onPress={() => {}}>
             {modalEntry && (
               <>
@@ -388,8 +405,10 @@ export default function ReviewScreen({ navigation, route }: Props) {
 
                 <TouchableOpacity
                   style={styles.modalCloseBtn}
-                  onPress={() => setModalEntry(null)}
+                  onPress={() => { impactLight(); setModalEntry(null); }}
                   activeOpacity={0.7}
+                  accessibilityRole="button"
+                  accessibilityLabel="סגור"
                 >
                   <Text style={styles.modalCloseBtnText}>סגור</Text>
                 </TouchableOpacity>

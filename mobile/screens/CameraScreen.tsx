@@ -106,13 +106,19 @@ export default function CameraScreen({ navigation }: Props) {
         <View style={styles.actionBar}>
           <Pressable
             style={({ pressed }) => [styles.btn, styles.btnGrey, pressed && { opacity: 0.82 }]}
-            onPress={() => setPhotoUri(null)}
+            onPress={() => { impactLight(); setPhotoUri(null); }}
+            accessibilityRole="button"
+            accessibilityLabel="צלם שוב"
+            accessibilityHint="ביטול התמונה הנוכחית וחזרה למצלמה"
           >
             <Text style={styles.btnText}>צלם שוב</Text>
           </Pressable>
           <Pressable
             style={({ pressed }) => [styles.btn, styles.btnBlue, pressed && { opacity: 0.85 }]}
             onPress={handleUsePhoto}
+            accessibilityRole="button"
+            accessibilityLabel="השתמש בתמונה"
+            accessibilityHint="המשך עם התמונה לזיהוי תווים"
           >
             <Text style={styles.btnText}>השתמש בתמונה</Text>
           </Pressable>

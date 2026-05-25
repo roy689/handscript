@@ -190,12 +190,18 @@ export default function CharacterSampleReviewScreen({ route, navigation }: Props
           <Pressable
             style={({ pressed }) => [styles.cardBtn, styles.cardBtnRetake, pressed && { opacity: 0.75 }]}
             onPress={() => handleRetake(index)}
+            accessibilityRole="button"
+            accessibilityLabel={`צלם מחדש דגימה ${index + 1}`}
+            accessibilityHint="ביטול הדגימה הנוכחית וצילום חדש"
           >
             <Text style={styles.cardBtnText}>צלם מחדש</Text>
           </Pressable>
           <Pressable
             style={({ pressed }) => [styles.cardBtn, styles.cardBtnDelete, pressed && { opacity: 0.75 }]}
             onPress={() => handleDelete(index)}
+            accessibilityRole="button"
+            accessibilityLabel={`מחק דגימה ${index + 1}`}
+            accessibilityHint="הסרת הדגימה לצמיתות"
           >
             <Text style={styles.cardBtnText}>מחק</Text>
           </Pressable>
@@ -235,6 +241,10 @@ export default function CharacterSampleReviewScreen({ route, navigation }: Props
           style={({ pressed }) => [styles.footerBtn, styles.addBtn, pressed && { opacity: 0.8 }]}
           onPress={handleAddMore}
           disabled={uploading}
+          accessibilityRole="button"
+          accessibilityLabel="הוסף דגימה נוספת"
+          accessibilityHint="חזרה למצלמה לצילום דגימה נוספת של אותו תו"
+          accessibilityState={{ disabled: uploading }}
         >
           <Text style={styles.footerBtnText}>+ הוסף דגימה</Text>
         </Pressable>
@@ -248,6 +258,12 @@ export default function CharacterSampleReviewScreen({ route, navigation }: Props
           ]}
           onPress={handleSave}
           disabled={uploading || uris.length === 0}
+          accessibilityRole="button"
+          accessibilityLabel={uploading
+            ? 'שומר דגימות לשרת...'
+            : `שמור ${uris.length} דגימות`}
+          accessibilityHint="העלאת הדגימות לשרת ושמירה במאגר התווים"
+          accessibilityState={{ disabled: uploading || uris.length === 0, busy: uploading }}
         >
           {uploading
             ? <ActivityIndicator color="#fff" />

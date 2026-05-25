@@ -224,16 +224,32 @@ export default function CharacterCaptureScreen({ route, navigation }: Props) {
   const ModeToggle = () => (
     <View style={styles.modeBar}>
       <Pressable
-        style={[styles.modeTab, captureMode === 'camera' && styles.modeTabActive]}
+        style={({ pressed }) => [
+          styles.modeTab,
+          captureMode === 'camera' && styles.modeTabActive,
+          pressed && captureMode !== 'camera' && { opacity: 0.7 },
+        ]}
         onPress={() => switchMode('camera')}
+        accessibilityRole="button"
+        accessibilityLabel="מצב צילום"
+        accessibilityHint="עבור למצב צילום במצלמה"
+        accessibilityState={{ selected: captureMode === 'camera' }}
       >
         <Text style={[styles.modeTabText, captureMode === 'camera' && styles.modeTabTextActive]}>
           📷  צלם
         </Text>
       </Pressable>
       <Pressable
-        style={[styles.modeTab, captureMode === 'draw' && styles.modeTabActive]}
+        style={({ pressed }) => [
+          styles.modeTab,
+          captureMode === 'draw' && styles.modeTabActive,
+          pressed && captureMode !== 'draw' && { opacity: 0.7 },
+        ]}
         onPress={() => switchMode('draw')}
+        accessibilityRole="button"
+        accessibilityLabel="מצב ציור"
+        accessibilityHint="עבור למצב ציור עם האצבע"
+        accessibilityState={{ selected: captureMode === 'draw' }}
       >
         <Text style={[styles.modeTabText, captureMode === 'draw' && styles.modeTabTextActive]}>
           ✏️  צייר
@@ -273,8 +289,15 @@ export default function CharacterCaptureScreen({ route, navigation }: Props) {
 
           {/* Clear button */}
           <Pressable
-            style={styles.clearBtn}
-            onPress={() => drawingRef.current?.clear()}
+            style={({ pressed }) => [
+              styles.clearBtn,
+              pressed && { opacity: 0.7, transform: [{ scale: 0.95 }] },
+            ]}
+            onPress={() => { impactLight(); drawingRef.current?.clear(); }}
+            hitSlop={16}
+            accessibilityRole="button"
+            accessibilityLabel="נקה ציור"
+            accessibilityHint="מוחק את הציור הנוכחי ומאפשר להתחיל מחדש"
           >
             <Text style={styles.clearBtnText}>🗑 נקה</Text>
           </Pressable>
@@ -415,14 +438,17 @@ function getStyles(colors: ThemeColors) {
       position: 'absolute',
       top: 8,
       right: 8,
-      backgroundColor: 'rgba(0,0,0,0.55)',
-      paddingHorizontal: 12,
-      paddingVertical: 6,
-      borderRadius: 16,
+      backgroundColor: 'rgba(0,0,0,0.6)',
+      paddingHorizontal: 14,
+      paddingVertical: 10,    // Increased from 6 → minimum 44pt height with hitSlop=16
+      borderRadius: 18,
+      minWidth: 44,
+      alignItems: 'center',
+      justifyContent: 'center',
     },
     clearBtnText: {
       color: '#fff',
-      fontSize: 13,
+      fontSize: 14,
       fontFamily: fonts.semiBold,
     },
 

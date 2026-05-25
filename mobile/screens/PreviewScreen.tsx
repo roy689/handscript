@@ -30,6 +30,7 @@ import type { RootStackParamList }     from '../navigation/types';
 import { fonts, radius }               from '../src/theme';
 import { useTheme, type ThemeColors }  from '../src/contexts/ThemeContext';
 import { BACKEND_URL }                 from '../src/config';
+import { impactLight }                 from '../src/utils/haptics';
 
 const DRAFT_KEY = 'preview_draft';
 
@@ -643,17 +644,40 @@ export default function PreviewScreen({ navigation, route }: Props) {
         {totalPages > 1 && (
           <View style={styles.pageNav}>
             <Pressable
-              style={[styles.pageNavBtn, currentPage === 0 && styles.pageNavBtnOff]}
-              onPress={() => setCurrentPage(p => Math.max(0, p - 1))}
+              style={({ pressed }) => [
+                styles.pageNavBtn,
+                currentPage === 0 && styles.pageNavBtnOff,
+                pressed && currentPage > 0 && { opacity: 0.6, transform: [{ scale: 0.92 }] },
+              ]}
+              onPress={() => { impactLight(); setCurrentPage(p => Math.max(0, p - 1)); }}
               disabled={currentPage === 0}
+              hitSlop={12}
+              accessibilityRole="button"
+              accessibilityLabel="דף קודם"
+              accessibilityHint={`כרגע דף ${currentPage + 1} מתוך ${totalPages}`}
+              accessibilityState={{ disabled: currentPage === 0 }}
             >
               <Text style={styles.pageNavArrow}>‹</Text>
             </Pressable>
-            <Text style={styles.pageNavLabel}>{currentPage + 1} / {totalPages}</Text>
+            <Text
+              style={styles.pageNavLabel}
+              accessibilityLabel={`דף ${currentPage + 1} מתוך ${totalPages}`}
+            >
+              {currentPage + 1} / {totalPages}
+            </Text>
             <Pressable
-              style={[styles.pageNavBtn, currentPage === totalPages - 1 && styles.pageNavBtnOff]}
-              onPress={() => setCurrentPage(p => Math.min(totalPages - 1, p + 1))}
+              style={({ pressed }) => [
+                styles.pageNavBtn,
+                currentPage === totalPages - 1 && styles.pageNavBtnOff,
+                pressed && currentPage < totalPages - 1 && { opacity: 0.6, transform: [{ scale: 0.92 }] },
+              ]}
+              onPress={() => { impactLight(); setCurrentPage(p => Math.min(totalPages - 1, p + 1)); }}
               disabled={currentPage === totalPages - 1}
+              hitSlop={12}
+              accessibilityRole="button"
+              accessibilityLabel="דף הבא"
+              accessibilityHint={`כרגע דף ${currentPage + 1} מתוך ${totalPages}`}
+              accessibilityState={{ disabled: currentPage === totalPages - 1 }}
             >
               <Text style={styles.pageNavArrow}>›</Text>
             </Pressable>
@@ -723,12 +747,16 @@ export default function PreviewScreen({ navigation, route }: Props) {
             {(['black', 'blue', 'red'] as InkColor[]).map(c => (
               <Pressable
                 key={c}
-                style={[
+                style={({ pressed }) => [
                   styles.inkBtn,
                   { borderColor: INK_COLORS[c] },
                   inkColor === c && { backgroundColor: INK_COLORS[c] },
+                  pressed && inkColor !== c && { opacity: 0.6, transform: [{ scale: 0.96 }] },
                 ]}
-                onPress={() => setInkColor(c)}
+                onPress={() => { if (inkColor !== c) { impactLight(); setInkColor(c); } }}
+                accessibilityRole="button"
+                accessibilityLabel={`צבע דיו ${INK_LABELS[c]}`}
+                accessibilityState={{ selected: inkColor === c }}
               >
                 <View style={[
                   styles.inkDot,
@@ -748,11 +776,15 @@ export default function PreviewScreen({ navigation, route }: Props) {
             {(['lines', 'grid', 'blank'] as PageBg[]).map(bg => (
               <Pressable
                 key={bg}
-                style={[
+                style={({ pressed }) => [
                   styles.bgBtn,
                   pageBg === bg && { borderColor: colors.accent, backgroundColor: colors.accentLight },
+                  pressed && pageBg !== bg && { opacity: 0.6, transform: [{ scale: 0.96 }] },
                 ]}
-                onPress={() => setPageBg(bg)}
+                onPress={() => { if (pageBg !== bg) { impactLight(); setPageBg(bg); } }}
+                accessibilityRole="button"
+                accessibilityLabel={`רקע ${BG_LABELS[bg]}`}
+                accessibilityState={{ selected: pageBg === bg }}
               >
                 <Text style={[styles.bgLabel, { color: pageBg === bg ? colors.accent : colors.inkMid }]}>
                   {BG_LABELS[bg]}
@@ -767,8 +799,12 @@ export default function PreviewScreen({ navigation, route }: Props) {
         <View style={styles.finishBar}>
           <Pressable
             style={({ pressed }) => [styles.finishBtn, pressed && styles.finishBtnPressed]}
-            onPress={handleFinish}
+            onPress={() => { impactLight(); handleFinish(); }}
             disabled={!isLoaded}
+            accessibilityRole="button"
+            accessibilityLabel="סיום עריכה"
+            accessibilityHint="עובר למסך התוצאה הסופית עם אפשרויות שמירה ושיתוף"
+            accessibilityState={{ disabled: !isLoaded }}
           >
             <Text style={styles.finishBtnText}>סיום עריכה</Text>
           </Pressable>

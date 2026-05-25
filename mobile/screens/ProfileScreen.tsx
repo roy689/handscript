@@ -16,6 +16,7 @@ import { signOut } from '../src/services/auth';
 import { useTheme, type ThemeColors } from '../src/contexts/ThemeContext';
 import { fonts, radius, shadow } from '../src/theme';
 import { BACKEND_URL } from '../src/config';
+import { impactLight } from '../src/utils/haptics';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Profile'>;
 
@@ -119,9 +120,13 @@ export default function ProfileScreen({ navigation }: Props) {
           <Pressable
             style={({ pressed }) => [
               styles.settingsChip,
-              pressed && { opacity: 0.72 },
+              pressed && { opacity: 0.72, transform: [{ scale: 0.97 }] },
             ]}
-            onPress={() => navigation.navigate('Settings')}
+            onPress={() => { impactLight(); navigation.navigate('Settings'); }}
+            hitSlop={8}
+            accessibilityRole="button"
+            accessibilityLabel="פתח הגדרות"
+            accessibilityHint="עובר למסך הגדרות האפליקציה"
           >
             <Text style={styles.settingsChipText}>הגדרות</Text>
           </Pressable>
@@ -152,6 +157,10 @@ export default function ProfileScreen({ navigation }: Props) {
             style={({ pressed }) => [styles.actionRow, pressed && styles.actionRowPressed]}
             onPress={handleSignOut}
             disabled={signingOut}
+            accessibilityRole="button"
+            accessibilityLabel={signingOut ? 'מתנתק...' : 'התנתק'}
+            accessibilityHint="יציאה מהחשבון. ניתן להיכנס שוב בכל עת"
+            accessibilityState={{ disabled: signingOut, busy: signingOut }}
           >
             {signingOut
               ? <ActivityIndicator size="small" color={colors.inkMid} />
@@ -170,6 +179,10 @@ export default function ProfileScreen({ navigation }: Props) {
             ]}
             onPress={handleDeleteAccount}
             disabled={deletingAcc}
+            accessibilityRole="button"
+            accessibilityLabel={deletingAcc ? 'מוחק חשבון...' : 'מחק חשבון לצמיתות'}
+            accessibilityHint="מחיקה לצמיתות של החשבון וכל הנתונים. פעולה בלתי הפיכה ודורשת אישור"
+            accessibilityState={{ disabled: deletingAcc, busy: deletingAcc }}
           >
             {deletingAcc
               ? <ActivityIndicator size="small" color={colors.danger} />

@@ -342,13 +342,23 @@ export default function HandwritingCustomizerScreen({ navigation: _navigation }:
         <Pressable
           style={({ pressed }) => [styles.resetBtn, pressed && { opacity: 0.7 }]}
           onPress={handleReset}
+          accessibilityRole="button"
+          accessibilityLabel="איפוס הגדרות לברירת מחדל"
+          accessibilityHint="מחזיר את כל הסליידרים לערכים המומלצים"
         >
           <Text style={styles.resetBtnText}>איפוס</Text>
         </Pressable>
         <Pressable
-          style={({ pressed }) => [styles.saveBtn, pressed && { opacity: 0.88 }]}
+          style={({ pressed }) => [
+            styles.saveBtn,
+            pressed && { opacity: 0.88 },
+            saving && { opacity: 0.6 },
+          ]}
           onPress={handleSave}
           disabled={saving}
+          accessibilityRole="button"
+          accessibilityLabel={saving ? 'שומר הגדרות...' : 'שמור הגדרות'}
+          accessibilityState={{ disabled: saving, busy: saving }}
         >
           {saving
             ? <ActivityIndicator color="#fff" />

@@ -70,17 +70,17 @@ export default function PaywallScreen({ navigation }: Props) {
 
   function handlePurchase(_tierId: string) {
     Alert.alert(
-      'בקרוב',
-      'רכישות יהיו זמינות בקרוב. תודה על הסבלנות!',
-      [{ text: 'הבנתי' }],
+      'המסלולים בדרך',
+      'תכניות Pro נמצאות בפיתוח ויהיו זמינות בקרוב. בינתיים תוכל ליהנות מ-5 המרות חינם ביום.',
+      [{ text: 'הבנתי', style: 'default' }],
     );
   }
 
   function handleRestore() {
     Alert.alert(
       'שחזור רכישות',
-      'לא נמצאו רכישות קודמות לשחזור.',
-      [{ text: 'אישור' }],
+      'לא נמצאו רכישות קודמות. כאשר תכניות Pro יושקו, תוכל לשחזר את הרכישה כאן.',
+      [{ text: 'אישור', style: 'default' }],
     );
   }
 
@@ -133,14 +133,21 @@ export default function PaywallScreen({ navigation }: Props) {
                 style={({ pressed }) => [
                   styles.ctaBtn,
                   tier.highlight && styles.ctaBtnHL,
-                  pressed && { opacity: 0.82 },
+                  styles.ctaBtnComingSoon,
+                  pressed && { opacity: 0.7 },
                 ]}
                 onPress={() => handlePurchase(tier.id)}
+                accessibilityRole="button"
+                accessibilityLabel={`${tier.name} — בקרוב`}
+                accessibilityHint="המסלולים בפיתוח, לא ניתן לרכוש כרגע"
               >
+                <Text style={[
+                  styles.comingSoonLabel,
+                  tier.highlight ? styles.comingSoonLabelHL : styles.comingSoonLabelDim,
+                ]}>בקרוב</Text>
                 <Text style={[styles.ctaText, tier.highlight && styles.ctaTextHL]}>
                   {tier.cta}
                 </Text>
-                <Text style={styles.comingSoon}>בקרוב</Text>
               </Pressable>
             ) : (
               <View style={styles.currentPlan}>
@@ -307,6 +314,10 @@ function getStyles(colors: ThemeColors) {
       gap: 2,
     },
     ctaBtnHL: { backgroundColor: PRO },
+    ctaBtnComingSoon: {
+      // Slight visual de-emphasis to signal "not yet available"
+      opacity: 0.85,
+    },
     ctaText: {
       fontSize: 14,
       fontWeight: '700',
@@ -314,11 +325,14 @@ function getStyles(colors: ThemeColors) {
       writingDirection: 'rtl',
     },
     ctaTextHL: { color: '#fff' },
-    comingSoon: {
+    comingSoonLabel: {
       fontSize: 10,
-      color: 'rgba(255,255,255,0.65)',
-      letterSpacing: 0.5,
+      fontWeight: '800',
+      letterSpacing: 1.4,
+      marginBottom: 2,
     },
+    comingSoonLabelHL: { color: 'rgba(255,255,255,0.95)' },
+    comingSoonLabelDim: { color: colors.inkFaint },
     currentPlan: {
       width: '100%',
       borderRadius: radius.md,

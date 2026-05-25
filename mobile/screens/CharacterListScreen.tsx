@@ -184,6 +184,13 @@ export default function CharacterListScreen({ navigation }: Props) {
               }}
               onLongPress={() => handleLongPress(char)}
               delayLongPress={400}
+              accessibilityRole="button"
+              accessibilityLabel={done
+                ? `תו ${char} — ${s.count} דגימות שמורות`
+                : `תו ${char} — טרם נסרק`}
+              accessibilityHint={done
+                ? 'לחיצה: עיון בדגמים. לחיצה ארוכה: מחיקה'
+                : 'לחיצה: התחל לסרוק דגימות של התו'}
             >
               <Text style={[styles.charGlyph, done && styles.charGlyphDone]}>
                 {char}
@@ -244,6 +251,8 @@ export default function CharacterListScreen({ navigation }: Props) {
             <Pressable
               hitSlop={12}
               onPress={() => { setSearchChar(''); impactLight(); }}
+              accessibilityRole="button"
+              accessibilityLabel="נקה חיפוש"
             >
               <Text style={styles.searchClearText}>✕</Text>
             </Pressable>
@@ -263,7 +272,10 @@ export default function CharacterListScreen({ navigation }: Props) {
             <Pressable
               key={sec.key}
               style={({ pressed }) => [styles.tabPill, pressed && styles.tabPillPressed]}
-              onPress={() => scrollToSection(idx)}
+              onPress={() => { impactLight(); scrollToSection(idx); }}
+              accessibilityRole="button"
+              accessibilityLabel={`גלול ל${sec.title}`}
+              accessibilityHint="גלילה לקטגוריה ברשימת התווים"
             >
               <Text style={styles.tabPillText}>{sec.title}</Text>
             </Pressable>
@@ -326,6 +338,11 @@ export default function CharacterListScreen({ navigation }: Props) {
             pressed && styles.ctaBtnPressed,
           ]}
           onPress={() => { impactMedium(); navigation.navigate('Editor'); }}
+          accessibilityRole="button"
+          accessibilityLabel={captured > 0
+            ? `המשך לעורך עם ${captured} תווים מוכנים`
+            : 'דלג לעורך ללא תווים שמורים'}
+          accessibilityHint="עובר למסך עורך הטקסט ליצירת מסמך בכתב יד"
         >
           <Text style={[styles.ctaText, captured === 0 && styles.ctaTextDim]}>
             {captured > 0

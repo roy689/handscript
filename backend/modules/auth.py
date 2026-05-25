@@ -105,7 +105,16 @@ def _get_firebase_app():
             )
             return None
 
-        _firebase_app = firebase_admin.initialize_app(cred)
+        # Initialise WITH storageBucket so firebase_storage can use storage.bucket()
+        # later without re-initialising. firebase_storage._ensure_init() will reuse
+        # this app, and `storage.bucket()` only works when the bucket name is set
+        # in the initialize_app options.
+        bucket_name = os.getenv(
+            "FIREBASE_STORAGE_BUCKET",
+            "a-written-scanner.firebasestorage.app",
+        )
+        _firebase_app = firebase_admin.initialize_app(cred, {"storageBucket": bucket_name})
+        logger.info("auth: Firebase Admin SDK initialised with bucket=%s", bucket_name)
         return _firebase_app
     except ImportError:
         logger.warning("auth: firebase_admin not installed — run `pip install firebase-admin`")

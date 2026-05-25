@@ -18,7 +18,7 @@ import { fonts, radius, shadow } from '../src/theme';
 import { useTheme, type ThemeColors } from '../src/contexts/ThemeContext';
 import LoadingOverlay        from '../src/components/LoadingOverlay';
 import HandwritingOverlay   from '../src/components/HandwritingOverlay';
-import { impactMedium } from '../src/utils/haptics';
+import { impactLight, impactMedium } from '../src/utils/haptics';
 import { fetchJSON, withRetry, toErrorMessage, OfflineError } from '../src/utils/api';
 import { BACKEND_URL } from '../src/config';
 import NetInfo from '@react-native-community/netinfo';
@@ -230,8 +230,11 @@ export default function EditorScreen({ navigation }: Props) {
         <View style={styles.header}>
           <Pressable
             style={({ pressed }) => [styles.backBtn, pressed && { opacity: 0.5 }]}
-            onPress={() => navigation.navigate('CharacterList')}
+            onPress={() => { impactLight(); navigation.navigate('CharacterList'); }}
             hitSlop={12}
+            accessibilityRole="button"
+            accessibilityLabel="חזור למאגר אותיות"
+            accessibilityHint="מעבר חזרה למסך המאגר. הטקסט יישמר אוטומטית"
           >
             <Text style={styles.backArrow}>←</Text>
           </Pressable>
@@ -286,6 +289,12 @@ export default function EditorScreen({ navigation }: Props) {
             ]}
             disabled={!canConvert}
             onPress={() => { impactMedium(); handleConvert(); }}
+            accessibilityRole="button"
+            accessibilityLabel={converting ? 'ממיר טקסט לכתב יד...' : 'המר לכתב יד'}
+            accessibilityHint={canConvert
+              ? 'שולח את הטקסט לשרת ויוצר תמונה בכתב היד האישי שלך'
+              : 'נדרש לכתוב טקסט קודם'}
+            accessibilityState={{ disabled: !canConvert, busy: converting }}
           >
             <Text style={[styles.convertLabel, !canConvert && styles.convertLabelOff]}>
               המר לכתב יד

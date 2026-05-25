@@ -38,19 +38,41 @@ export default function CharacterConfigScreen({ route, navigation }: Props) {
 
         <View style={styles.counter}>
           <Pressable
-            style={({ pressed }) => [styles.counterBtn, pressed && { opacity: 0.7 }]}
+            style={({ pressed }) => [
+              styles.counterBtn,
+              count <= 1 && styles.counterBtnDisabled,
+              pressed && count > 1 && { opacity: 0.7 },
+            ]}
             onPress={dec}
+            disabled={count <= 1}
+            hitSlop={12}
+            accessibilityRole="button"
+            accessibilityLabel="הקטן מספר דגימות"
+            accessibilityHint={`כרגע ${count} דגימות. לחץ להקטין באחת. מינימום 1`}
+            accessibilityState={{ disabled: count <= 1 }}
           >
-            <Text style={styles.counterBtnText}>−</Text>
+            <Text style={[styles.counterBtnText, count <= 1 && styles.counterBtnTextDisabled]}>−</Text>
           </Pressable>
 
-          <Text style={styles.counterVal}>{count}</Text>
+          <Text style={styles.counterVal} accessibilityLabel={`${count} דגימות נבחרו`}>
+            {count}
+          </Text>
 
           <Pressable
-            style={({ pressed }) => [styles.counterBtn, pressed && { opacity: 0.7 }]}
+            style={({ pressed }) => [
+              styles.counterBtn,
+              count >= 10 && styles.counterBtnDisabled,
+              pressed && count < 10 && { opacity: 0.7 },
+            ]}
             onPress={inc}
+            disabled={count >= 10}
+            hitSlop={12}
+            accessibilityRole="button"
+            accessibilityLabel="הגדל מספר דגימות"
+            accessibilityHint={`כרגע ${count} דגימות. לחץ להגדיל באחת. מקסימום 10`}
+            accessibilityState={{ disabled: count >= 10 }}
           >
-            <Text style={styles.counterBtnText}>+</Text>
+            <Text style={[styles.counterBtnText, count >= 10 && styles.counterBtnTextDisabled]}>+</Text>
           </Pressable>
         </View>
 
@@ -65,8 +87,11 @@ export default function CharacterConfigScreen({ route, navigation }: Props) {
 
       <View style={styles.footer}>
         <Pressable
-          style={({ pressed }) => [styles.startBtn, pressed && { opacity: 0.88 }]}
-          onPress={() => navigation.navigate('CharacterCapture', { character, totalSamples: count })}
+          style={({ pressed }) => [styles.startBtn, pressed && { opacity: 0.88, transform: [{ scale: 0.98 }] }]}
+          onPress={() => { impactLight(); navigation.navigate('CharacterCapture', { character, totalSamples: count }); }}
+          accessibilityRole="button"
+          accessibilityLabel={`התחל צילום ${count} דגימות של התו ${character}`}
+          accessibilityHint="עובר למסך צילום או ציור של התו"
         >
           <Text style={styles.startBtnText}>התחל צילום</Text>
         </Pressable>
@@ -100,7 +125,13 @@ function getStyles(colors: ReturnType<typeof useTheme>['colors']) {
       justifyContent: 'center',
       ...shadow.btn,
     },
+    counterBtnDisabled: {
+      backgroundColor: colors.border,
+      shadowOpacity: 0,
+      elevation: 0,
+    },
     counterBtnText: { fontSize: 30, color: '#fff', fontFamily: fonts.bold, lineHeight: 34 },
+    counterBtnTextDisabled: { color: colors.inkFaint },
     counterVal: {
       fontSize: 48,
       fontFamily: fonts.extraBold,
