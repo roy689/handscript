@@ -7,11 +7,22 @@ import React, {
 } from 'react';
 import { PanResponder, StyleSheet, View } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import { WebView } from 'react-native-webview';
 
-// SVG→PNG conversion via hidden WebView (react-native-view-shot was removed — caused native crash on standalone APK)
-// The WebView renders the SVG on a <canvas> and postMessages back base64 PNG.
+// ── DrawingCanvas ─────────────────────────────────────────────────────────────
+//
+// Architecture:
+//   - Touch events are captured via PanResponder → drawn visually with react-native-svg
+//   - Raw point arrays are stored in a ref (completedStrokes) alongside the SVG paths
+//   - On getImageUri(), raw points are sent to a hidden WebView that renders them
+//     directly on a <canvas> element and returns a PNG base64 string
+//   - This avoids the SVG→img loading path which is blocked in sandboxed WebViews
+//
+// Previous approach (SVG via data URL) failed because:
+//   a) data:image/svg+xml URLs are blocked in the RN WebView sandbox
+//   b) A race condition cleared resolveCapture/rejectCapture refs before
+//      FileSystem.writeAsStringAsync completed, causing silent Promise hangs
 
 export interface BoundingBox {
   x: number; y: number; width: number; height: number;
@@ -45,28 +56,56 @@ function buildSvgPath(pts: Point[]): string {
   return d;
 }
 
-// Static HTML for the hidden WebView converter
+// Hidden WebView renders strokes directly on <canvas> — no SVG loading step.
+// Receives: array of stroke arrays (each stroke = [{x,y}, ...])
+// Returns:  { ok: true, base64: "..." } or { ok: false, error: "..." }
 const CONVERTER_HTML = `<!DOCTYPE html>
 <html><body style="margin:0;padding:0;background:white;">
+<canvas id="c"></canvas>
 <script>
-window.convertSvg = function(svgString, w, h) {
+window.drawStrokes = function(strokes, strokeWidth, w, h) {
   try {
-    var canvas = document.createElement('canvas');
-    canvas.width = w; canvas.height = h;
+    var canvas = document.getElementById('c');
+    canvas.width  = w;
+    canvas.height = h;
     var ctx = canvas.getContext('2d');
+
+    // White background
     ctx.fillStyle = 'white';
     ctx.fillRect(0, 0, w, h);
-    var img = new Image();
-    img.onload = function() {
-      ctx.drawImage(img, 0, 0, w, h);
-      var base64 = canvas.toDataURL('image/png').split(',')[1];
-      window.ReactNativeWebView.postMessage(JSON.stringify({ ok: true, base64: base64 }));
-    };
-    img.onerror = function() {
-      window.ReactNativeWebView.postMessage(JSON.stringify({ ok: false, error: 'img load failed' }));
-    };
-    var encoded = encodeURIComponent(svgString);
-    img.src = 'data:image/svg+xml,' + encoded;
+
+    // Draw each stroke
+    ctx.strokeStyle = '#111111';
+    ctx.lineWidth   = strokeWidth;
+    ctx.lineCap     = 'round';
+    ctx.lineJoin    = 'round';
+
+    for (var s = 0; s < strokes.length; s++) {
+      var pts = strokes[s];
+      if (!pts || pts.length === 0) continue;
+
+      if (pts.length === 1) {
+        // Single tap → filled dot
+        ctx.beginPath();
+        ctx.arc(pts[0].x, pts[0].y, strokeWidth / 2, 0, Math.PI * 2);
+        ctx.fillStyle = '#111111';
+        ctx.fill();
+        continue;
+      }
+
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (var i = 1; i < pts.length - 1; i++) {
+        var mx = (pts[i].x + pts[i+1].x) / 2;
+        var my = (pts[i].y + pts[i+1].y) / 2;
+        ctx.quadraticCurveTo(pts[i].x, pts[i].y, mx, my);
+      }
+      ctx.lineTo(pts[pts.length-1].x, pts[pts.length-1].y);
+      ctx.stroke();
+    }
+
+    var base64 = canvas.toDataURL('image/png').split(',')[1];
+    window.ReactNativeWebView.postMessage(JSON.stringify({ ok: true, base64: base64 }));
   } catch(e) {
     window.ReactNativeWebView.postMessage(JSON.stringify({ ok: false, error: String(e) }));
   }
@@ -75,17 +114,21 @@ window.convertSvg = function(svgString, w, h) {
 </body></html>`;
 
 const DrawingCanvas = forwardRef<DrawingCanvasRef, Props>(({ size }, ref) => {
+  // SVG path strings — used only for live visual rendering via react-native-svg
   const [completedPaths, setCompletedPaths] = useState<string[]>([]);
   const [activePath,     setActivePath]     = useState('');
-  const activePoints = useRef<Point[]>([]);
-  const allPoints    = useRef<Point[]>([]);
-  const lastUriRef   = useRef<string | null>(null);
 
-  // WebView refs for SVG→PNG conversion
-  const webViewRef      = useRef<WebView>(null);
-  const webViewReady    = useRef(false);
-  const resolveCapture  = useRef<((uri: string) => void) | null>(null);
-  const rejectCapture   = useRef<((e: Error) => void) | null>(null);
+  // Raw point arrays — sent to WebView for PNG conversion (avoids SVG parsing)
+  const completedStrokes = useRef<Point[][]>([]);
+  const activePoints     = useRef<Point[]>([]);
+  const allPoints        = useRef<Point[]>([]);
+  const lastUriRef       = useRef<string | null>(null);
+
+  // WebView refs for canvas rendering
+  const webViewRef     = useRef<WebView>(null);
+  const webViewReady   = useRef(false);
+  const resolveCapture = useRef<((uri: string) => void) | null>(null);
+  const rejectCapture  = useRef<((e: Error) => void) | null>(null);
 
   const panResponder = useRef(
     PanResponder.create({
@@ -107,15 +150,23 @@ const DrawingCanvas = forwardRef<DrawingCanvasRef, Props>(({ size }, ref) => {
       },
 
       onPanResponderRelease: () => {
-        const d = buildSvgPath(activePoints.current);
-        if (d) setCompletedPaths(prev => [...prev, d]);
+        const pts = [...activePoints.current];
+        const d   = buildSvgPath(pts);
+        if (d) {
+          setCompletedPaths(prev => [...prev, d]);
+          completedStrokes.current.push(pts);
+        }
         activePoints.current = [];
         setActivePath('');
       },
 
       onPanResponderTerminate: () => {
-        const d = buildSvgPath(activePoints.current);
-        if (d) setCompletedPaths(prev => [...prev, d]);
+        const pts = [...activePoints.current];
+        const d   = buildSvgPath(pts);
+        if (d) {
+          setCompletedPaths(prev => [...prev, d]);
+          completedStrokes.current.push(pts);
+        }
         activePoints.current = [];
         setActivePath('');
       },
@@ -129,73 +180,83 @@ const DrawingCanvas = forwardRef<DrawingCanvasRef, Props>(({ size }, ref) => {
     }
     setCompletedPaths([]);
     setActivePath('');
-    activePoints.current = [];
-    allPoints.current    = [];
+    activePoints.current     = [];
+    allPoints.current        = [];
+    completedStrokes.current = [];
   }, []);
 
-  // Called when the hidden WebView finishes loading — now safe to inject JS
+  // Called when WebView HTML finishes loading — safe to inject JS after this
   const onWebViewLoad = useCallback(() => {
     webViewReady.current = true;
   }, []);
 
-  // Receives the base64 PNG back from the WebView canvas
+  // Receives the PNG base64 back from the WebView canvas.
+  // IMPORTANT: refs are grabbed into locals BEFORE clearing them — this fixes
+  // the race condition where the catch block ran after refs were already null.
   const onWebViewMessage = useCallback(async (event: { nativeEvent: { data: string } }) => {
+    // Grab resolve/reject into locals and immediately clear refs
+    const resolve = resolveCapture.current;
+    const reject  = rejectCapture.current;
+    resolveCapture.current = null;
+    rejectCapture.current  = null;
+
+    if (!resolve || !reject) return; // stale or duplicate message
+
     try {
       const msg = JSON.parse(event.nativeEvent.data) as { ok: boolean; base64?: string; error?: string };
-      if (msg.ok && msg.base64 && resolveCapture.current) {
-        const resolve = resolveCapture.current;
-        resolveCapture.current = null;
-        rejectCapture.current  = null;
-        const uri = (FileSystem.cacheDirectory ?? '') + `drawing_${Date.now()}.png`;
-        await FileSystem.writeAsStringAsync(uri, msg.base64, { encoding: FileSystem.EncodingType.Base64 });
+      if (msg.ok && msg.base64) {
+        const uri = `${FileSystem.cacheDirectory ?? ''}drawing_${Date.now()}.png`;
+        await FileSystem.writeAsStringAsync(uri, msg.base64, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
         lastUriRef.current = uri;
         resolve(uri);
-      } else if (!msg.ok && rejectCapture.current) {
-        const reject = rejectCapture.current;
-        resolveCapture.current = null;
-        rejectCapture.current  = null;
-        reject(new Error(msg.error ?? 'WebView conversion failed'));
+      } else {
+        reject(new Error(msg.error ?? 'WebView canvas rendering failed'));
       }
     } catch (e) {
-      rejectCapture.current?.(e instanceof Error ? e : new Error(String(e)));
-      resolveCapture.current = null;
-      rejectCapture.current  = null;
+      // FileSystem.writeAsStringAsync failed — reject with the actual error
+      reject(e instanceof Error ? e : new Error(String(e)));
     }
   }, []);
 
   /**
-   * Converts the current drawing to a PNG by rendering the SVG on a WebView <canvas>.
-   * Returns a file:// URI pointing to a PNG — compatible with <Image> and the backend.
+   * Renders all drawn strokes to a PNG via the hidden WebView <canvas>.
+   * Returns a file:// URI — compatible with <Image> and the backend.
    */
   const getImageUri = useCallback((): Promise<string> => {
     return new Promise((resolve, reject) => {
-      const allPaths = [...completedPaths, activePath].filter(Boolean);
-      const strokeW  = Math.max(8, size * 0.026);
-
-      const svgContent = `<?xml version="1.0" encoding="utf-8"?><svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><rect width="${size}" height="${size}" fill="white"/>${allPaths.map(d => `<path d="${d}" stroke="#111111" stroke-width="${strokeW}" stroke-linecap="round" stroke-linejoin="round" fill="none"/>`).join('')}</svg>`;
-
       if (!webViewRef.current || !webViewReady.current) {
-        reject(new Error('WebView not ready'));
+        reject(new Error('WebView not ready — wait a moment and try again'));
         return;
       }
+
+      // Include any in-progress active stroke
+      const allStrokes: Point[][] = [...completedStrokes.current];
+      if (activePoints.current.length > 0) {
+        allStrokes.push([...activePoints.current]);
+      }
+
+      const strokeW = Math.max(8, size * 0.026);
 
       resolveCapture.current = resolve;
       rejectCapture.current  = reject;
 
-      // Pass SVG as JSON-encoded string so all characters are safely escaped
-      const svgJson = JSON.stringify(svgContent);
-      webViewRef.current.injectJavaScript(`window.convertSvg(${svgJson}, ${size}, ${size}); true;`);
+      webViewRef.current.injectJavaScript(
+        `window.drawStrokes(${JSON.stringify(allStrokes)}, ${strokeW}, ${size}, ${size}); true;`,
+      );
 
-      // Timeout safety net
+      // Safety timeout — cancels the hanging promise if WebView never responds
       setTimeout(() => {
         if (resolveCapture.current === resolve) {
           resolveCapture.current = null;
           rejectCapture.current  = null;
-          reject(new Error('SVG→PNG conversion timed out'));
+          reject(new Error('Canvas rendering timed out — try again'));
         }
-      }, 10_000);
+      }, 8_000);
     });
-  }, [completedPaths, activePath, size]);
+  }, [size]);
+  // completedStrokes and activePoints are refs — always current, no dep needed
 
   const hasStrokes = useCallback(
     () => completedPaths.length > 0 || activePath.length > 0,
@@ -223,10 +284,8 @@ const DrawingCanvas = forwardRef<DrawingCanvasRef, Props>(({ size }, ref) => {
   );
 
   return (
-    <View
-      style={[styles.wrapper, { width: size, height: size }]}
-    >
-      {/* Hidden WebView — converts SVG paths to PNG via <canvas> */}
+    <View style={[styles.wrapper, { width: size, height: size }]}>
+      {/* Hidden WebView — renders strokes on <canvas> and returns PNG base64 */}
       <WebView
         ref={webViewRef}
         source={{ html: CONVERTER_HTML }}
@@ -235,9 +294,9 @@ const DrawingCanvas = forwardRef<DrawingCanvasRef, Props>(({ size }, ref) => {
         javaScriptEnabled
         style={styles.hiddenWebView}
         scrollEnabled={false}
-        pointerEvents="none"
       />
 
+      {/* Live SVG preview of what the user is drawing */}
       <Svg width={size} height={size} style={StyleSheet.absoluteFill} pointerEvents="none">
         {completedPaths.map((d, i) => (
           <Path
@@ -262,7 +321,7 @@ const DrawingCanvas = forwardRef<DrawingCanvasRef, Props>(({ size }, ref) => {
         ) : null}
       </Svg>
 
-      {/* Touch capture layer */}
+      {/* Touch capture layer — must be last so it sits on top */}
       <View style={StyleSheet.absoluteFill} {...panResponder.panHandlers} />
     </View>
   );
@@ -277,11 +336,11 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     backgroundColor: '#fff',
   },
-  // Invisible WebView for SVG→PNG conversion — 1×1 so JS runs but takes no space
+  // 1×1 invisible — JS runs but takes no visual space
   hiddenWebView: {
     position: 'absolute',
-    width: 1,
-    height: 1,
-    opacity: 0,
+    width:    1,
+    height:   1,
+    opacity:  0,
   },
 });
