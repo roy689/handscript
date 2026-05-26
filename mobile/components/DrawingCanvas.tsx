@@ -8,9 +8,10 @@ import React, {
 import { PanResponder, StyleSheet, View } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 import * as FileSystem from 'expo-file-system';
+import { WebView } from 'react-native-webview';
 
-// ViewShot replaced with expo-file-system + SVG-to-PNG via expo-image-manipulator
-// react-native-view-shot removed — it caused native crash on standalone APK
+// SVG→PNG conversion via hidden WebView (react-native-view-shot was removed — caused native crash on standalone APK)
+// The WebView renders the SVG on a <canvas> and postMessages back base64 PNG.
 
 export interface BoundingBox {
   x: number; y: number; width: number; height: number;
@@ -44,12 +45,47 @@ function buildSvgPath(pts: Point[]): string {
   return d;
 }
 
+// Static HTML for the hidden WebView converter
+const CONVERTER_HTML = `<!DOCTYPE html>
+<html><body style="margin:0;padding:0;background:white;">
+<script>
+window.convertSvg = function(svgString, w, h) {
+  try {
+    var canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+    var ctx = canvas.getContext('2d');
+    ctx.fillStyle = 'white';
+    ctx.fillRect(0, 0, w, h);
+    var img = new Image();
+    img.onload = function() {
+      ctx.drawImage(img, 0, 0, w, h);
+      var base64 = canvas.toDataURL('image/png').split(',')[1];
+      window.ReactNativeWebView.postMessage(JSON.stringify({ ok: true, base64: base64 }));
+    };
+    img.onerror = function() {
+      window.ReactNativeWebView.postMessage(JSON.stringify({ ok: false, error: 'img load failed' }));
+    };
+    var encoded = encodeURIComponent(svgString);
+    img.src = 'data:image/svg+xml,' + encoded;
+  } catch(e) {
+    window.ReactNativeWebView.postMessage(JSON.stringify({ ok: false, error: String(e) }));
+  }
+};
+</script>
+</body></html>`;
+
 const DrawingCanvas = forwardRef<DrawingCanvasRef, Props>(({ size }, ref) => {
   const [completedPaths, setCompletedPaths] = useState<string[]>([]);
   const [activePath,     setActivePath]     = useState('');
   const activePoints = useRef<Point[]>([]);
   const allPoints    = useRef<Point[]>([]);
   const lastUriRef   = useRef<string | null>(null);
+
+  // WebView refs for SVG→PNG conversion
+  const webViewRef      = useRef<WebView>(null);
+  const webViewReady    = useRef(false);
+  const resolveCapture  = useRef<((uri: string) => void) | null>(null);
+  const rejectCapture   = useRef<((e: Error) => void) | null>(null);
 
   const panResponder = useRef(
     PanResponder.create({
@@ -97,26 +133,68 @@ const DrawingCanvas = forwardRef<DrawingCanvasRef, Props>(({ size }, ref) => {
     allPoints.current    = [];
   }, []);
 
+  // Called when the hidden WebView finishes loading — now safe to inject JS
+  const onWebViewLoad = useCallback(() => {
+    webViewReady.current = true;
+  }, []);
+
+  // Receives the base64 PNG back from the WebView canvas
+  const onWebViewMessage = useCallback(async (event: { nativeEvent: { data: string } }) => {
+    try {
+      const msg = JSON.parse(event.nativeEvent.data) as { ok: boolean; base64?: string; error?: string };
+      if (msg.ok && msg.base64 && resolveCapture.current) {
+        const resolve = resolveCapture.current;
+        resolveCapture.current = null;
+        rejectCapture.current  = null;
+        const uri = (FileSystem.cacheDirectory ?? '') + `drawing_${Date.now()}.png`;
+        await FileSystem.writeAsStringAsync(uri, msg.base64, { encoding: FileSystem.EncodingType.Base64 });
+        lastUriRef.current = uri;
+        resolve(uri);
+      } else if (!msg.ok && rejectCapture.current) {
+        const reject = rejectCapture.current;
+        resolveCapture.current = null;
+        rejectCapture.current  = null;
+        reject(new Error(msg.error ?? 'WebView conversion failed'));
+      }
+    } catch (e) {
+      rejectCapture.current?.(e instanceof Error ? e : new Error(String(e)));
+      resolveCapture.current = null;
+      rejectCapture.current  = null;
+    }
+  }, []);
+
   /**
-   * Captures the canvas by writing an SVG file and returning its URI.
-   * The backend already handles SVG → processing pipeline.
+   * Converts the current drawing to a PNG by rendering the SVG on a WebView <canvas>.
+   * Returns a file:// URI pointing to a PNG — compatible with <Image> and the backend.
    */
-  const getImageUri = useCallback(async (): Promise<string> => {
-    const allPaths = [...completedPaths, activePath].filter(Boolean);
-    const strokeW  = Math.max(8, size * 0.026);
+  const getImageUri = useCallback((): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const allPaths = [...completedPaths, activePath].filter(Boolean);
+      const strokeW  = Math.max(8, size * 0.026);
 
-    const svgContent = `<?xml version="1.0" encoding="utf-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
-  <rect width="${size}" height="${size}" fill="white"/>
-  ${allPaths
-    .map(d => `<path d="${d}" stroke="#111111" stroke-width="${strokeW}" stroke-linecap="round" stroke-linejoin="round" fill="none"/>`)
-    .join('\n  ')}
-</svg>`;
+      const svgContent = `<?xml version="1.0" encoding="utf-8"?><svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><rect width="${size}" height="${size}" fill="white"/>${allPaths.map(d => `<path d="${d}" stroke="#111111" stroke-width="${strokeW}" stroke-linecap="round" stroke-linejoin="round" fill="none"/>`).join('')}</svg>`;
 
-    const uri = FileSystem.cacheDirectory + `drawing_${Date.now()}.svg`;
-    await FileSystem.writeAsStringAsync(uri, svgContent, { encoding: FileSystem.EncodingType.UTF8 });
-    lastUriRef.current = uri;
-    return uri;
+      if (!webViewRef.current || !webViewReady.current) {
+        reject(new Error('WebView not ready'));
+        return;
+      }
+
+      resolveCapture.current = resolve;
+      rejectCapture.current  = reject;
+
+      // Pass SVG as JSON-encoded string so all characters are safely escaped
+      const svgJson = JSON.stringify(svgContent);
+      webViewRef.current.injectJavaScript(`window.convertSvg(${svgJson}, ${size}, ${size}); true;`);
+
+      // Timeout safety net
+      setTimeout(() => {
+        if (resolveCapture.current === resolve) {
+          resolveCapture.current = null;
+          rejectCapture.current  = null;
+          reject(new Error('SVG→PNG conversion timed out'));
+        }
+      }, 10_000);
+    });
   }, [completedPaths, activePath, size]);
 
   const hasStrokes = useCallback(
@@ -148,6 +226,18 @@ const DrawingCanvas = forwardRef<DrawingCanvasRef, Props>(({ size }, ref) => {
     <View
       style={[styles.wrapper, { width: size, height: size }]}
     >
+      {/* Hidden WebView — converts SVG paths to PNG via <canvas> */}
+      <WebView
+        ref={webViewRef}
+        source={{ html: CONVERTER_HTML }}
+        onLoad={onWebViewLoad}
+        onMessage={onWebViewMessage}
+        javaScriptEnabled
+        style={styles.hiddenWebView}
+        scrollEnabled={false}
+        pointerEvents="none"
+      />
+
       <Svg width={size} height={size} style={StyleSheet.absoluteFill} pointerEvents="none">
         {completedPaths.map((d, i) => (
           <Path
@@ -186,5 +276,12 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     overflow: 'hidden',
     backgroundColor: '#fff',
+  },
+  // Invisible WebView for SVG→PNG conversion — 1×1 so JS runs but takes no space
+  hiddenWebView: {
+    position: 'absolute',
+    width: 1,
+    height: 1,
+    opacity: 0,
   },
 });
