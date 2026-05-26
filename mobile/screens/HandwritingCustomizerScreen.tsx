@@ -1,7 +1,6 @@
 import React, { useCallback, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
-  Alert,
   Image,
   Pressable,
   ScrollView,
@@ -10,6 +9,7 @@ import {
   View,
   useWindowDimensions,
 } from 'react-native';
+import { showAlert } from '../src/utils/alert';
 import Slider from '@react-native-community/slider';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFocusEffect } from '@react-navigation/native';
@@ -259,9 +259,9 @@ export default function HandwritingCustomizerScreen({ navigation: _navigation }:
     setSaving(true);
     try {
       await AsyncStorage.setItem(STYLE_STORAGE_KEY, JSON.stringify(hs));
-      Alert.alert('✓ נשמר', 'סגנון כתב היד עודכן בהצלחה');
+      showAlert('✓ נשמר', 'סגנון כתב היד עודכן בהצלחה');
     } catch {
-      Alert.alert('שגיאה', 'השמירה נכשלה');
+      showAlert('שגיאה', 'השמירה נכשלה');
     } finally {
       setSaving(false);
     }
@@ -269,7 +269,7 @@ export default function HandwritingCustomizerScreen({ navigation: _navigation }:
 
   function handleReset() {
     impactLight();
-    Alert.alert('איפוס הגדרות', 'לאפס את כל הפרמטרים לברירת המחדל?', [
+    showAlert('איפוס הגדרות', 'לאפס את כל הפרמטרים לברירת המחדל?', [
       { text: 'ביטול', style: 'cancel' },
       { text: 'אפס', style: 'destructive', onPress: () => setHs(DEFAULT_STYLE) },
     ]);

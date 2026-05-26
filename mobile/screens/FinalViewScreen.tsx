@@ -21,7 +21,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
-  Alert,
   Image,
   Linking,
   Pressable,
@@ -31,6 +30,7 @@ import {
   View,
   useWindowDimensions,
 } from 'react-native';
+import { showAlert } from '../src/utils/alert';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as FileSystem   from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library';
@@ -265,7 +265,7 @@ export default function FinalViewScreen({ navigation, route }: Props) {
     try {
       const { status } = await MediaLibrary.requestPermissionsAsync(true);
       if (status !== 'granted') {
-        Alert.alert('הרשאה נדרשת', 'יש לאשר גישה לגלריה בהגדרות', [
+        showAlert('הרשאה נדרשת', 'יש לאשר גישה לגלריה בהגדרות', [
           { text: 'ביטול', style: 'cancel' },
           { text: 'פתח הגדרות', onPress: () => Linking.openSettings() },
         ]);
@@ -275,9 +275,9 @@ export default function FinalViewScreen({ navigation, route }: Props) {
         const localUri = await downloadToCache(url);
         await MediaLibrary.saveToLibraryAsync(localUri);
       }
-      Alert.alert('נשמר!', pageUrls.length > 1 ? `${pageUrls.length} עמודים נשמרו לגלריה` : 'התמונה נשמרה לגלריה');
+      showAlert('נשמר!', pageUrls.length > 1 ? `${pageUrls.length} עמודים נשמרו לגלריה` : 'התמונה נשמרה לגלריה');
     } catch (e: unknown) {
-      Alert.alert('שגיאה', e instanceof Error ? e.message : 'שמירה נכשלה');
+      showAlert('שגיאה', e instanceof Error ? e.message : 'שמירה נכשלה');
     } finally {
       setSavingGallery(false);
     }
@@ -289,7 +289,7 @@ export default function FinalViewScreen({ navigation, route }: Props) {
     setSavingShare(true);
     try {
       const isAvailable = await Sharing.isAvailableAsync();
-      if (!isAvailable) { Alert.alert('שיתוף לא זמין', 'המכשיר אינו תומך בשיתוף'); return; }
+      if (!isAvailable) { showAlert('שיתוף לא זמין', 'המכשיר אינו תומך בשיתוף'); return; }
 
       if (pageUrls.length === 1) {
         const localUri = await downloadToCache(pageUrls[0]);
@@ -299,7 +299,7 @@ export default function FinalViewScreen({ navigation, route }: Props) {
         await Sharing.shareAsync(pdfUri, { mimeType: 'application/pdf', dialogTitle: 'שתף כתב יד (PDF)' });
       }
     } catch (e: unknown) {
-      Alert.alert('שגיאה', e instanceof Error ? e.message : 'שיתוף נכשל');
+      showAlert('שגיאה', e instanceof Error ? e.message : 'שיתוף נכשל');
     } finally {
       setSavingShare(false);
     }
@@ -315,10 +315,10 @@ export default function FinalViewScreen({ navigation, route }: Props) {
       if (isAvailable) {
         await Sharing.shareAsync(pdfUri, { mimeType: 'application/pdf', dialogTitle: 'שתף PDF' });
       } else {
-        Alert.alert('PDF נוצר', 'שיתוף אינו זמין במכשיר זה');
+        showAlert('PDF נוצר', 'שיתוף אינו זמין במכשיר זה');
       }
     } catch (e: unknown) {
-      Alert.alert('שגיאה', e instanceof Error ? e.message : 'ייצוא PDF נכשל');
+      showAlert('שגיאה', e instanceof Error ? e.message : 'ייצוא PDF נכשל');
     } finally {
       setSavingPdf(false);
     }

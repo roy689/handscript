@@ -1,6 +1,5 @@
 import React, { useMemo } from 'react';
 import {
-  Alert,
   Linking,
   Pressable,
   ScrollView,
@@ -8,6 +7,7 @@ import {
   Text,
   View,
 } from 'react-native';
+import { showAlert } from '../src/utils/alert';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTheme, type ThemeColors } from '../src/contexts/ThemeContext';
 import { fonts, radius, shadow } from '../src/theme';
@@ -25,7 +25,7 @@ export default function ContactScreen() {
     try {
       const canOpen = await Linking.canOpenURL(url);
       if (!canOpen) {
-        Alert.alert(
+        showAlert(
           'לא נמצאה אפליקציית דואר',
           `שלח אימייל ידנית לכתובת:\n${EMAIL}\n\nנושא: ${subject}`,
           [{ text: 'אישור' }],
@@ -34,7 +34,7 @@ export default function ContactScreen() {
       }
       await Linking.openURL(url);
     } catch {
-      Alert.alert(
+      showAlert(
         'לא ניתן לפתוח דואר',
         `שלח אימייל ידנית לכתובת:\n${EMAIL}`,
         [{ text: 'אישור' }],

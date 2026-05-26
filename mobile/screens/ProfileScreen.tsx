@@ -1,13 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
-  Alert,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+import { showAlert } from '../src/utils/alert';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
@@ -40,7 +40,7 @@ export default function ProfileScreen({ navigation }: Props) {
   const displayName = user?.displayName ?? user?.email?.split('@')[0] ?? 'משתמש';
 
   const handleSignOut = useCallback(() => {
-    Alert.alert('התנתקות', 'האם אתה בטוח שברצונך להתנתק?', [
+    showAlert('התנתקות', 'האם אתה בטוח שברצונך להתנתק?', [
       { text: 'ביטול', style: 'cancel' },
       {
         text: 'התנתק',
@@ -51,7 +51,7 @@ export default function ProfileScreen({ navigation }: Props) {
             await signOut();
             navigation.reset({ index: 0, routes: [{ name: 'Onboarding' }] });
           } catch {
-            Alert.alert('שגיאה', 'ההתנתקות נכשלה. נסה שנית.');
+            showAlert('שגיאה', 'ההתנתקות נכשלה. נסה שנית.');
           } finally {
             setSigningOut(false);
           }
@@ -61,7 +61,7 @@ export default function ProfileScreen({ navigation }: Props) {
   }, [navigation]);
 
   const handleDeleteAccount = useCallback(() => {
-    Alert.alert(
+    showAlert(
       'מחיקת חשבון',
       'פעולה זו בלתי הפיכה. כל הנתונים שלך — כולל כתב היד — יימחקו לצמיתות.',
       [
@@ -85,7 +85,7 @@ export default function ProfileScreen({ navigation }: Props) {
               await auth.signOut();
               navigation.reset({ index: 0, routes: [{ name: 'Onboarding' }] });
             } catch (err: unknown) {
-              Alert.alert('שגיאה', 'מחיקת החשבון נכשלה. נסה שנית.');
+              showAlert('שגיאה', 'מחיקת החשבון נכשלה. נסה שנית.');
             } finally {
               setDeletingAcc(false);
             }

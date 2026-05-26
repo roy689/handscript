@@ -1,12 +1,12 @@
 import React, { useMemo } from 'react';
 import {
-  Alert,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+import { showAlert } from '../src/utils/alert';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
@@ -69,7 +69,7 @@ export default function PaywallScreen({ navigation }: Props) {
   const styles = useMemo(() => getStyles(colors), [colors]);
 
   function handlePurchase(_tierId: string) {
-    Alert.alert(
+    showAlert(
       'המסלולים בדרך',
       'תכניות Pro נמצאות בפיתוח ויהיו זמינות בקרוב. בינתיים תוכל ליהנות מ-5 המרות חינם ביום.',
       [{ text: 'הבנתי', style: 'default' }],
@@ -77,7 +77,7 @@ export default function PaywallScreen({ navigation }: Props) {
   }
 
   function handleRestore() {
-    Alert.alert(
+    showAlert(
       'שחזור רכישות',
       'לא נמצאו רכישות קודמות. כאשר תכניות Pro יושקו, תוכל לשחזר את הרכישה כאן.',
       [{ text: 'אישור', style: 'default' }],

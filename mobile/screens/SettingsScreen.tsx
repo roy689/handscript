@@ -1,6 +1,5 @@
 import React, { useMemo, useState } from 'react';
 import {
-  Alert,
   ActivityIndicator,
   Linking,
   Platform,
@@ -10,6 +9,7 @@ import {
   Text,
   View,
 } from 'react-native';
+import { showAlert } from '../src/utils/alert';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as StoreReview from 'expo-store-review';
@@ -32,7 +32,7 @@ export default function SettingsScreen({ navigation }: Props) {
   const uid = auth.currentUser?.uid ?? 'anonymous';
 
   const handleReset = () => {
-    Alert.alert(
+    showAlert(
       'איפוס כתב יד',
       'פעולה זו תמחק את כל דגימות כתב היד שנסרקו. לא ניתן לבטל. האם להמשיך?',
       [
@@ -50,9 +50,9 @@ export default function SettingsScreen({ navigation }: Props) {
               });
               if (!res.ok) throw new Error(`שגיאת שרת (${res.status})`);
               await AsyncStorage.setItem('character_status', JSON.stringify({}));
-              Alert.alert('הושלם', 'כתב היד אופס בהצלחה. תוכל לסרוק מחדש.');
+              showAlert('הושלם', 'כתב היד אופס בהצלחה. תוכל לסרוק מחדש.');
             } catch {
-              Alert.alert('שגיאה', 'האיפוס נכשל. נסה שנית.');
+              showAlert('שגיאה', 'האיפוס נכשל. נסה שנית.');
             } finally {
               setResetting(false);
             }
@@ -168,7 +168,7 @@ export default function SettingsScreen({ navigation }: Props) {
                 ? 'itms-apps://itunes.apple.com/app/idYOUR_APPLE_ID?action=write-review'
                 : 'market://details?id=com.roey.handscript';
               Linking.openURL(url).catch(() => {
-                Alert.alert(
+                showAlert(
                   'תודה!',
                   'הדירוג זמין רק מתוך חנות האפליקציות. נסה שוב אחרי שתתקין מהחנות.',
                   [{ text: 'אישור' }],
