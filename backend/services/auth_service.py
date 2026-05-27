@@ -59,6 +59,7 @@ def _check_api_key() -> None:
 
 async def sign_in(email: str, password: str) -> dict:
     """Authenticate with email + password. Returns idToken, refreshToken, etc."""
+    email = email.strip().lower()
     _check_api_key()
     async with httpx.AsyncClient(timeout=10) as client:
         r = await client.post(
@@ -81,7 +82,27 @@ async def sign_in(email: str, password: str) -> dict:
 
 async def sign_up(email: str, password: str) -> dict:
     """Create a new Firebase Auth account. Returns idToken, refreshToken, etc."""
+    email = email.strip().lower()
     _check_api_key()
+
+    # Pre-check: reject if this email is already registered (case-insensitive).
+    # Firebase itself may allow duplicate emails if the project setting is off,
+    # so we enforce uniqueness here via the Admin SDK before touching the REST API.
+    try:
+        import firebase_admin.auth as fb_auth
+        try:
+            fb_auth.get_user_by_email(email)
+            # If we get here the user already exists — raise EMAIL_EXISTS
+            raise ValueError(_map_error("EMAIL_EXISTS"))
+        except fb_auth.UserNotFoundError:
+            pass  # email is free — proceed
+    except ValueError:
+        raise  # re-raise EMAIL_EXISTS
+    except Exception as exc:
+        # Admin SDK unavailable or mis-configured — log and continue; Firebase
+        # itself will still reject truly duplicate emails when enabled.
+        logger.warning("sign_up: could not pre-check email existence: %s", exc)
+
     async with httpx.AsyncClient(timeout=10) as client:
         r = await client.post(
             f"{_ID_TOOLKIT}:signUp?key={FIREBASE_WEB_API_KEY}",
@@ -156,7 +177,7 @@ async def sign_in_with_idp(
         "refreshToken": d["refreshToken"],
         "expiresIn":    d["expiresIn"],
         "uid":          d["localId"],
-        "email":        d.get("email", ""),
+        "email":        d.get("email", "").strip().lower(),
     }
 
 

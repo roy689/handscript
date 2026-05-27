@@ -995,7 +995,12 @@ async def auth_signup(body: _AuthCredentials, request: Request):
     try:
         return await auth_service.sign_up(body.email, body.password)
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        # EMAIL_EXISTS → 409 Conflict so the client can distinguish "already
+        # registered" from other validation failures (which get 400).
+        err_msg = str(exc)
+        if "כבר רשומה" in err_msg or "EMAIL_EXISTS" in err_msg:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=err_msg)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_msg)
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
 
