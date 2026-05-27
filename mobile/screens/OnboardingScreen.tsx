@@ -144,7 +144,9 @@ export default function OnboardingScreen({ navigation }: Props) {
             transform: [{ scale: logoAnim.interpolate({ inputRange: [0, 1], outputRange: [0.85, 1] }) }],
             zIndex: 2,
           }}>
-            <Image source={LOGO} style={styles.logoImg} resizeMode="contain" />
+            <View style={styles.logoCircle}>
+              <Image source={LOGO} style={styles.logoImg} resizeMode="cover" />
+            </View>
           </Animated.View>
 
           <Animated.View style={{
@@ -350,11 +352,16 @@ function getStyles(colors: ReturnType<typeof useTheme>['colors']) {
       backgroundColor: 'rgba(255,255,255,0.04)',
     },
 
+    logoCircle: {
+      width:           120,
+      height:          120,
+      borderRadius:    60,
+      overflow:        'hidden',
+      backgroundColor: '#F5F0E8',
+    },
     logoImg: {
-      width:        180,
-      height:       180,
-      borderRadius: 90,
-      overflow:     'hidden',
+      width:  '100%',
+      height: '100%',
     },
 
     appName: {

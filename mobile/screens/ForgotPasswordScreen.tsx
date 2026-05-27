@@ -89,7 +89,9 @@ export default function ForgotPasswordScreen({ navigation }: Props) {
       <SafeAreaView style={styles.safe}>
 
         {/* ── Logo ────────────────────────────────────────────────────── */}
-        <Image source={LOGO} style={styles.logoImg} resizeMode="contain" />
+        <View style={styles.logoCircle}>
+          <Image source={LOGO} style={styles.logoImg} resizeMode="cover" />
+        </View>
 
         {/* ── Card ────────────────────────────────────────────────────── */}
         <Animated.View style={[styles.card, {
@@ -202,12 +204,17 @@ function getStyles(colors: ReturnType<typeof useTheme>['colors']) {
       gap: 24,
     },
 
+    logoCircle: {
+      width:           100,
+      height:          100,
+      borderRadius:    50,
+      overflow:        'hidden',
+      alignSelf:       'center',
+      backgroundColor: '#F5F0E8',
+    },
     logoImg: {
-      width:        140,
-      height:       140,
-      alignSelf:    'center',
-      borderRadius: 70,
-      overflow:     'hidden',
+      width:  '100%',
+      height: '100%',
     },
 
     card: {

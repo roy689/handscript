@@ -92,7 +92,9 @@ export default function PaywallScreen({ navigation }: Props) {
 
       {/* Header */}
       <View style={styles.header}>
-        <Image source={LOGO} style={styles.logoImg} resizeMode="contain" />
+        <View style={styles.logoCircle}>
+          <Image source={LOGO} style={styles.logoImg} resizeMode="cover" />
+        </View>
         <Text style={styles.title}>שדרג ל-Pro</Text>
         <Text style={styles.subtitle}>צלם ללא הגבלה, ייצא ב-PDF, ללא סימן מים</Text>
       </View>
@@ -205,12 +207,17 @@ function getStyles(colors: ThemeColors) {
       paddingHorizontal: 24,
       gap: 8,
     },
+    logoCircle: {
+      width:           90,
+      height:          90,
+      borderRadius:    45,
+      overflow:        'hidden',
+      marginBottom:    4,
+      backgroundColor: '#F5F0E8',
+    },
     logoImg: {
-      width:        110,
-      height:       110,
-      marginBottom: 4,
-      borderRadius: 55,
-      overflow:     'hidden',
+      width:  '100%',
+      height: '100%',
     },
     title: {
       fontSize: 26,
