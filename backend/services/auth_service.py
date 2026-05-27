@@ -224,6 +224,52 @@ async def send_password_reset(email: str) -> bool:
         return False
 
 
+async def send_email_verification(id_token: str) -> bool:
+    """
+    Send an email-verification link to the user identified by id_token.
+
+    Uses Firebase Identity Toolkit sendOobCode with requestType=VERIFY_EMAIL.
+    Returns True on success, False on network / Firebase error.
+    Never raises — a failed send must not abort the signup flow.
+    """
+    _check_api_key()
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(
+                f"{_ID_TOOLKIT}:sendOobCode?key={FIREBASE_WEB_API_KEY}",
+                json={"requestType": "VERIFY_EMAIL", "idToken": id_token},
+            )
+        if r.status_code != 200:
+            logger.warning(
+                "send_email_verification: Firebase returned %d: %s",
+                r.status_code, r.text[:200],
+            )
+            return False
+        return True
+    except (httpx.HTTPError, httpx.TimeoutException) as exc:
+        logger.warning("send_email_verification request failed: %s", exc)
+        return False
+
+
+def check_email_verified(uid: str) -> bool:
+    """
+    Return True if the Firebase Auth user has verified their email address.
+
+    Uses the Admin SDK so the result is always fresh (not cached from an
+    ID token that was issued before verification happened).
+
+    Raises ValueError with a Hebrew message if the user is not found or the
+    Admin SDK is unavailable.
+    """
+    try:
+        import firebase_admin.auth as fb_auth
+        user = fb_auth.get_user(uid)
+        return bool(user.email_verified)
+    except Exception as exc:
+        logger.warning("check_email_verified failed for uid=%s: %s", uid, exc)
+        raise ValueError("לא ניתן לבדוק סטטוס אימות. נסה שוב.") from exc
+
+
 async def delete_account(uid: str) -> None:
     """Delete a Firebase Auth account by uid using the Admin SDK."""
     try:

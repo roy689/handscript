@@ -436,6 +436,9 @@ def _check_convert_rate_limit(user_id: str) -> None:
 _RESET_PWD_BUCKETS: dict[str, list[float]] = collections.defaultdict(list)
 _RESET_PWD_LIMIT = 3  # tighter — password reset is a phishing/enum vector
 
+_RESEND_VERIFY_BUCKETS: dict[str, list[float]] = collections.defaultdict(list)
+_RESEND_VERIFY_LIMIT = 3  # 3 resends per minute per IP — same as password reset
+
 
 def _check_reset_rate_limit(ip: str) -> None:
     now = time.time()
@@ -452,11 +455,25 @@ def _check_reset_rate_limit(ip: str) -> None:
         # Pruning happens periodically in _cleanup_loop, not here.
 
 
+def _check_resend_verify_rate_limit(ip: str) -> None:
+    now = time.time()
+    with _rate_lock:
+        fresh = [t for t in _RESEND_VERIFY_BUCKETS[ip] if now - t < _RATE_WINDOW]
+        if len(fresh) >= _RESEND_VERIFY_LIMIT:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="יותר מדי ניסיונות שליחה. נסה שוב בעוד דקה.",
+                headers={"Retry-After": "60"},
+            )
+        fresh.append(now)
+        _RESEND_VERIFY_BUCKETS[ip] = fresh
+
+
 def _prune_rate_buckets() -> None:
     """Drop expired/empty buckets — called periodically from _cleanup_loop."""
     now = time.time()
     with _rate_lock:
-        for bucket_dict in (_rate_buckets, _ip_login_buckets, _convert_buckets, _RESET_PWD_BUCKETS):
+        for bucket_dict in (_rate_buckets, _ip_login_buckets, _convert_buckets, _RESET_PWD_BUCKETS, _RESEND_VERIFY_BUCKETS):
             for key in list(bucket_dict.keys()):
                 bucket_dict[key] = [t for t in bucket_dict[key] if now - t < _RATE_WINDOW]
                 if not bucket_dict[key]:
@@ -993,7 +1010,14 @@ async def auth_login(body: _AuthCredentials, request: Request):
 async def auth_signup(body: _AuthCredentials, request: Request):
     _check_ip_rate_limit(request.client.host)
     try:
-        return await auth_service.sign_up(body.email, body.password)
+        result = await auth_service.sign_up(body.email, body.password)
+        # Send verification email — fire and don't fail signup if it errors.
+        # We deliberately do NOT await exceptions here.
+        sent = await auth_service.send_email_verification(result["idToken"])
+        if not sent:
+            logger.warning("auth_signup: verification email delivery failed for new user")
+        result["email_verified"] = False
+        return result
     except ValueError as exc:
         # EMAIL_EXISTS → 409 Conflict so the client can distinguish "already
         # registered" from other validation failures (which get 400).
@@ -1047,6 +1071,43 @@ async def auth_reset_password(body: _ResetRequest, request: Request):
         logger.warning("reset-password: delivery failed (email withheld from log)")
     # Always return ok=True to prevent email enumeration
     return {"ok": True}
+
+
+class _ResendVerificationRequest(BaseModel):
+    id_token: str = Field(..., min_length=1, max_length=8192)
+
+
+class _CheckVerificationRequest(BaseModel):
+    uid: str = Field(..., min_length=1, max_length=128)
+
+
+@app.post("/auth/resend-verification")
+async def auth_resend_verification(body: _ResendVerificationRequest, request: Request):
+    """
+    Re-send the email-verification link to the user identified by id_token.
+    Rate-limited to 3 requests per IP per minute.
+    Always returns ok=True — never reveals whether the send succeeded.
+    """
+    _check_resend_verify_rate_limit(request.client.host)
+    sent = await auth_service.send_email_verification(body.id_token)
+    if not sent:
+        logger.warning("resend-verification: delivery failed")
+    return {"ok": True}
+
+
+@app.post("/auth/check-verification")
+async def auth_check_verification(body: _CheckVerificationRequest, request: Request):
+    """
+    Check whether the Firebase Auth user has verified their email.
+    Uses the Admin SDK so the result is always fresh.
+    Returns {"verified": true/false}.
+    """
+    _check_ip_rate_limit(request.client.host)
+    try:
+        verified = auth_service.check_email_verified(body.uid)
+        return {"verified": verified}
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
 
 @app.delete("/auth/account")
@@ -1542,6 +1603,10 @@ async def convert(body: ConvertRequest, uid: str = Depends(require_auth)):
 
         # 3. Synthesise lines (CPU-bound — run off the event loop)
         picker = VariantPicker(bank)
+        for _ch, _cd in bank.items():
+            _n = len(_cd.get("variants", []))
+            if _n > 0:
+                logger.info("convert: char=%r has %d variant(s)", _ch, _n)
         _MARGIN = 200
         valid_ink = {"black", "blue", "red"}
         ink_color = body.ink_color if body.ink_color in valid_ink else "black"
@@ -1684,6 +1749,10 @@ async def convert_both(body: ConvertBothRequest, uid: str = Depends(require_auth
             }
 
         picker = VariantPicker(bank)
+        for _ch, _cd in bank.items():
+            _n = len(_cd.get("variants", []))
+            if _n > 0:
+                logger.info("convert-both: char=%r has %d variant(s)", _ch, _n)
         _MARGIN = 200
         valid_ink = {"black", "blue", "red"}
         ink_color = body.ink_color if body.ink_color in valid_ink else "black"
@@ -1843,7 +1912,11 @@ async def get_glyphs(body: GlyphsRequest, uid: str = Depends(require_auth)):
     from modules.synthesizer import normalize_char
 
     bank = firebase_client.load_character_bank(body.user_id)
-    unique_chars = {c for c in body.text if c.strip()}
+    # Use the SAME whitespace definition as validate_text so the two endpoints
+    # agree on which characters are "content" (avoids invisible chars slipping
+    # through validation but being absent from glyph_map → computer-font fallback).
+    _WHITESPACE = {" ", "\n", "\t", "\r"}
+    unique_chars = {c for c in body.text if c not in _WHITESPACE}
 
     glyph_map: dict[str, list[str]] = {}
     missing:   list[str]            = []
@@ -1855,8 +1928,10 @@ async def get_glyphs(body: GlyphsRequest, uid: str = Depends(require_auth)):
         urls = [v["url"] for v in variants if v.get("url")]
         if urls:
             glyph_map[ch] = urls
+            logger.info("[glyphs] char=%r → %d variant(s)", ch, len(urls))
         else:
             missing.append(ch)
+            logger.warning("[glyphs] char=%r → NOT FOUND in bank", ch)
 
     return {"glyphs": glyph_map, "missing": missing}
 
