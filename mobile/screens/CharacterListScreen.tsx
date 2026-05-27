@@ -446,7 +446,7 @@ function getStyles(colors: ThemeColors, isDark: boolean) {
       fontSize:         26,
       fontFamily:       fonts.extraBold,
       color:            isDark ? colors.inkDark : INK_DARK,
-      textAlign:        'right',
+      textAlign:        'center',
       writingDirection: 'rtl',
       marginBottom:     14,
       letterSpacing:    -0.5,
