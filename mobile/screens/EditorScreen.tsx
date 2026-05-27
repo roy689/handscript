@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
+import { showAlert } from '../src/utils/alert';
 import {
-  Alert,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -23,6 +23,7 @@ import { fetchJSON, withRetry, toErrorMessage, OfflineError } from '../src/utils
 import { BACKEND_URL } from '../src/config';
 import NetInfo from '@react-native-community/netinfo';
 import { savePendingConversion, getPendingConversion, clearPendingConversion } from '../src/utils/offlineQueue';
+import { saveDraft, loadDraft, clearDraft } from '../src/utils/draftStorage';
 import { logError } from '../src/utils/telemetry';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Editor'>;
@@ -35,6 +36,11 @@ const INVISIBLE_RE = /[­​‌‍‎‏‪‫‬‭‮﻿]/g;
 function sanitize(input: string): string {
   return input.replace(INVISIBLE_RE, '');
 }
+
+// Match backend's _MAX_TEXT in main.py
+const MAX_TEXT_LEN = 5000;
+// Show a soft warning starting at 90 % of the limit
+const TEXT_WARN_THRESHOLD = Math.floor(MAX_TEXT_LEN * 0.9);
 
 export default function EditorScreen({ navigation }: Props) {
   const { colors } = useTheme();
@@ -60,6 +66,34 @@ export default function EditorScreen({ navigation }: Props) {
   const wordSpacing   = 35;
   const lineJitter    = 3;
 
+  // ── Draft auto-restore: load saved text on mount ───────────────────────────
+  // Runs once when the screen mounts. If a non-empty draft exists from a
+  // previous session (crash, force-quit, server error), restore it silently
+  // so the user can continue where they left off.
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      const draft = await loadDraft();
+      if (mounted && draft && draft.text && !text) {
+        setText(draft.text);
+      }
+    })();
+    return () => { mounted = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Draft auto-save: debounced persist while typing ────────────────────────
+  // Saves the current text 800ms after the last keystroke. Prevents storage
+  // thrash on fast typing while still capturing the latest state before any
+  // crash / navigation away.
+  useEffect(() => {
+    const handle = setTimeout(() => {
+      // Fire-and-forget — saveDraft swallows its own errors.
+      void saveDraft(text);
+    }, 800);
+    return () => clearTimeout(handle);
+  }, [text]);
+
   // ── Offline queue: restore pending conversion when connectivity returns ──────
   useEffect(() => {
     let mounted = true;
@@ -69,7 +103,7 @@ export default function EditorScreen({ navigation }: Props) {
       const pending = await getPendingConversion();
       if (!mounted || !pending) return;
       alerted = true;
-      Alert.alert(
+      showAlert(
         'החיבור חזר',
         'נמצאה המרה שנשמרה בזמן הניתוק. לשחזר את הטקסט?',
         [
@@ -109,8 +143,8 @@ export default function EditorScreen({ navigation }: Props) {
       setError('כתוב משהו קודם');
       return;
     }
-    if (sanitizedText.length > 5000) {
-      setError('הטקסט ארוך מדי (max 5000 תווים)');
+    if (sanitizedText.length > MAX_TEXT_LEN) {
+      setError(`הטקסט ארוך מדי. המגבלה היא ${MAX_TEXT_LEN} תווים.`);
       return;
     }
 
@@ -128,7 +162,7 @@ export default function EditorScreen({ navigation }: Props) {
       setLoadingMsg('בודק הרשאות...');
       const check = await checkCanConvert(userId);
       if (!check.allowed) {
-        Alert.alert(
+        showAlert(
           'מגבלת שימוש',
           check.reason ?? 'לא ניתן להמיר כעת',
           [
@@ -153,7 +187,7 @@ export default function EditorScreen({ navigation }: Props) {
       if (!vData.ok) {
         const first = vData.missing?.[0];
         if (first) {
-          Alert.alert(
+          showAlert(
             'תו חסר במאגר',
             `האות "${first}" לא קיימת במאגר שלך. רוצה לצלם אותה עכשיו?`,
             [
@@ -169,7 +203,7 @@ export default function EditorScreen({ navigation }: Props) {
       setConverting(true);
       setLoadingMsg('מעבד את הטקסט ומייצר כתב יד...');
       const gData = await withRetry(
-        () => fetchJSON<{ glyphs: Record<string, string>; missing: string[] }>(
+        () => fetchJSON<{ glyphs: Record<string, string[]>; missing: string[] }>(
           `${BACKEND_URL}/glyphs`,
           {
             method: 'POST',
@@ -181,6 +215,7 @@ export default function EditorScreen({ navigation }: Props) {
 
       await incrementUsage(userId);
       await clearPendingConversion(); // discard any queued item — we just succeeded
+      await clearDraft();             // text successfully sent — drop saved draft
 
       // Navigate first — the overlay unmounts with EditorScreen so no flicker
       navigation.navigate('Preview', {
@@ -203,7 +238,7 @@ export default function EditorScreen({ navigation }: Props) {
       if (err instanceof OfflineError) {
         // Save to offline queue — NetInfo listener will restore on reconnect
         await savePendingConversion({ text: sanitizedText, paperStyle, inkColor });
-        Alert.alert(
+        showAlert(
           'אין חיבור לאינטרנט',
           'הטקסט נשמר ויוצג שוב כשהחיבור יחזור.',
           [{ text: 'אישור' }],
@@ -228,21 +263,27 @@ export default function EditorScreen({ navigation }: Props) {
 
         {/* ── Header ────────────────────────────────────────────────────── */}
         <View style={styles.header}>
-          <Pressable
-            style={({ pressed }) => [styles.backBtn, pressed && { opacity: 0.5 }]}
-            onPress={() => { impactLight(); navigation.navigate('CharacterList'); }}
-            hitSlop={12}
-            accessibilityRole="button"
-            accessibilityLabel="חזור למאגר אותיות"
-            accessibilityHint="מעבר חזרה למסך המאגר. הטקסט יישמר אוטומטית"
-          >
-            <Text style={styles.backArrow}>←</Text>
-          </Pressable>
+          {/* Decorative dot — right side in RTL */}
+          <View style={styles.inkDot} />
+
+          {/* Title — center */}
           <View style={styles.headerTextBlock}>
             <Text style={styles.headerTitle}>כתוב משהו</Text>
             <Text style={styles.headerSub}>יומר לכתב היד האישי שלך</Text>
           </View>
-          <View style={styles.inkDot} />
+
+          {/* Back button — left side in RTL */}
+          <Pressable
+            style={({ pressed }) => [styles.backBtn, pressed && { opacity: 0.65, transform: [{ scale: 0.96 }] }]}
+            onPress={() => { impactLight(); navigation.navigate('CharacterList'); }}
+            hitSlop={8}
+            accessibilityRole="button"
+            accessibilityLabel="חזור למאגר אותיות"
+            accessibilityHint="מעבר חזרה למסך המאגר. הטקסט יישמר אוטומטית"
+          >
+            <Text style={styles.backArrow}>›</Text>
+            <Text style={styles.backLabel}>מאגר</Text>
+          </Pressable>
         </View>
 
         {/* ── Paper input ────────────────────────────────────────────────── */}
@@ -266,7 +307,17 @@ export default function EditorScreen({ navigation }: Props) {
           />
 
           <View style={styles.counterStrip}>
-            <Text style={styles.counter}>{charCount}</Text>
+            <Text
+              style={[
+                styles.counter,
+                charCount > MAX_TEXT_LEN && styles.counterError,
+                charCount >= TEXT_WARN_THRESHOLD && charCount <= MAX_TEXT_LEN && styles.counterWarn,
+              ]}
+            >
+              {charCount >= TEXT_WARN_THRESHOLD
+                ? `${charCount} / ${MAX_TEXT_LEN}`
+                : `${charCount}`}
+            </Text>
           </View>
         </View>
 
@@ -331,28 +382,45 @@ function getStyles(colors: ThemeColors) {
       alignItems:       'center',
       justifyContent:   'space-between',
     },
-    headerTextBlock: { alignItems: 'flex-end', flex: 1 },
+    headerTextBlock: { alignItems: 'flex-start', flex: 1 },
     headerTitle: {
       fontSize:         22,
       fontFamily:       fonts.bold,
       color:            colors.inkDark,
+      textAlign:        'right',
       writingDirection: 'rtl',
     },
     headerSub: {
       fontSize:         13,
       fontFamily:       fonts.regular,
       color:            colors.inkLight,
+      textAlign:        'right',
       writingDirection: 'rtl',
       marginTop:        2,
     },
     backBtn: {
-      paddingHorizontal: 4,
-      paddingVertical:   4,
+      flexDirection:     'row',
+      alignItems:        'center',
+      gap:               4,
+      backgroundColor:   colors.bgSurface,
+      borderWidth:       1.5,
+      borderColor:       colors.border,
+      borderRadius:      22,
+      paddingHorizontal: 14,
+      paddingVertical:   9,
+      ...shadow.card,
     },
     backArrow: {
-      fontSize:   22,
-      color:      colors.inkMid,
-      lineHeight: 28,
+      fontSize:   18,
+      color:      colors.accent,
+      fontFamily: fonts.bold,
+      lineHeight: 22,
+    },
+    backLabel: {
+      fontSize:         14,
+      fontFamily:       fonts.semiBold,
+      color:            colors.accent,
+      writingDirection: 'rtl',
     },
     inkDot: {
       width:           10,
@@ -360,7 +428,6 @@ function getStyles(colors: ThemeColors) {
       borderRadius:    5,
       backgroundColor: colors.accent,
       opacity:         0.35,
-      marginRight:     4,
     },
 
     // ── Paper ────────────────────────────────────────────────────────────────
@@ -416,7 +483,9 @@ function getStyles(colors: ThemeColors) {
       borderTopColor:    colors.borderFaint,
       alignItems:        'flex-start',
     },
-    counter:     { fontSize: 11, color: colors.inkFaint, fontVariant: ['tabular-nums'], fontFamily: fonts.regular },
+    counter:      { fontSize: 11, color: colors.inkFaint, fontVariant: ['tabular-nums'], fontFamily: fonts.regular },
+    counterWarn:  { color: '#D97706', fontFamily: fonts.semiBold },
+    counterError: { color: colors.danger, fontFamily: fonts.bold },
 
     // ── Error ─────────────────────────────────────────────────────────────────
     errorBanner: {

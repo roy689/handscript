@@ -8,8 +8,8 @@ import {
   SectionList,
   ScrollView,
   TextInput,
-  Alert,
 } from 'react-native';
+import { showAlert } from '../src/utils/alert';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFocusEffect } from '@react-navigation/native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -27,23 +27,67 @@ const HEBREW_CHARS  = 'אבגדהוזחטיכךלמםנןסעפףצץקרשת'.s
 const ENGLISH_UPPER = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
 const ENGLISH_LOWER = 'abcdefghijklmnopqrstuvwxyz'.split('');
 const DIGITS        = '0123456789'.split('');
-const PUNCTUATION   = [
-  '.', ',', '!', '?', ':', ';', '"', "'", '`',
-  '-', '_', '+', '=', '*', '/', '\\', '|',
-  '(', ')', '[', ']', '{', '}', '<', '>',
-  '@', '#', '$', '%', '^', '&', '~',
+
+// ── Symbol sub-categories ─────────────────────────────────────────────────────
+// Split out from a single big bag so the user can scan and find a symbol fast.
+// Each character is a single Unicode codepoint and works with the backend's
+// raw-character storage even when normalize_char doesn't have a name for it.
+
+// Punctuation & Hebrew quotation marks
+const PUNCTUATION = [
+  '.', ',', '!', '?', ':', ';',
+  '"', "'", '`',
+  '׳', '״',       // Hebrew geresh, gershayim
+  '–', '—', '…',  // en-dash, em-dash, ellipsis
+];
+
+// Math operators — common keyboard chars plus a few Unicode extras
+const MATH_SYMBOLS = [
+  '+', '-', '×', '÷',
+  '=', '≠',
+  '<', '>', '≤', '≥',
+  '±', '%', '√',
+];
+
+// Brackets & parentheses
+const BRACKETS = [
+  '(', ')', '[', ']', '{', '}',
+];
+
+// Currency symbols — shekel first since this app's primary audience is Israeli
+const CURRENCY = [
+  '₪', '$', '€', '£', '¢',
+];
+
+// Arrows — directional pointers
+const ARROWS = [
+  '←', '→', '↑', '↓',
+];
+
+// Special / miscellaneous ASCII symbols
+const SPECIAL_CHARS = [
+  '@', '#', '&', '*',
+  '/', '\\', '|',
+  '~', '^', '_',
 ];
 
 const SECTIONS = [
-  { title: 'עברית',       data: [HEBREW_CHARS],  key: 'he' },
-  { title: 'English A–Z', data: [ENGLISH_UPPER], key: 'en_upper' },
-  { title: 'English a–z', data: [ENGLISH_LOWER], key: 'en_lower' },
-  { title: 'ספרות',       data: [DIGITS],        key: 'nums' },
-  { title: 'סימנים',      data: [PUNCTUATION],   key: 'syms' },
+  { title: 'עברית',          data: [HEBREW_CHARS],   key: 'he' },
+  { title: 'English A–Z',    data: [ENGLISH_UPPER],  key: 'en_upper' },
+  { title: 'English a–z',    data: [ENGLISH_LOWER],  key: 'en_lower' },
+  { title: 'ספרות',          data: [DIGITS],         key: 'nums' },
+  { title: 'פיסוק',          data: [PUNCTUATION],    key: 'sym_punct' },
+  { title: 'סימני מתמטיקה',  data: [MATH_SYMBOLS],   key: 'sym_math' },
+  { title: 'סוגריים',        data: [BRACKETS],       key: 'sym_brackets' },
+  { title: 'מטבעות',         data: [CURRENCY],       key: 'sym_currency' },
+  { title: 'חצים',           data: [ARROWS],         key: 'sym_arrows' },
+  { title: 'מיוחדים',        data: [SPECIAL_CHARS],  key: 'sym_special' },
 ];
 
 const ALL_CHARS = [
-  ...HEBREW_CHARS, ...ENGLISH_UPPER, ...ENGLISH_LOWER, ...DIGITS, ...PUNCTUATION,
+  ...HEBREW_CHARS, ...ENGLISH_UPPER, ...ENGLISH_LOWER, ...DIGITS,
+  ...PUNCTUATION, ...MATH_SYMBOLS, ...BRACKETS,
+  ...CURRENCY, ...ARROWS, ...SPECIAL_CHARS,
 ];
 const TOTAL_ALL = ALL_CHARS.length;
 
@@ -120,7 +164,7 @@ export default function CharacterListScreen({ navigation }: Props) {
     const s = status[char];
     if (!s?.captured) return;
     impactMedium();
-    Alert.alert(
+    showAlert(
       `תו "${char}"`,
       `יש ${s.count} דגימות שמורות. מה ברצונך לעשות?`,
       [
@@ -132,7 +176,7 @@ export default function CharacterListScreen({ navigation }: Props) {
   }, [status, navigation]);
 
   const confirmDelete = useCallback((char: string) => {
-    Alert.alert(
+    showAlert(
       'אישור מחיקה',
       `למחוק את כל הדגימות של "${char}"?`,
       [
@@ -294,6 +338,26 @@ export default function CharacterListScreen({ navigation }: Props) {
         keyExtractor={(_, index) => String(index)}
         onScrollToIndexFailed={() => { /* no-op */ }}
         ListHeaderComponent={ListHeader}
+        ListEmptyComponent={
+          searchChar ? (
+            <View style={styles.emptyState}>
+              <Text style={styles.emptyStateIcon}>🔍</Text>
+              <Text style={styles.emptyStateTitle}>אין תוצאות</Text>
+              <Text style={styles.emptyStateText}>
+                התו ״{searchChar}״ אינו נמצא ברשימה.{'\n'}
+                כרגע נתמכים: עברית, אנגלית, ספרות, וסימנים נפוצים.
+              </Text>
+              <Pressable
+                style={({ pressed }) => [styles.emptyStateBtn, pressed && { opacity: 0.7 }]}
+                onPress={() => { setSearchChar(''); impactLight(); }}
+                accessibilityRole="button"
+                accessibilityLabel="נקה חיפוש"
+              >
+                <Text style={styles.emptyStateBtnText}>נקה חיפוש</Text>
+              </Pressable>
+            </View>
+          ) : null
+        }
         renderSectionHeader={({ section }) => {
           const idx = SECTIONS.findIndex(s => s.key === section.key);
           const anim = sectionAnims[idx] ?? sectionAnims[0];
@@ -402,6 +466,7 @@ function getStyles(colors: ThemeColors, isDark: boolean) {
       fontFamily:       fonts.extraBold,
       color:            isDark ? colors.inkDark : BROWN_DEEP,
       textAlign:        'right',
+      writingDirection: 'rtl',
       lineHeight:       52,
       letterSpacing:    -1,
     },
@@ -495,9 +560,10 @@ function getStyles(colors: ThemeColors, isDark: boolean) {
       borderColor:     isDark ? colors.accent : BROWN_DEEP,
     },
     tabPillText: {
-      fontSize:   13,
-      fontFamily: fonts.semiBold ?? fonts.bold,
-      color:      isDark ? colors.inkMid : BROWN_MID,
+      fontSize:         13,
+      fontFamily:       fonts.semiBold ?? fonts.bold,
+      color:            isDark ? colors.inkMid : BROWN_MID,
+      writingDirection: 'rtl',
     },
 
     // ── Section header ────────────────────────────────────────────────────────
@@ -515,10 +581,11 @@ function getStyles(colors: ThemeColors, isDark: boolean) {
       backgroundColor: isDark ? colors.border : 'rgba(139,115,85,0.25)',
     },
     sectionTitle: {
-      fontSize:      13,
-      fontFamily:    fonts.bold,
-      color:         isDark ? colors.inkMid : BROWN_MID,
-      letterSpacing: 0.6,
+      fontSize:         13,
+      fontFamily:       fonts.bold,
+      color:            isDark ? colors.inkMid : BROWN_MID,
+      letterSpacing:    0.6,
+      writingDirection: 'rtl',
     },
 
     // ── Character cards ───────────────────────────────────────────────────────
@@ -627,11 +694,54 @@ function getStyles(colors: ThemeColors, isDark: boolean) {
       fontSize:         16,
       fontFamily:       fonts.bold,
       color:            '#FFFFFF',
+      textAlign:        'right',
       writingDirection: 'rtl',
       letterSpacing:    0.2,
     },
     ctaTextDim: {
       color: colors.inkLight,
+    },
+
+    // ── Empty state (no search results) ───────────────────────────────────────
+    emptyState: {
+      alignItems:       'center',
+      justifyContent:   'center',
+      paddingHorizontal: 32,
+      paddingVertical:   48,
+      gap:               12,
+    },
+    emptyStateIcon: {
+      fontSize:   44,
+      opacity:    0.4,
+      marginBottom: 4,
+    },
+    emptyStateTitle: {
+      fontSize:         18,
+      fontFamily:       fonts.bold,
+      color:            isDark ? colors.inkDark : INK_DARK,
+      textAlign:        'center',
+      writingDirection: 'rtl',
+    },
+    emptyStateText: {
+      fontSize:         14,
+      fontFamily:       fonts.regular,
+      color:            colors.inkLight,
+      textAlign:        'center',
+      writingDirection: 'rtl',
+      lineHeight:       21,
+    },
+    emptyStateBtn: {
+      marginTop:         8,
+      paddingHorizontal: 22,
+      paddingVertical:   12,
+      backgroundColor:   isDark ? colors.bgSurface : BROWN_MID,
+      borderRadius:      radius.md,
+    },
+    emptyStateBtnText: {
+      fontSize:         14,
+      fontFamily:       fonts.semiBold,
+      color:            '#FFFFFF',
+      writingDirection: 'rtl',
     },
   });
 }
