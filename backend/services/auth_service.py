@@ -101,6 +101,65 @@ async def sign_up(email: str, password: str) -> dict:
     }
 
 
+async def sign_in_with_idp(
+    *,
+    provider_id: str,
+    id_token: str | None = None,
+    access_token: str | None = None,
+) -> dict:
+    """
+    Federated sign-in via Firebase's signInWithIdp REST endpoint.
+
+    `provider_id` must be one of Firebase's documented values:
+        google.com, apple.com, facebook.com, ...
+
+    For Google, pass the OAuth `id_token` from the native Google SDK.
+    For Apple, pass the `identityToken` returned by Apple's authentication
+    framework as `id_token`. The nonce-based binding is enforced client-side
+    by the native SDK; Firebase verifies the token signature against the
+    Apple/Google JWKS.
+
+    Returns the same shape as sign_in / sign_up so the rest of the auth
+    pipeline (token storage, refresh, etc.) doesn't need a special case.
+    """
+    _check_api_key()
+
+    if not id_token and not access_token:
+        raise ValueError("sign_in_with_idp requires id_token or access_token")
+
+    parts = [f"providerId={provider_id}"]
+    if id_token:
+        parts.append(f"id_token={id_token}")
+    if access_token:
+        parts.append(f"access_token={access_token}")
+    post_body = "&".join(parts)
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.post(
+            f"{_ID_TOOLKIT}:signInWithIdp?key={FIREBASE_WEB_API_KEY}",
+            json={
+                "postBody":          post_body,
+                "requestUri":        "http://localhost",
+                "returnSecureToken": True,
+                "returnIdpCredential": False,
+            },
+        )
+
+    if r.status_code != 200:
+        code = r.json().get("error", {}).get("message", "FEDERATED_LOGIN_FAILED")
+        logger.warning("sign_in_with_idp failed (%s): %s", provider_id, code)
+        raise ValueError(_map_error(code))
+
+    d = r.json()
+    return {
+        "idToken":      d["idToken"],
+        "refreshToken": d["refreshToken"],
+        "expiresIn":    d["expiresIn"],
+        "uid":          d["localId"],
+        "email":        d.get("email", ""),
+    }
+
+
 async def refresh_id_token(refresh_token: str) -> dict:
     """Exchange a refresh token for a new ID token."""
     _check_api_key()

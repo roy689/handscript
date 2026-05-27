@@ -1,11 +1,14 @@
 import React, { useMemo } from 'react';
 import {
+  Image,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+
+const LOGO = require('../assets/logo.png');
 import { showAlert } from '../src/utils/alert';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -89,7 +92,7 @@ export default function PaywallScreen({ navigation }: Props) {
 
       {/* Header */}
       <View style={styles.header}>
-        <Text style={styles.crown}>👑</Text>
+        <Image source={LOGO} style={styles.logoImg} resizeMode="contain" />
         <Text style={styles.title}>שדרג ל-Pro</Text>
         <Text style={styles.subtitle}>צלם ללא הגבלה, ייצא ב-PDF, ללא סימן מים</Text>
       </View>
@@ -202,7 +205,13 @@ function getStyles(colors: ThemeColors) {
       paddingHorizontal: 24,
       gap: 8,
     },
-    crown: { fontSize: 44 },
+    logoImg: {
+      width:        110,
+      height:       110,
+      marginBottom: 4,
+      borderRadius: 55,
+      overflow:     'hidden',
+    },
     title: {
       fontSize: 26,
       fontWeight: '800',

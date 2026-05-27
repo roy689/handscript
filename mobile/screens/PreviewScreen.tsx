@@ -109,80 +109,156 @@ function seededRand(seed: number): number {
   return x - Math.floor(x);
 }
 
-// Mirrors synthesizer.py: _CHAR_HEIGHT_RATIO and _CHAR_ASCENDER_RATIO
+/**
+ * Pick one variant URL for a single character occurrence.
+ *
+ * `variants` is the list of all sample URLs for a character (the new /glyphs
+ * response shape). We use a position-derived seed so the choice is:
+ *   • varied   — different occurrences of the same character get different
+ *                samples, which is the whole point of uploading multiple.
+ *   • stable   — the same position always resolves to the same sample, so the
+ *                preview doesn't flicker between re-renders / slider tweaks.
+ *
+ * Accepts a plain string too, for resilience against an older server build
+ * that still returns a single URL per character.
+ */
+function pickVariantUrl(
+  variants: string[] | string | undefined,
+  seed: number,
+): string | undefined {
+  if (!variants) return undefined;
+  const arr = Array.isArray(variants) ? variants : [variants];
+  if (arr.length === 0) return undefined;
+  if (arr.length === 1) return arr[0];
+  const idx = Math.floor(seededRand(seed) * arr.length) % arr.length;
+  return arr[idx];
+}
+
+// ── Per-character typography ──────────────────────────────────────────────────
+// MUST stay in sync with synthesizer.py (_CHAR_HEIGHT_RATIO / _CHAR_ASCENDER_RATIO)
+// so the client preview matches the server-rendered final output.
+//
+// heightRatio  = glyph height as a multiple of the base x-height (default 1.0)
+// ascenderRatio = fraction of glyph height ABOVE the baseline (default 1.0)
+//                 glyphTop = baselineY - gh * ascenderRatio
+//                 ascenderRatio = 1.0   → bottom sits exactly on the baseline
+//                 ascenderRatio < 1.0   → glyph hangs below the baseline (descender)
+//                 ascenderRatio > 1.0   → glyph floats above the baseline
+const CAP = 1.40;  // cap-height / x-height ratio (uppercase, digits)
+
 const CHAR_HEIGHT_RATIO: Record<string, number> = {
-  // ── Hebrew ────────────────────────────────────────────────────────────
-  'י': 0.45, 'ו': 0.70, 'ז': 0.75, 'ר': 0.80, 'ד': 0.82,
-  'ג': 0.82, 'ח': 0.87, 'ה': 0.88, 'ב': 0.90, 'כ': 0.90,
-  'ל': 1.30, 'ף': 1.25, 'ץ': 1.20,
-  'ן': 1.28, 'ך': 1.28, 'ק': 1.18,
+  // ── Hebrew — normal x-height letters (omitted = 1.0): א ט מ נ ס ע פ צ ש ת ם ──
+  'י': 0.45, 'ו': 0.70, 'ז': 0.75, 'ר': 0.82, 'ד': 0.85,
+  'ג': 0.85, 'ח': 0.90, 'ה': 0.90, 'ב': 0.92, 'כ': 0.90,
+  // Ascender — rises above x-height, bottom on baseline
+  'ל': 1.32,
+  // Descenders — body at x-height, stem drops below baseline
+  'ן': 1.28, 'ך': 1.28, 'ק': 1.20,
+  'ף': 1.30, 'ץ': 1.30,   // final pe / final tsadi are DESCENDERS in Hebrew
 
-  // ── Latin uppercase — cap-height ≈ 1.40× x-height ────────────────────
-  'A': 1.40, 'B': 1.40, 'C': 1.40, 'D': 1.40, 'E': 1.40, 'F': 1.40,
-  'G': 1.40, 'H': 1.40, 'I': 1.40, 'J': 1.40, 'K': 1.40, 'L': 1.40,
-  'M': 1.40, 'N': 1.40, 'O': 1.40, 'P': 1.40, 'Q': 1.40, 'R': 1.40,
-  'S': 1.40, 'T': 1.40, 'U': 1.40, 'V': 1.40, 'W': 1.40, 'X': 1.40,
-  'Y': 1.40, 'Z': 1.40,
+  // ── Latin uppercase — cap-height ──────────────────────────────────────
+  'A': CAP, 'B': CAP, 'C': CAP, 'D': CAP, 'E': CAP, 'F': CAP,
+  'G': CAP, 'H': CAP, 'I': CAP, 'J': CAP, 'K': CAP, 'L': CAP,
+  'M': CAP, 'N': CAP, 'O': CAP, 'P': CAP, 'Q': CAP, 'R': CAP,
+  'S': CAP, 'T': CAP, 'U': CAP, 'V': CAP, 'W': CAP, 'X': CAP,
+  'Y': CAP, 'Z': CAP,
 
-  // ── Latin ascenders — same height as uppercase ────────────────────────
-  'b': 1.40, 'd': 1.40, 'h': 1.40, 'k': 1.40, 'l': 1.40,
+  // ── Latin lowercase ascenders ─────────────────────────────────────────
+  'b': CAP, 'd': CAP, 'h': CAP, 'k': CAP, 'l': CAP,
   'f': 1.15, 't': 1.20,
-
-  // ── Latin descenders — body at x-height, tail below baseline ─────────
+  // Latin descenders — body at x-height, tail below baseline
   'g': 1.30, 'j': 1.30, 'p': 1.28, 'q': 1.28, 'y': 1.28,
-
-  // ── Short Latin ───────────────────────────────────────────────────────
   'i': 0.75,
 
-  // ── Numbers — cap-height ──────────────────────────────────────────────
-  '0': 1.40, '1': 1.40, '2': 1.40, '3': 1.40, '4': 1.40,
-  '5': 1.40, '6': 1.40, '7': 1.40, '8': 1.40, '9': 1.40,
+  // ── Digits — cap-height ───────────────────────────────────────────────
+  '0': CAP, '1': CAP, '2': CAP, '3': CAP, '4': CAP,
+  '5': CAP, '6': CAP, '7': CAP, '8': CAP, '9': CAP,
 
   // ── Punctuation ───────────────────────────────────────────────────────
-  '.': 0.15,             // period — hugs baseline
-  ',': 0.18,             // comma — tiny body + descending tail
-  "'": 0.20, '"': 0.20, // apostrophe / double-quote — near cap-line
-  '׳': 0.22, '״': 0.22, // Hebrew geresh / gershayim — near cap-line
-  '-': 0.30,             // hyphen — centered in line
-  '(': 1.20, ')': 1.20, // parens — span cap-line to below baseline
-  ':': 0.60, ';': 0.70,
-  '!': 1.40, '?': 1.40,
+  '.': 0.15,              // period — tiny dot on baseline
+  '…': 0.15,              // ellipsis — same as period
+  ',': 0.30,              // comma — small body + tail below baseline
+  ':': 0.90,              // colon — two dots spanning x-height
+  ';': 1.05,              // semicolon — dot + descending tail
+  "'": 0.30, '"': 0.30,   // apostrophe / quote — small, near cap-line
+  '׳': 0.30, '״': 0.30,   // Hebrew geresh / gershayim — near cap-line
+  '!': CAP, '?': CAP,     // full height, on baseline
+  '–': 0.12, '—': 0.12,   // en-dash / em-dash — thin, mid-line
 
-  // ── Math operators — mid x-height ────────────────────────────────────
-  '+': 0.45, '=': 0.35, '*': 0.40,
+  // ── Brackets — span above cap-line to below baseline ──────────────────
+  '(': 1.50, ')': 1.50,
+  '[': 1.50, ']': 1.50,
+  '{': 1.50, '}': 1.50,
+
+  // ── Math operators ────────────────────────────────────────────────────
+  '+': 0.70, '-': 0.12, '×': 0.70, '÷': 0.80,
+  '=': 0.45, '≠': 0.70,
+  '<': 0.80, '>': 0.80, '≤': 0.95, '≥': 0.95,
+  '±': 0.95, '%': CAP, '√': CAP,
+
+  // ── Currency ──────────────────────────────────────────────────────────
+  '₪': 1.30, '$': 1.50, '€': CAP, '£': CAP, '¢': 1.05,
+
+  // ── Arrows ────────────────────────────────────────────────────────────
+  '←': 0.70, '→': 0.70, '↑': 1.20, '↓': 1.20,
+
+  // ── Special symbols ───────────────────────────────────────────────────
+  '@': CAP, '#': CAP, '&': CAP,
+  '*': 0.55, '/': CAP, '\\': CAP, '|': CAP,
+  '~': 0.40, '^': 0.55, '_': 0.10,
 };
 
 // Fraction of glyph height that sits ABOVE the baseline (1.0 = all above).
 // glyphTop = baselineY - gh * ascRatio
 const CHAR_ASCENDER_RATIO: Record<string, number> = {
-  // ── Hebrew descenders ─────────────────────────────────────────────────
-  'ן': 1 / 1.28, 'ך': 1 / 1.28, 'ק': 1 / 1.18,
+  // ── Hebrew descenders — top aligns with x-height, tail below ──────────
+  'ן': 1 / 1.28, 'ך': 1 / 1.28, 'ק': 1 / 1.20,
+  'ף': 1 / 1.30, 'ץ': 1 / 1.30,
 
-  // ── Latin descenders — body above baseline, tail below ───────────────
+  // ── Latin descenders ──────────────────────────────────────────────────
   'g': 0.65, 'j': 0.62, 'p': 0.65, 'q': 0.65, 'y': 0.65,
 
-  // ── Punctuation — bottom-aligned ──────────────────────────────────────
-  '.': 0.10,             // period: 10 % above baseline
-  ',': 0.35,             // comma: body just above; 65 % hangs as tail
+  // ── Bottom punctuation ────────────────────────────────────────────────
+  '.': 1.0,               // period sits on the baseline
+  '…': 1.0,               // ellipsis on the baseline
+  ',': 0.50,              // comma — body above, tail hangs below baseline
+  ':': 1.0,               // colon — sits on baseline
+  ';': 1 / 1.05,          // semicolon — tail dips below baseline
+  '_': 0.0,               // underscore — entirely below baseline
 
-  // ── Punctuation — top-aligned (near cap-line) ─────────────────────────
-  // ascRatio = cap_height_ratio / height_ratio  →  1.40 / 0.20 = 7.00
-  "'": 7.00, '"': 7.00,
-  '׳': 6.36, '״': 6.36, // 1.40 / 0.22
+  // ── Top-aligned punctuation (near cap-line): cap / heightRatio ────────
+  "'": CAP / 0.30, '"': CAP / 0.30,
+  '׳': CAP / 0.30, '״': CAP / 0.30,
+  '*': CAP / 0.55, '^': CAP / 0.55,
 
-  // ── Hyphen — centered between baseline and cap-line ───────────────────
-  // ascRatio = 0.5 + 0.5 × cap_ratio / height_ratio = 0.5 + 0.5×1.40/0.30
-  '-': 2.83,
+  // ── Brackets — top at cap-line, bottom dips below baseline ────────────
+  '(': CAP / 1.50, ')': CAP / 1.50,
+  '[': CAP / 1.50, ']': CAP / 1.50,
+  '{': CAP / 1.50, '}': CAP / 1.50,
+  '$': CAP / 1.50, '¢': 0.95,
 
-  // ── Parentheses — top at cap-line, bottom slightly below baseline ──────
-  // ascRatio = 1.40 / 1.20
-  '(': 1.17, ')': 1.17,
+  // ── Mid-line dashes — centered between baseline and x-height ──────────
+  '–': 0.5 + 0.5 / 0.12, '—': 0.5 + 0.5 / 0.12,
 
-  // ── Math operators — centered at mid x-height ─────────────────────────
-  // ascRatio = 0.5 + 0.5 / height_ratio
-  '+': 1.61,  // 0.5 + 0.5/0.45
-  '=': 1.93,  // 0.5 + 0.5/0.35
-  '*': 1.75,  // 0.5 + 0.5/0.40
+  // ── Math operators — centered at mid x-height: 0.5 + 0.5/heightRatio ──
+  '+': 0.5 + 0.5 / 0.70,
+  '-': 0.5 + 0.5 / 0.12,
+  '×': 0.5 + 0.5 / 0.70,
+  '÷': 0.5 + 0.5 / 0.80,
+  '=': 0.5 + 0.5 / 0.45,
+  '≠': 0.5 + 0.5 / 0.70,
+  '<': 0.5 + 0.5 / 0.80,
+  '>': 0.5 + 0.5 / 0.80,
+  '≤': 0.5 + 0.5 / 0.95,
+  '≥': 0.5 + 0.5 / 0.95,
+  '±': 0.5 + 0.5 / 0.95,
+  '~': 0.5 + 0.5 / 0.40,
+
+  // ── Horizontal arrows — centered; vertical arrows — slightly above ────
+  '←': 0.5 + 0.5 / 0.70,
+  '→': 0.5 + 0.5 / 0.70,
+  '↑': 0.5 + 0.5 / 1.20,
+  '↓': 0.5 + 0.5 / 1.20,
 };
 
 // Baseline sits 62% from the top of each line row (matches backend _BASELINE_Y_RATIO)
@@ -324,7 +400,7 @@ const HandwritingCanvas = React.memo(function HandwritingCanvas({
   canvasInnerW, lineH, topM, dims, inkColor,
 }: {
   pageLines:    string[][];
-  glyphMap:     Record<string, string>;
+  glyphMap:     Record<string, string[]>;
   displayCharH: number;
   lsp:          number;
   wsp:          number;
@@ -375,7 +451,9 @@ const HandwritingCanvas = React.memo(function HandwritingCanvas({
             const tiltY = rtl
               ? lineTilt * (1 - glyphX / canvasInnerW)
               : lineTilt * (glyphX / canvasInnerW);
-            const url  = glyphMap[ch];
+            // Pick a different sample per occurrence (seed derived from the
+            // glyph's position so it stays stable across re-renders).
+            const url  = pickVariantUrl(glyphMap[ch], li * 997 + wi * 97 + ci * 53 + 19);
             cells.push(
               <View
                 key={`${li}_${wi}_${ci}`}
@@ -527,22 +605,33 @@ export default function PreviewScreen({ navigation, route }: Props) {
   // ── Prefetch glyph images ──────────────────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
-    const entries = Object.entries(glyphMap).filter(([, url]) => Boolean(url));
+    // glyphMap maps each char to a LIST of variant URLs. Normalise to arrays
+    // (tolerating an older single-string response) and prefetch every variant
+    // so switching samples mid-render never shows a loading flash.
+    const entries = Object.entries(glyphMap)
+      .map(([ch, urls]) => [ch, Array.isArray(urls) ? urls : urls ? [urls] : []] as const)
+      .filter(([, urls]) => urls.length > 0);
     if (!entries.length) { setIsLoaded(true); return; }
 
     const collectedDims: GlyphDims = {};
-    const promises = entries.map(([ch, url]) => {
-      const full = absUrl(url);
-      return Promise.all([
-        Image.prefetch(full).catch(() => null),
+    const promises: Promise<unknown>[] = [];
+    for (const [ch, urls] of entries) {
+      // Prefetch all variants of this character.
+      for (const u of urls) {
+        promises.push(Image.prefetch(absUrl(u)).catch(() => null));
+      }
+      // Measure dimensions from the first variant only — all variants of the
+      // same character are roughly the same size, and layout just needs one
+      // representative measurement.
+      promises.push(
         new Promise<void>(resolve => {
-          Image.getSize(full,
+          Image.getSize(absUrl(urls[0]),
             (w, h) => { collectedDims[ch] = { w, h }; resolve(); },
             ()     => { resolve(); },
           );
         }),
-      ]);
-    });
+      );
+    }
 
     Promise.all(promises)
       .then(() => { if (!cancelled) { setGlyphDims(collectedDims); setIsLoaded(true); } })

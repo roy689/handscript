@@ -970,6 +970,13 @@ class _RefreshRequest(BaseModel):
 class _ResetRequest(BaseModel):
     email: str = Field(..., min_length=3, max_length=254, pattern=r"[^@]+@[^@]+\.[^@]+")
 
+class _IdpSignInRequest(BaseModel):
+    """
+    Federated sign-in request.
+    `id_token` is the credential returned by the native Google / Apple SDK.
+    """
+    id_token: str = Field(..., min_length=1, max_length=8192)
+
 
 @app.post("/auth/login")
 async def auth_login(body: _AuthCredentials, request: Request):
@@ -989,6 +996,29 @@ async def auth_signup(body: _AuthCredentials, request: Request):
         return await auth_service.sign_up(body.email, body.password)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+
+
+@app.post("/auth/signin-google")
+async def auth_signin_google(body: _IdpSignInRequest, request: Request):
+    """
+    Federated sign-in via Google.
+
+    Client flow:
+      1. Mobile uses @react-native-google-signin to get an ID token.
+      2. Mobile POSTs that token here.
+      3. Backend exchanges it with Firebase signInWithIdp.
+      4. Returns standard {idToken, refreshToken, uid, email}.
+    """
+    _check_ip_rate_limit(request.client.host)
+    try:
+        return await auth_service.sign_in_with_idp(
+            provider_id="google.com",
+            id_token=body.id_token,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc))
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
 
@@ -1789,7 +1819,18 @@ async def delete_character_variant(user_id: str, char: str, index: int, uid: str
 @app.post("/glyphs")
 async def get_glyphs(body: GlyphsRequest, uid: str = Depends(require_auth)):
     """
-    Return one representative variant URL per unique character in *text*.
+    Return ALL variant URLs per unique character in *text*.
+
+    Previously this returned a single representative URL per character, which
+    meant the client-side preview rendered every occurrence of a character with
+    the same image — defeating the whole purpose of uploading multiple samples.
+
+    Now it returns the full list of variant URLs per character so the client
+    can pick a different sample for each occurrence, matching the variety the
+    server-side /convert renderer already produces.
+
+    Response shape:
+        { "glyphs": { "<char>": ["url0", "url1", ...] }, "missing": [...] }
     """
     assert_same_user(uid, body.user_id)
     _check_rate_limit(body.user_id)
@@ -1799,16 +1840,16 @@ async def get_glyphs(body: GlyphsRequest, uid: str = Depends(require_auth)):
     bank = firebase_client.load_character_bank(body.user_id)
     unique_chars = {c for c in body.text if c.strip()}
 
-    glyph_map: dict[str, str] = {}
-    missing:   list[str]      = []
+    glyph_map: dict[str, list[str]] = {}
+    missing:   list[str]            = []
 
     for ch in unique_chars:
         norm      = normalize_char(ch)
         char_data = bank.get(ch) or bank.get(norm) or {}
         variants  = char_data.get("variants", [])
-        url = next((v["url"] for v in variants if v.get("url")), None)
-        if url:
-            glyph_map[ch] = url
+        urls = [v["url"] for v in variants if v.get("url")]
+        if urls:
+            glyph_map[ch] = urls
         else:
             missing.append(ch)
 

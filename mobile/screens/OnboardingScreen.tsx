@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated,
+  Image,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -9,10 +10,17 @@ import {
   TextInput,
   View,
 } from 'react-native';
+
+const LOGO = require('../assets/logo.png');
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
-import { signUpWithEmail, signInWithEmail } from '../src/services/auth';
+import {
+  signUpWithEmail,
+  signInWithEmail,
+  signInWithGoogle,
+  isGoogleSignInAvailable,
+} from '../src/services/auth';
 import { fonts, radius } from '../src/theme';
 import { useTheme } from '../src/contexts/ThemeContext';
 import { impactLight, impactMedium } from '../src/utils/haptics';
@@ -55,9 +63,25 @@ export default function OnboardingScreen({ navigation }: Props) {
     }
   }
 
+  // Email format validation (RFC 5322 simplified)
+  // Catches missing @, missing TLD, spaces, etc. — but not exotic-yet-valid
+  // addresses. Firebase will catch those on the server.
+  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+  function validateForm(): string | null {
+    const trimmedEmail = email.trim();
+    if (!trimmedEmail) return 'יש להזין כתובת אימייל';
+    if (!EMAIL_RE.test(trimmedEmail)) return 'כתובת אימייל לא תקינה';
+    if (!password) return 'יש להזין סיסמה';
+    if (password.length < 6) return 'הסיסמה חייבת להכיל לפחות 6 תווים';
+    if (mode === 'signup' && password.length > 128) return 'הסיסמה ארוכה מדי';
+    return null;
+  }
+
   async function handleSubmit() {
-    if (!email.trim() || !password) {
-      setError('יש למלא אימייל וסיסמה');
+    const validationError = validateForm();
+    if (validationError) {
+      setError(validationError);
       return;
     }
     setError(null);
@@ -72,6 +96,24 @@ export default function OnboardingScreen({ navigation }: Props) {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       setError(msg || 'שגיאה בהתחברות. נסה שנית');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleGoogleSignIn() {
+    if (loading) return;
+    setError(null);
+    setLoading(true);
+    try {
+      await signInWithGoogle();
+      navigation.reset({ index: 0, routes: [{ name: 'MainTabs' }] });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Quiet cancellation — don't show an error banner for user-initiated cancel
+      if (msg !== 'ההתחברות בוטלה') {
+        setError(msg || 'שגיאה בהתחברות עם גוגל');
+      }
     } finally {
       setLoading(false);
     }
@@ -102,10 +144,7 @@ export default function OnboardingScreen({ navigation }: Props) {
             transform: [{ scale: logoAnim.interpolate({ inputRange: [0, 1], outputRange: [0.85, 1] }) }],
             zIndex: 2,
           }}>
-            <View style={styles.logoStamp}>
-              <Text style={styles.logoGlyph}>ח</Text>
-              <View style={styles.logoStampRing} />
-            </View>
+            <Image source={LOGO} style={styles.logoImg} resizeMode="contain" />
           </Animated.View>
 
           <Animated.View style={{
@@ -235,6 +274,41 @@ export default function OnboardingScreen({ navigation }: Props) {
               </Pressable>
             )}
 
+            {/* ── Google Sign-In (Android, native build only) ─────────
+                Hidden on iOS until a proper Firebase iOS app is registered.
+                Also hidden in Expo Go because the native module
+                @react-native-google-signin/google-signin is not bundled
+                with Expo Go — it requires an EAS Build dev client. Users
+                running Expo Go see only the email/password form so they
+                don't get a TurboModule crash. */}
+            {Platform.OS === 'android' && isGoogleSignInAvailable() && (
+              <>
+                <View style={styles.dividerRow}>
+                  <View style={styles.dividerLine} />
+                  <Text style={styles.dividerText}>או</Text>
+                  <View style={styles.dividerLine} />
+                </View>
+
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.socialBtn,
+                    styles.googleBtn,
+                    loading && styles.socialBtnOff,
+                    !loading && pressed && { transform: [{ scale: 0.97 }], opacity: 0.9 },
+                  ]}
+                  onPress={() => { impactMedium(); handleGoogleSignIn(); }}
+                  disabled={loading}
+                  accessibilityRole="button"
+                  accessibilityLabel="התחבר עם גוגל"
+                  accessibilityHint="פותח חלון התחברות עם חשבון גוגל"
+                  accessibilityState={{ disabled: loading, busy: loading }}
+                >
+                  <Text style={styles.googleLogo}>G</Text>
+                  <Text style={styles.googleBtnText}>התחבר עם גוגל</Text>
+                </Pressable>
+              </>
+            )}
+
           </View>
         </Animated.View>
 
@@ -276,30 +350,11 @@ function getStyles(colors: ReturnType<typeof useTheme>['colors']) {
       backgroundColor: 'rgba(255,255,255,0.04)',
     },
 
-    logoStamp: {
-      width:           110,
-      height:          110,
-      borderRadius:    55,
-      backgroundColor: 'rgba(255,255,255,0.06)',
-      borderWidth:     1.5,
-      borderColor:     'rgba(255,255,255,0.14)',
-      justifyContent:  'center',
-      alignItems:      'center',
-      position:        'relative',
-    },
-    logoStampRing: {
-      position:     'absolute',
-      width:        126,
-      height:       126,
-      borderRadius: 63,
-      borderWidth:  1,
-      borderColor:  'rgba(255,255,255,0.07)',
-      borderStyle:  'dashed',
-    },
-    logoGlyph: {
-      fontSize:   54,
-      fontFamily: fonts.extraBold,
-      color:      '#FFFFFF',
+    logoImg: {
+      width:        180,
+      height:       180,
+      borderRadius: 90,
+      overflow:     'hidden',
     },
 
     appName: {
@@ -437,6 +492,63 @@ function getStyles(colors: ReturnType<typeof useTheme>['colors']) {
       fontSize:   13,
       fontFamily: fonts.regular,
       color:      'rgba(255,255,255,0.45)',
+      writingDirection: 'rtl',
+    },
+
+    // ── Social sign-in (Google / Apple) ───────────────────────────────────────
+    dividerRow: {
+      flexDirection:  'row',
+      alignItems:     'center',
+      gap:            12,
+      marginTop:      18,
+      marginBottom:   6,
+    },
+    dividerLine: {
+      flex:            1,
+      height:          StyleSheet.hairlineWidth,
+      backgroundColor: 'rgba(255,255,255,0.15)',
+    },
+    dividerText: {
+      fontSize:   12,
+      fontFamily: fonts.semiBold,
+      color:      'rgba(255,255,255,0.4)',
+      writingDirection: 'rtl',
+      letterSpacing: 0.5,
+    },
+
+    socialBtn: {
+      flexDirection:    'row',
+      alignItems:       'center',
+      justifyContent:   'center',
+      gap:              10,
+      paddingVertical:  14,
+      borderRadius:     radius.md,
+      marginTop:        10,
+    },
+    socialBtnOff: {
+      opacity: 0.5,
+    },
+
+    googleBtn: {
+      backgroundColor: '#FFFFFF',
+      borderWidth:     1,
+      borderColor:     'rgba(0,0,0,0.1)',
+    },
+    googleLogo: {
+      fontSize:   18,
+      fontFamily: fonts.extraBold,
+      color:      '#4285F4',
+      width:      22,
+      height:     22,
+      borderRadius: 11,
+      backgroundColor: '#FFFFFF',
+      textAlign:  'center',
+      lineHeight: 22,
+    },
+    googleBtnText: {
+      fontSize:         16,
+      fontFamily:       fonts.semiBold,
+      color:            '#1F1F1F',
       writingDirection: 'rtl',
     },
   });

@@ -5,11 +5,11 @@ import {
   Image,
   Pressable,
   StyleSheet,
-  Alert,
   ActivityIndicator,
   FlatList,
   useWindowDimensions,
 } from 'react-native';
+import { showAlert } from '../src/utils/alert';
 import * as FileSystem from 'expo-file-system/legacy';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -38,7 +38,7 @@ export default function CharacterSampleReviewScreen({ route, navigation }: Props
   // ── Delete ─────────────────────────────────────────────────────────────────
   function handleDelete(index: number) {
     impactLight();
-    Alert.alert(
+    showAlert(
       'מחיקת דגימה',
       `למחוק את דגימה ${index + 1}?`,
       [
@@ -50,7 +50,7 @@ export default function CharacterSampleReviewScreen({ route, navigation }: Props
             const next = uris.filter((_, i) => i !== index);
             setUris(next);
             if (next.length === 0) {
-              Alert.alert('אין דגימות', 'חזור לצלם לפחות דגימה אחת', [
+              showAlert('אין דגימות', 'חזור לצלם לפחות דגימה אחת', [
                 { text: 'אישור', onPress: () => navigation.goBack() },
               ]);
             }
@@ -63,7 +63,7 @@ export default function CharacterSampleReviewScreen({ route, navigation }: Props
   // ── Retake specific slot ───────────────────────────────────────────────────
   function handleRetake(index: number) {
     impactLight();
-    Alert.alert(
+    showAlert(
       'צלם מחדש',
       `מחק את דגימה ${index + 1} וצלם אחת חדשה במקומה?`,
       [
@@ -97,7 +97,7 @@ export default function CharacterSampleReviewScreen({ route, navigation }: Props
   // ── Save ───────────────────────────────────────────────────────────────────
   async function handleSave() {
     if (uris.length === 0) {
-      Alert.alert('שגיאה', 'אין דגימות לשמירה');
+      showAlert('שגיאה', 'אין דגימות לשמירה');
       return;
     }
     impactMedium();
@@ -141,40 +141,58 @@ export default function CharacterSampleReviewScreen({ route, navigation }: Props
         throw new Error(detail ?? `שגיאת שרת (${res.status})`);
       }
 
-      const data = await res.json() as { status: string; samples_saved?: number; detail?: unknown };
+      const data = await res.json() as {
+        status:         string;
+        samples_saved?: number;
+        urls?:          string[];
+        detail?:        unknown;
+      };
       if (data.status !== 'success') {
         const detail = typeof data.detail === 'string' ? data.detail : undefined;
         throw new Error(detail ?? 'העיבוד נכשל — נסה לצלם שוב בתאורה טובה יותר');
       }
 
       // Update local status badge — safe parse
-      let currentStatus: Record<string, unknown> = {};
+      let currentStatus: Record<string, { captured: boolean; count: number }> = {};
       try {
         const raw = await AsyncStorage.getItem('character_status');
         if (raw) currentStatus = JSON.parse(raw);
       } catch { /* use empty fallback */ }
-      currentStatus[character] = { captured: true, count: uris.length };
+
+      // Server returns `urls` containing every variant currently in the bank
+      // for this character — including ones uploaded in previous sessions.
+      // Use that as the source of truth for the badge count so it stays in
+      // sync with what the variants screen shows. Fall back to a local
+      // accumulation if the server response is missing urls for any reason.
+      const previousCount = currentStatus[character]?.count ?? 0;
+      const totalCount    = Array.isArray(data.urls)
+        ? data.urls.length
+        : previousCount + (data.samples_saved ?? uris.length);
+
+      currentStatus[character] = { captured: totalCount > 0, count: totalCount };
       await AsyncStorage.setItem('character_status', JSON.stringify(currentStatus));
 
       // Show success then navigate on dismiss — avoids race with setTimeout
-      const savedCount = uris.length;
-      Alert.alert('✓ נשמר', `${savedCount} דגימות של "${character}" נשמרו במאגר`, [
+      const savedCount = data.samples_saved ?? uris.length;
+      showAlert('✓ נשמר', `${savedCount} דגימות של "${character}" נשמרו במאגר`, [
         {
           text: 'אישור',
           onPress: () => {
             if (!mountedRef.current) return;
-            if (returnTo === 'CharacterVariants') {
-              navigation.navigate('CharacterVariants', { character });
-            } else {
-              navigation.navigate('MainTabs');
-            }
+            // Always return to the character bank (MainTabs) after a save.
+            // The previous behaviour pushed CharacterVariants again, which
+            // left CharacterCapture and SampleReview on the back stack and
+            // forced the user to press Back multiple times to reach the bank.
+            // navigation.reset clears that stack so the back button takes them
+            // out of the app naturally from the bank screen.
+            navigation.reset({ index: 0, routes: [{ name: 'MainTabs' }] });
           },
         },
       ]);
 
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'שגיאה לא ידועה';
-      Alert.alert('שמירה נכשלה', msg);
+      showAlert('שמירה נכשלה', msg);
     } finally {
       setUploading(false);
     }
@@ -297,8 +315,8 @@ function getStyles(colors: ThemeColors) {
       alignItems: 'center',
     },
     headerChar:  { fontSize: 64, fontFamily: fonts.extraBold, color: '#fff', lineHeight: 76 },
-    headerTitle: { fontSize: 18, fontFamily: fonts.bold,      color: '#fff', marginBottom: 4 },
-    headerSub:   { fontSize: 13, fontFamily: fonts.regular,   color: '#94A3B8', textAlign: 'center' },
+    headerTitle: { fontSize: 18, fontFamily: fonts.bold,      color: '#fff', marginBottom: 4, writingDirection: 'rtl' },
+    headerSub:   { fontSize: 13, fontFamily: fonts.regular,   color: '#94A3B8', textAlign: 'center', writingDirection: 'rtl' },
 
     listContent: { padding: 16, paddingBottom: 8 },
     row:         { gap: 16, marginBottom: 16 },
@@ -317,6 +335,7 @@ function getStyles(colors: ThemeColors) {
       fontFamily: fonts.semiBold,
       color: colors.inkMid,
       textAlign: 'center',
+      writingDirection: 'rtl',
       paddingTop: 6,
       paddingBottom: 2,
     },
@@ -324,7 +343,7 @@ function getStyles(colors: ThemeColors) {
     cardBtn:  { flex: 1, paddingVertical: 6, borderRadius: radius.sm, alignItems: 'center' },
     cardBtnRetake: { backgroundColor: colors.accent },
     cardBtnDelete: { backgroundColor: colors.danger },
-    cardBtnText:   { color: '#fff', fontSize: 11, fontFamily: fonts.bold },
+    cardBtnText:   { color: '#fff', fontSize: 11, fontFamily: fonts.bold, writingDirection: 'rtl' },
 
     footer: {
       flexDirection: 'row',
@@ -345,7 +364,7 @@ function getStyles(colors: ThemeColors) {
     addBtn:         { backgroundColor: colors.inkMid },
     saveBtn:        { backgroundColor: colors.success, ...shadow.btn },
     saveBtnDisabled:{ backgroundColor: colors.inkFaint, shadowOpacity: 0 },
-    footerBtnText:  { color: '#fff', fontSize: 16, fontFamily: fonts.bold },
+    footerBtnText:  { color: '#fff', fontSize: 16, fontFamily: fonts.bold, writingDirection: 'rtl' },
 
     emptyState: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 48 },
     emptyText:  { fontSize: 15, fontFamily: fonts.semiBold, color: colors.inkFaint, writingDirection: 'rtl' },
@@ -361,6 +380,6 @@ function getStyles(colors: ThemeColors) {
       paddingVertical: 28, paddingHorizontal: 40,
       alignItems: 'center',
     },
-    overlayText: { marginTop: 14, fontSize: 16, fontFamily: fonts.bold, color: colors.inkDark },
+    overlayText: { marginTop: 14, fontSize: 16, fontFamily: fonts.bold, color: colors.inkDark, writingDirection: 'rtl' },
   });
 }

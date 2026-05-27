@@ -112,8 +112,8 @@ function getStyles(colors: ReturnType<typeof useTheme>['colors']) {
       lineHeight: 130,
       marginBottom: 8,
     },
-    title:    { fontSize: 20, fontFamily: fonts.bold,    color: colors.inkDark, marginBottom: 36 },
-    question: { fontSize: 16, fontFamily: fonts.regular, color: colors.inkMid,  marginBottom: 20 },
+    title:    { fontSize: 20, fontFamily: fonts.bold,    color: colors.inkDark, marginBottom: 36, writingDirection: 'rtl' },
+    question: { fontSize: 16, fontFamily: fonts.regular, color: colors.inkMid,  marginBottom: 20, writingDirection: 'rtl' },
 
     counter: { flexDirection: 'row', alignItems: 'center', marginBottom: 24 },
     counterBtn: {
@@ -146,6 +146,7 @@ function getStyles(colors: ReturnType<typeof useTheme>['colors']) {
       fontFamily: fonts.regular,
       color: colors.inkMid,
       textAlign: 'center',
+      writingDirection: 'rtl',
       lineHeight: 20,
     },
 
@@ -164,6 +165,7 @@ function getStyles(colors: ReturnType<typeof useTheme>['colors']) {
       fontFamily: fonts.regular,
       color: colors.inkMid,
       textAlign: 'center',
+      writingDirection: 'rtl',
       lineHeight: 20,
     },
 
@@ -175,6 +177,6 @@ function getStyles(colors: ReturnType<typeof useTheme>['colors']) {
       alignItems: 'center',
       ...shadow.btn,
     },
-    startBtnText: { fontSize: 18, fontFamily: fonts.bold, color: '#fff' },
+    startBtnText: { fontSize: 18, fontFamily: fonts.bold, color: '#fff', writingDirection: 'rtl' },
   });
 }

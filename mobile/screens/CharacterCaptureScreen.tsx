@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { showAlert } from '../src/utils/alert';
 import {
-  Alert,
   Image,
   Linking,
   Pressable,
@@ -115,7 +115,7 @@ export default function CharacterCaptureScreen({ route, navigation }: Props) {
 
       setPreviewUri(cropped.uri);
     } catch {
-      Alert.alert('שגיאה', 'הצילום נכשל, נסה שוב');
+      showAlert('שגיאה', 'הצילום נכשל, נסה שוב');
     }
   }
 
@@ -123,7 +123,7 @@ export default function CharacterCaptureScreen({ route, navigation }: Props) {
   async function handleDrawCapture() {
     if (!drawingRef.current || capturing) return;
     if (!drawingRef.current.hasStrokes()) {
-      Alert.alert('', 'יש לצייר את התו תחילה');
+      showAlert('', 'יש לצייר את התו תחילה');
       return;
     }
     impactMedium();
@@ -134,7 +134,7 @@ export default function CharacterCaptureScreen({ route, navigation }: Props) {
       const pngUri = await drawingRef.current.getImageUri();
       setPreviewUri(pngUri);
     } catch {
-      Alert.alert('שגיאה', 'שמירת הציור נכשלה, נסה שוב');
+      showAlert('שגיאה', 'שמירת הציור נכשלה, נסה שוב');
     } finally {
       setCapturing(false);
     }
@@ -394,7 +394,7 @@ function getStyles(colors: ThemeColors) {
     center: { justifyContent: 'center', alignItems: 'center', paddingHorizontal: 32 },
 
     // Permission
-    permText:    { fontSize: 18, color: '#fff', textAlign: 'center', marginBottom: 20, fontFamily: fonts.semiBold },
+    permText:    { fontSize: 18, color: '#fff', textAlign: 'center', writingDirection: 'rtl', marginBottom: 20, fontFamily: fonts.semiBold },
     permBtn:     { backgroundColor: colors.accent, paddingHorizontal: 32, paddingVertical: 14, borderRadius: radius.md },
     permBtnText: { color: '#fff', fontSize: 16, fontFamily: fonts.bold },
 
@@ -450,6 +450,7 @@ function getStyles(colors: ThemeColors) {
       color: '#fff',
       fontSize: 14,
       fontFamily: fonts.semiBold,
+      writingDirection: 'rtl',
     },
 
     // Progress
@@ -467,6 +468,7 @@ function getStyles(colors: ThemeColors) {
       paddingVertical: 6,
       borderRadius: 20,
       overflow: 'hidden',
+      writingDirection: 'rtl',
     },
 
     // Capture button
@@ -482,7 +484,7 @@ function getStyles(colors: ThemeColors) {
     captureBtnOff:    { borderColor: 'rgba(255,255,255,0.3)' },
     captureInner:     { width: 58, height: 58, borderRadius: 29, backgroundColor: '#fff' },
     captureInnerOff:  { backgroundColor: 'rgba(255,255,255,0.3)' },
-    captureLbl:       { color: '#fff', fontSize: 14, fontFamily: fonts.semiBold },
+    captureLbl:       { color: '#fff', fontSize: 14, fontFamily: fonts.semiBold, writingDirection: 'rtl' },
 
     // Mode toggle bar
     modeBar: {
@@ -507,6 +509,7 @@ function getStyles(colors: ThemeColors) {
       fontSize: 15,
       fontFamily: fonts.semiBold,
       color: 'rgba(255,255,255,0.65)',
+      writingDirection: 'rtl',
     },
     modeTabTextActive: {
       color: '#fff',
@@ -520,7 +523,7 @@ function getStyles(colors: ThemeColors) {
       alignItems: 'center',
     },
     previewChar:     { fontSize: 48, fontFamily: fonts.extraBold, color: '#fff' },
-    previewProgress: { fontSize: 14, fontFamily: fonts.semiBold, color: colors.accent, marginTop: 4 },
+    previewProgress: { fontSize: 14, fontFamily: fonts.semiBold, color: colors.accent, marginTop: 4, writingDirection: 'rtl' },
 
     previewActions: {
       position: 'absolute', bottom: 44, left: 24, right: 24,
@@ -529,6 +532,6 @@ function getStyles(colors: ThemeColors) {
     btn:      { flex: 1, paddingVertical: 16, borderRadius: radius.md, alignItems: 'center' },
     btnGrey:  { backgroundColor: 'rgba(255,255,255,0.15)', borderWidth: 1.5, borderColor: 'rgba(255,255,255,0.4)' },
     btnGreen: { backgroundColor: colors.success },
-    btnText:  { color: '#fff', fontSize: 16, fontFamily: fonts.bold },
+    btnText:  { color: '#fff', fontSize: 16, fontFamily: fonts.bold, writingDirection: 'rtl' },
   });
 }

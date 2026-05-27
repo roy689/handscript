@@ -21,7 +21,14 @@
         "NSCameraUsageDescription": "HandScript משתמש במצלמה כדי לצלם את כתב היד שלך וליצור פונט אישי.",
         "NSPhotoLibraryAddUsageDescription": "HandScript שומר את הדפים שיצרת כתמונות בגלריה כדי שתוכלו לשתף בקלות.",
         "NSPhotoLibraryUsageDescription": "HandScript טוען תמונות של דפי כתב יד מהגלריה כדי לאמן את הפונט האישי, ושומר את הדפים שהפכת לכתב יד.",
-        "ITSAppUsesNonExemptEncryption": false
+        "ITSAppUsesNonExemptEncryption": false,
+        "CFBundleURLTypes": [
+          {
+            "CFBundleURLSchemes": [
+              "com.googleusercontent.apps.placeholder"
+            ]
+          }
+        ]
       }
     },
     "android": {
@@ -70,13 +77,21 @@
           "isAccessMediaLocationEnabled": false
         }
       ],
-      "expo-asset"
+      "expo-asset",
+      [
+        "@react-native-google-signin/google-signin",
+        {
+          "iosUrlScheme": "com.googleusercontent.apps.placeholder"
+        }
+      ]
     ],
     "extra": {
       "eas": {
         "projectId": "28b061a5-77c0-4634-871b-f9e473e9ba81"
       },
-      "BACKEND_URL": "https://handscript-production-2667.up.railway.app"
+      "BACKEND_URL": "https://handscript-production-2667.up.railway.app",
+      "GOOGLE_WEB_CLIENT_ID": "REPLACE_WITH_FIREBASE_WEB_CLIENT_ID.apps.googleusercontent.com",
+      "GOOGLE_IOS_CLIENT_ID": "REPLACE_WITH_FIREBASE_IOS_CLIENT_ID.apps.googleusercontent.com"
     }
   }
 }

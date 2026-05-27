@@ -257,7 +257,8 @@ export default function EditorScreen({ navigation }: Props) {
   return (
     <KeyboardAvoidingView
       style={styles.kav}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      behavior="padding"
+      keyboardVerticalOffset={Platform.OS === 'android' ? 20 : 0}
     >
       <SafeAreaView style={styles.safe}>
 
@@ -327,8 +328,6 @@ export default function EditorScreen({ navigation }: Props) {
             <Text style={styles.errorText}>{error}</Text>
           </View>
         )}
-
-        <View style={{ flex: 1 }} />
 
         {/* ── Convert button ──────────────────────────────────────────────── */}
         <View style={styles.actionBar}>
@@ -433,7 +432,6 @@ function getStyles(colors: ThemeColors) {
     // ── Paper ────────────────────────────────────────────────────────────────
     paperWrap: {
       flex:            1,
-      maxHeight:       '48%',
       backgroundColor: colors.bgInput,
       borderRadius:    radius.lg,
       borderWidth:     1,

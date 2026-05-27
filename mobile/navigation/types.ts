@@ -16,12 +16,14 @@ export type RootStackParamList = {
     background: string;
     inkColor:   'black' | 'blue' | 'red';
     style:      { charHeight: number; letterSpacing: number; wordSpacing: number; baselineJitter: number; slant: number; inkBlobs: number };
-    glyphMap:   Record<string, string>;
+    // Each character maps to ALL its variant URLs so the renderer can pick a
+    // different sample per occurrence.
+    glyphMap:   Record<string, string[]>;
   };
   FinalView:        {
     text:        string;
     background:  string;
-    glyphMap:    Record<string, string>;
+    glyphMap:    Record<string, string[]>;
     style:       { charHeight: number; letterSpacing: number; wordSpacing: number; baselineJitter: number; slant: number; inkBlobs: number };
     inkColor:    'black' | 'blue' | 'red';
   };

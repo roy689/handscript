@@ -87,7 +87,7 @@ function getSliderStyles(colors: ThemeColors) {
   return StyleSheet.create({
     wrap:   { marginBottom: 24 },
     header: { flexDirection: 'row-reverse', justifyContent: 'space-between', marginBottom: 6 },
-    label:  { fontSize: 15, fontFamily: fonts.semiBold, color: colors.inkDark },
+    label:  { fontSize: 15, fontFamily: fonts.semiBold, color: colors.inkDark, writingDirection: 'rtl' },
     value:  { fontSize: 15, fontFamily: fonts.bold,     color: colors.accent,  minWidth: 44, textAlign: 'left' },
     slider: { width: '100%', height: 36 },
     ticks:  { flexDirection: 'row-reverse', justifyContent: 'space-between', marginTop: -4 },
@@ -382,8 +382,8 @@ function getStyles(colors: ThemeColors) {
       paddingHorizontal: 20,
       alignItems: 'center',
     },
-    title: { fontSize: 22, fontFamily: fonts.bold,    color: '#fff',    marginBottom: 4 },
-    sub:   { fontSize: 13, fontFamily: fonts.regular,  color: '#94A3B8', textAlign: 'center' },
+    title: { fontSize: 22, fontFamily: fonts.bold,    color: '#fff',    marginBottom: 4, writingDirection: 'rtl' },
+    sub:   { fontSize: 13, fontFamily: fonts.regular,  color: '#94A3B8', textAlign: 'center', writingDirection: 'rtl' },
 
     previewSection: { paddingHorizontal: 16, paddingTop: 24, paddingBottom: 8 },
     sectionLabel:   {
@@ -391,6 +391,7 @@ function getStyles(colors: ThemeColors) {
       fontFamily: fonts.bold,
       color: colors.inkLight,
       textAlign: 'right',
+      writingDirection: 'rtl',
       textTransform: 'uppercase',
       letterSpacing: 0.6,
       marginBottom: 12,
@@ -420,7 +421,7 @@ function getStyles(colors: ThemeColors) {
       alignItems: 'center',
       ...shadow.btn,
     },
-    saveBtnText: { color: '#fff', fontSize: 16, fontFamily: fonts.bold },
+    saveBtnText: { color: '#fff', fontSize: 16, fontFamily: fonts.bold, writingDirection: 'rtl' },
     resetBtn: {
       paddingVertical: 16,
       paddingHorizontal: 20,
@@ -429,6 +430,6 @@ function getStyles(colors: ThemeColors) {
       borderColor: colors.border,
       alignItems: 'center',
     },
-    resetBtnText: { color: colors.inkMid, fontSize: 15, fontFamily: fonts.semiBold },
+    resetBtnText: { color: colors.inkMid, fontSize: 15, fontFamily: fonts.semiBold, writingDirection: 'rtl' },
   });
 }

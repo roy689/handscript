@@ -1,7 +1,7 @@
 import React, { useRef, useState, useMemo } from 'react';
 import * as ImageManipulator from 'expo-image-manipulator';
+import { showAlert } from '../src/utils/alert';
 import {
-  Alert,
   Image,
   Linking,
   Pressable,
@@ -54,7 +54,7 @@ export default function CameraScreen({ navigation }: Props) {
       );
       setPhotoUri(resized.uri);
     } catch {
-      Alert.alert('שגיאה', 'הצילום נכשל, נסה שוב');
+      showAlert('שגיאה', 'הצילום נכשל, נסה שוב');
     }
   }
 

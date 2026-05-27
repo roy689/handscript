@@ -31,10 +31,8 @@ setupGlobalErrorHandler();
 I18nManager.allowRTL(true);
 if (!I18nManager.isRTL) {
   I18nManager.forceRTL(true);
-  // In production builds only — Expo Go doesn't support reloadAsync
-  if (!__DEV__) {
-    Updates.reloadAsync().catch(() => {});
-  }
+  // expo-dev-client supports reloadAsync in dev mode too
+  Updates.reloadAsync().catch(() => {});
 }
 
 
@@ -60,6 +58,7 @@ import TermsOfServiceScreen        from './screens/TermsOfServiceScreen';
 import ContactScreen               from './screens/ContactScreen';
 import ErrorBoundary               from './src/components/ErrorBoundary';
 import ProfileAvatar               from './src/components/ProfileAvatar';
+import { AppAlertHost }            from './src/components/AppAlert';
 import { ThemeProvider, useTheme } from './src/contexts/ThemeContext';
 import { fonts }                   from './src/theme';
 import { auth }                    from './src/services/firebase';
@@ -107,6 +106,7 @@ function MainTabs() {
       color:      colors.inkDark,
       fontSize:   17,
     } as const,
+    headerTitleAlign:    'center' as const,
     headerShadowVisible:    false,
     headerBackButtonDisplayMode: 'minimal' as const,
   };
@@ -180,6 +180,7 @@ function AppNavigator({ initialRoute }: { initialRoute: InitialRoute }) {
       color:      colors.inkDark,
       fontSize:   17,
     } as const,
+    headerTitleAlign:       'center' as const,
     headerShadowVisible:    false,
     headerBackButtonDisplayMode: 'minimal' as const,
     contentStyle:           { backgroundColor: colors.bgPage },
@@ -310,6 +311,7 @@ export default function App() {
       <ErrorBoundary context="App">
         <ThemeProvider>
           <AppNavigator initialRoute={initialRoute} />
+          <AppAlertHost />
         </ThemeProvider>
       </ErrorBoundary>
     </SafeAreaProvider>

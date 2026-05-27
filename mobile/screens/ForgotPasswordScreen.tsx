@@ -1,6 +1,7 @@
 import React, { useMemo, useRef, useState } from 'react';
 import {
   Animated,
+  Image,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -9,6 +10,8 @@ import {
   TextInput,
   View,
 } from 'react-native';
+
+const LOGO = require('../assets/logo.png');
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
@@ -39,10 +42,17 @@ export default function ForgotPasswordScreen({ navigation }: Props) {
     }
   }
 
+  // Email format validation — same regex as OnboardingScreen for consistency
+  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
   async function handleSend() {
     const trimmed = email.trim();
     if (!trimmed) {
       setError('יש להזין כתובת אימייל');
+      return;
+    }
+    if (!EMAIL_RE.test(trimmed)) {
+      setError('כתובת אימייל לא תקינה');
       return;
     }
     setError(null);
@@ -78,10 +88,8 @@ export default function ForgotPasswordScreen({ navigation }: Props) {
     >
       <SafeAreaView style={styles.safe}>
 
-        {/* ── Icon ────────────────────────────────────────────────────── */}
-        <View style={styles.iconWrap}>
-          <Text style={styles.iconGlyph}>✉</Text>
-        </View>
+        {/* ── Logo ────────────────────────────────────────────────────── */}
+        <Image source={LOGO} style={styles.logoImg} resizeMode="contain" />
 
         {/* ── Card ────────────────────────────────────────────────────── */}
         <Animated.View style={[styles.card, {
@@ -194,12 +202,12 @@ function getStyles(colors: ReturnType<typeof useTheme>['colors']) {
       gap: 24,
     },
 
-    iconWrap: {
-      alignItems: 'center',
-    },
-    iconGlyph: {
-      fontSize:   56,
-      color:      'rgba(255,255,255,0.15)',
+    logoImg: {
+      width:        140,
+      height:       140,
+      alignSelf:    'center',
+      borderRadius: 70,
+      overflow:     'hidden',
     },
 
     card: {

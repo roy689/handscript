@@ -533,85 +533,244 @@ _AVG_CHAR_WIDTH = 62    # estimated glyph width for paragraph line-breaking
 _BASELINE_Y_RATIO = 0.62   # baseline at 62 % — leaves room for ascenders above, descenders below
 
 # ---------------------------------------------------------------------------
-# _CHAR_HEIGHT_RATIO: total glyph height as multiple of _TARGET_CHAR_H
+# _CHAR_HEIGHT_RATIO: total glyph height as multiple of _TARGET_CHAR_H (80 px)
 #
-# Rules (as specified):
-#   ל, ף, ץ  — ASCENDERS: bottom at baseline, top overflows above the line
-#   ן, ך, ק  — DESCENDERS: top at x-height, bottom overflows below the line
-#   all others — normal x-height, entirely above baseline
+# Placement formula (baseline_y = 180 × 0.62 = 112 px):
+#   char_height  = round(_TARGET_CHAR_H × h_ratio)
+#   ascender_h   = round(char_height × asc_ratio)
+#   top_y        = baseline_y − ascender_h     ← where glyph is pasted
+#   bottom_y     = top_y + char_height
+#
+# Design rules:
+#   Normal x-height letters  h_ratio ≈ 0.75–1.0, asc = 1.0
+#     → entire glyph above baseline, bottom = baseline (y 112)
+#   ל (ascender)             h_ratio = 1.35, asc = 1.0
+#     → foot on baseline, head rises 28 px above normal tops
+#   Descenders (ן ך ף ץ ק)  asc = _asc(h_ratio) = 1/h_ratio
+#     → top aligns with x-height top (y 32), stem hangs below y 112
+#   Digits / uppercase       h_ratio ≈ 0.95–1.10, asc = 1.0
+#   Operators (+ = × ...)    small h, asc > 1.0  → centred in x-height zone
+#   Apostrophes / quotes     small h, asc ≈ 4–5  → pinned near top of x-height
+#   Period                   h_ratio = 0.15, asc = 1.0 → tiny dot on baseline
+#   Comma                    h_ratio = 0.28, asc = 0.82 → dot near baseline + tail
 # ---------------------------------------------------------------------------
 _CHAR_HEIGHT_RATIO: dict[str, float] = {
-    # ── Short Hebrew letters ─────────────────────────────────────────────────
-    "י": 0.45,
-    "ו": 0.70,
-    "ז": 0.75,
-    "ר": 0.80,
-    "ד": 0.82,
-    "ג": 0.82,
-    "ח": 0.87,
-    "ה": 0.88,
-    "ב": 0.90,
-    "כ": 0.90,
-    # ── Ascenders: bottom on baseline, top rises above line ──────────────────
-    "ל": 1.30,   # lamed
-    "ף": 1.25,   # final pe  — loop rises above x-height
-    "ץ": 1.20,   # final tsadi — rises above x-height
-    # ── Descenders: top at x-height, stem goes below baseline ────────────────
-    "ן": 1.28,   # final nun
-    "ך": 1.28,   # final kaf
-    "ק": 1.18,   # qof — slight descender
-    # ── Closed final forms (no ascender / descender) ─────────────────────────
-    "ם": 1.00,
+    # ── Hebrew: standard x-height (entirely above baseline) ──────────────────
+    "א": 0.92,   # alef
+    "ב": 0.92,   # bet
+    "ג": 0.82,   # gimel — somewhat shorter
+    "ד": 0.82,   # dalet — flat top, somewhat shorter
+    "ה": 0.90,   # he
+    "ו": 0.68,   # vav — short narrow stroke
+    "ז": 0.78,   # zayin — slightly shorter
+    "ח": 0.92,   # het
+    "ט": 0.92,   # tet — round, full x-height
+    "י": 0.45,   # yod — very tiny (compose_line pins its top to x-height)
+    "כ": 0.90,   # kaf (open)
+    "מ": 0.92,   # mem (open)
+    "נ": 0.82,   # nun (open) — slightly shorter
+    "ס": 0.92,   # samekh — round, full x-height
+    "ע": 0.90,   # ayin
+    "פ": 0.90,   # pe (open)
+    "צ": 0.85,   # tsadi (open) — slightly shorter
+    "ר": 0.75,   # resh — one of the shortest Hebrew letters
+    "ש": 0.92,   # shin — wide, full x-height
+    "ת": 0.92,   # tav
+    # ── Hebrew: ascender ─────────────────────────────────────────────────────
+    "ל": 1.35,   # lamed — head rises ~35 % above x-height; foot on baseline
+    # ── Hebrew: descenders (top at x-height, stem below baseline) ────────────
+    "ק": 1.19,   # qof — slight descender (~15 px)
+    "ך": 1.56,   # final kaf — long descender (~45 px)
+    "ן": 1.56,   # final nun — long descender (~45 px)
+    "ף": 1.38,   # final pe — medium descender (~30 px)
+    "ץ": 1.31,   # final tsadi — medium descender (~25 px)
+    # ── Hebrew: closed final forms (no descender) ─────────────────────────────
+    "ם": 0.95,   # final mem — closed square, same height as normal letters
+    # ── Digits 0–9 (x-height, on baseline) ───────────────────────────────────
+    "0": 0.95, "1": 0.95, "2": 0.95, "3": 0.95, "4": 0.95,
+    "5": 0.95, "6": 0.95, "7": 0.95, "8": 0.95, "9": 0.95,
+    # ── Latin lowercase: x-height group ──────────────────────────────────────
+    "a": 0.92, "c": 0.92, "e": 0.92, "i": 0.92, "m": 0.92, "n": 0.92,
+    "o": 0.92, "r": 0.80, "s": 0.88, "u": 0.92, "v": 0.92,
+    "w": 0.92, "x": 0.88, "z": 0.88,
+    # ── Latin lowercase: ascenders ────────────────────────────────────────────
+    "b": 1.25, "d": 1.25, "h": 1.22, "k": 1.22, "l": 1.22,
+    "f": 1.20, "t": 1.05,
+    # ── Latin lowercase: descenders ───────────────────────────────────────────
+    "g": 1.38,   # round bowl at x-height + tail (~30 px descender)
+    "j": 1.38,   # hook descender
+    "p": 1.25,   # bowl at x-height + stem down (~20 px)
+    "q": 1.25,   # mirror of p
+    "y": 1.30,   # descends ~22 px below baseline
+    # ── Latin uppercase (cap-height, on baseline) ─────────────────────────────
+    "A": 1.10, "B": 1.10, "C": 1.10, "D": 1.10, "E": 1.10,
+    "F": 1.10, "G": 1.10, "H": 1.10, "I": 1.10, "J": 1.10,
+    "K": 1.10, "L": 1.10, "M": 1.10, "N": 1.10, "O": 1.10,
+    "P": 1.10, "Q": 1.10, "R": 1.10, "S": 1.10, "T": 1.10,
+    "U": 1.10, "V": 1.10, "W": 1.10, "X": 1.10, "Y": 1.10, "Z": 1.10,
     # ── Punctuation ───────────────────────────────────────────────────────────
-    ".": 0.18,
-    ",": 0.28,
-    "!": 1.00,
-    "?": 1.00,
-    "׳": 0.30,
-    "״": 0.30,
-    # ── Latin descenders ─────────────────────────────────────────────────────
-    "g": 1.15, "j": 1.10, "p": 1.15, "q": 1.15, "y": 1.15,
-    "f": 1.08, "t": 1.02, "i": 0.75, "l": 1.08,
+    ".": 0.15,   # period — tiny dot sitting on baseline
+    ",": 0.28,   # comma — dot near baseline + short descending tail
+    ":": 0.80,   # colon — two dots spanning x-height, bottom on baseline
+    ";": 0.85,   # semicolon — like colon + descending comma tail
+    "!": 1.00,   # exclamation — full x-height
+    "?": 1.00,   # question mark — full x-height
+    "'": 0.22,   # apostrophe — small mark, floats at top of x-height
+    '"': 0.22,   # double quote — same as apostrophe
+    "׳": 0.22,   # geresh (Hebrew apostrophe)
+    "״": 0.22,   # gershayim (Hebrew double quote)
+    "-": 0.12,   # hyphen — thin horizontal stroke, vertically centred
+    "–": 0.12,   # en dash — same height as hyphen
+    "—": 0.12,   # em dash — same height as hyphen
+    "…": 0.15,   # ellipsis — dots on baseline, same as period
+    "(": 1.10, ")": 1.10,   # paren — slightly taller than x-height, foot on baseline
+    "[": 1.10, "]": 1.10,   # bracket — same as paren
+    "{": 1.10, "}": 1.10,   # brace — same as paren
+    # ── Math symbols ──────────────────────────────────────────────────────────
+    "+": 0.55,   # plus — vertically centred in x-height zone
+    "−": 0.12,   # minus U+2212 — thin bar, centred like hyphen
+    "×": 0.55,   # multiply — centred
+    "÷": 0.55,   # divide — centred
+    "=": 0.45,   # equals — two thin bars, centred
+    "≠": 0.55,   # not-equal — like = with diagonal slash
+    "<": 0.65,   # less-than — centred chevron
+    ">": 0.65,   # greater-than — centred chevron
+    "≤": 0.75,   # less-or-equal — chevron + underline
+    "≥": 0.75,   # greater-or-equal — chevron + underline
+    "±": 0.85,   # plus-minus — centred
+    "%": 0.95,   # percent — full x-height, on baseline
+    "√": 1.20,   # square root — ascender; radical arm rises above x-height
+    "^": 0.45,   # caret/power — superscript at top of x-height
+    "π": 0.90,   # pi — x-height, on baseline
+    # ── Currency ──────────────────────────────────────────────────────────────
+    "₪": 1.05,   # shekel — full x-height, on baseline
+    "$": 1.20,   # dollar — vertical stem extends above and below
+    "€": 1.00,   # euro — x-height
+    "£": 1.00,   # pound — x-height
+    "¢": 0.85,   # cent — small, around x-height
+    # ── Arrows ──────────────────────────────────────────────────────────────────
+    "←": 0.55,   # left arrow — centred like an operator
+    "→": 0.55,   # right arrow — centred like an operator
+    "↑": 1.00,   # up arrow — full height
+    "↓": 1.00,   # down arrow — full height
+    # ── Special symbols ──────────────────────────────────────────────────────────
+    "@": 1.05,   # at — slightly taller than x-height
+    "#": 1.00,   # hash — x-height
+    "&": 1.00,   # ampersand — x-height
+    "*": 0.45,   # asterisk — superscript at top of x-height
+    "/": 1.10,   # slash — spans the line
+    "\\": 1.10,  # backslash — spans the line
+    "|": 1.10,   # pipe — vertical bar
+    "~": 0.35,   # tilde — thin, centred
+    "_": 0.10,   # underscore — below the baseline
 }
 
 # ---------------------------------------------------------------------------
 # _CHAR_ASCENDER_RATIO: fraction of glyph height that sits ABOVE the baseline
 #
-#   Ascenders (ל, ף, ץ):   ratio = 1.0  → entire height above baseline
-#   Normal letters:          ratio = 1.0  → entire height above baseline
-#   Descenders (ן, ך, ק):   ratio = TARGET_H / total_H  → top aligns with
-#                            normal letters, rest hangs below
-#   Punctuation:             ratio ≈ 0.1–0.2  → sits near the baseline
+#   asc = 1.0            → entire glyph above baseline (bottom = baseline)
+#   asc = _asc(h_ratio)  → top aligns with normal x-height top (y 32),
+#                           stem hangs below baseline — used for descenders
+#   asc > 1.0            → glyph sits above its "natural" position (centred
+#                           operators, quotes, superscripts)
+#
+# Centering formula (x-height mid = y 72):
+#   for symbol of height h: asc = (40 + h/2) / h  =  40/h + 0.5
+# Pinning top to y 32:
+#   asc = (baseline_y − 32) / h  =  80 / h
 # ---------------------------------------------------------------------------
 def _asc(h_ratio: float) -> float:
-    """Ascender ratio for a descender whose top aligns with normal x-height."""
+    """Ascender ratio for a descender whose top aligns with the normal x-height top."""
     return round(1.0 / h_ratio, 4)
 
 _CHAR_ASCENDER_RATIO: dict[str, float] = {
-    # Normal Hebrew — all above baseline
-    # י is 45% of normal height; ratio 2.22 = 1/0.45 aligns its top with other letters' tops
-    "י": 2.22, "ו": 1.0, "ז": 1.0, "ר": 1.0, "ד": 1.0,
-    "ג": 1.0, "ח": 1.0, "ה": 1.0, "ב": 1.0, "כ": 1.0,
-    "א": 1.0, "ט": 1.0, "מ": 1.0, "נ": 1.0, "ס": 1.0,
-    "ע": 1.0, "פ": 1.0, "ש": 1.0, "ת": 1.0, "ם": 1.0,
-    # Ascenders — bottom on baseline, entire height above
+    # ── Hebrew: entirely above baseline ──────────────────────────────────────
+    # yod: 1/0.45 ≈ 2.22 pins its tiny top to where normal letters' tops are
+    "י": 2.22,
+    "א": 1.0, "ב": 1.0, "ג": 1.0, "ד": 1.0, "ה": 1.0,
+    "ו": 1.0, "ז": 1.0, "ח": 1.0, "ט": 1.0, "כ": 1.0,
+    "מ": 1.0, "נ": 1.0, "ס": 1.0, "ע": 1.0, "פ": 1.0,
+    "צ": 1.0, "ר": 1.0, "ש": 1.0, "ת": 1.0, "ם": 1.0,
+    # ── Hebrew: ascender — foot on baseline, head rises above ────────────────
     "ל": 1.0,
-    "ף": 1.0,
-    "ץ": 1.0,
-    # Descenders — top at x-height (1.0/h_ratio of total height above baseline)
-    "ן": _asc(1.28),   # ≈ 0.781
-    "ך": _asc(1.28),   # ≈ 0.781
-    "ק": _asc(1.18),   # ≈ 0.847
-    # Punctuation
-    ".": 0.12,
-    ",": 0.20,
+    # ── Hebrew: descenders — top at x-height top, stem below baseline ────────
+    "ק": _asc(1.19),   # ≈ 0.840
+    "ך": _asc(1.56),   # ≈ 0.641
+    "ן": _asc(1.56),   # ≈ 0.641
+    "ף": _asc(1.38),   # ≈ 0.725
+    "ץ": _asc(1.31),   # ≈ 0.763
+    # ── Digits — on baseline ──────────────────────────────────────────────────
+    "0": 1.0, "1": 1.0, "2": 1.0, "3": 1.0, "4": 1.0,
+    "5": 1.0, "6": 1.0, "7": 1.0, "8": 1.0, "9": 1.0,
+    # ── Latin lowercase: x-height group ──────────────────────────────────────
+    "a": 1.0, "c": 1.0, "e": 1.0, "i": 1.0, "m": 1.0, "n": 1.0,
+    "o": 1.0, "r": 1.0, "s": 1.0, "u": 1.0, "v": 1.0,
+    "w": 1.0, "x": 1.0, "z": 1.0,
+    # ── Latin lowercase: ascenders ────────────────────────────────────────────
+    "b": 1.0, "d": 1.0, "f": 1.0, "h": 1.0, "k": 1.0, "l": 1.0, "t": 1.0,
+    # ── Latin lowercase: descenders — bowl/top aligns with x-height top ──────
+    "g": _asc(1.38),   # ≈ 0.725
+    "j": _asc(1.38),   # ≈ 0.725
+    "p": _asc(1.25),   # = 0.800
+    "q": _asc(1.25),   # = 0.800
+    "y": _asc(1.30),   # ≈ 0.769
+    # ── Latin uppercase: on baseline ─────────────────────────────────────────
+    "A": 1.0, "B": 1.0, "C": 1.0, "D": 1.0, "E": 1.0, "F": 1.0,
+    "G": 1.0, "H": 1.0, "I": 1.0, "J": 1.0, "K": 1.0, "L": 1.0,
+    "M": 1.0, "N": 1.0, "O": 1.0, "P": 1.0, "Q": 1.0, "R": 1.0,
+    "S": 1.0, "T": 1.0, "U": 1.0, "V": 1.0, "W": 1.0, "X": 1.0,
+    "Y": 1.0, "Z": 1.0,
+    # ── Punctuation ───────────────────────────────────────────────────────────
+    ".": 1.0,    # tiny dot sitting exactly on baseline
+    ",": 0.82,   # dot near baseline + tail 4 px below
+    ":": 1.0,    # bottom dot on baseline
+    ";": 0.94,   # slight tail below baseline
     "!": 1.0,
     "?": 1.0,
-    "׳": 0.10,
-    "״": 0.10,
-    # Latin descenders
-    "g": 0.65, "j": 0.60, "p": 0.65, "q": 0.65, "y": 0.65,
-    "f": 1.0,  "t": 1.0,  "i": 1.0,  "l": 1.0,
+    # Quotes float at top of x-height: asc = 80 / (80 × h_ratio) = 1/h_ratio × (1/1)
+    # h_ratio=0.22 → h=17.6 px;  asc = 80/17.6 ≈ 4.54 → top at y ≈ 32
+    "'": 4.54,
+    '"': 4.54,
+    "׳": 4.54,
+    "״": 4.54,
+    # Hyphen/dash: centred in x-height zone (mid = y 72)
+    # h=9.6 px, y_top = 72−4.8 ≈ 67;  asc = (112−67)/9.6 = 4.69
+    "-": 4.69,
+    "–": 4.69,   # en dash — centred like hyphen
+    "—": 4.69,
+    "…": 1.0,    # ellipsis — dots on baseline
+    # Brackets/parens/braces: foot on baseline
+    "(": 1.0, ")": 1.0, "[": 1.0, "]": 1.0, "{": 1.0, "}": 1.0,
+    # ── Math symbols ──────────────────────────────────────────────────────────
+    # Centred operators: asc = 40/h + 0.5  (x-height mid = y 72)
+    "+": 1.41,   # h=44 px → asc = 40/44 + 0.5 ≈ 1.41
+    "−": 4.69,   # thin bar — same centring as hyphen
+    "×": 1.41,   # same as plus
+    "÷": 1.41,   # same as plus
+    "=": 1.61,   # h=36 px → asc = 40/36 + 0.5 ≈ 1.61
+    "≠": 1.41,   # same as plus
+    "<": 1.27,   # h=52 px → asc = 40/52 + 0.5 ≈ 1.27
+    ">": 1.27,
+    "≤": 1.17,   # h=60 px → asc = 40/60 + 0.5 ≈ 1.17
+    "≥": 1.17,
+    "±": 1.09,   # h=68 px → asc = 40/68 + 0.5 ≈ 1.09
+    "%": 1.0,    # on baseline
+    "√": 1.0,    # entire height above baseline (radical foot on baseline)
+    "^": 2.22,   # h=36 px; top pinned to y 32 → asc = 80/36 ≈ 2.22
+    "π": 1.0,    # on baseline
+    # ── Currency — foot on baseline ───────────────────────────────────────────
+    "₪": 1.0, "$": 1.0, "€": 1.0, "£": 1.0, "¢": 1.0,
+    # ── Arrows — horizontals centred, verticals full-height on baseline ───────
+    "←": 1.41,   # centred like plus
+    "→": 1.41,
+    "↑": 1.0,
+    "↓": 1.0,
+    # ── Special symbols ──────────────────────────────────────────────────────────
+    "@": 1.0, "#": 1.0, "&": 1.0,
+    "*": 2.22,   # asterisk — superscript pinned to top of x-height
+    "/": 1.0, "\\": 1.0, "|": 1.0,
+    "~": 1.93,   # h=28 px → asc = 40/28 + 0.5 ≈ 1.93 (centred)
+    "_": 0.0,    # underscore — entirely below baseline
 }
 
 
