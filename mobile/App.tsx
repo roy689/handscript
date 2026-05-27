@@ -36,8 +36,10 @@ if (!I18nManager.isRTL) {
 }
 
 
+import AsyncStorage                 from '@react-native-async-storage/async-storage';
 import type { RootStackParamList } from './navigation/types';
 import OnboardingScreen            from './screens/OnboardingScreen';
+import TutorialScreen              from './screens/TutorialScreen';
 import ForgotPasswordScreen        from './screens/ForgotPasswordScreen';
 import CharacterListScreen         from './screens/CharacterListScreen';
 import CharacterConfigScreen       from './screens/CharacterConfigScreen';
@@ -196,6 +198,7 @@ function AppNavigator({ initialRoute }: { initialRoute: InitialRoute }) {
       >
         {/* ── Auth / tabs ─────────────────────────────────────────────── */}
         <RootStack.Screen name="Onboarding"     component={OnboardingScreen}     options={{ headerShown: false }} />
+        <RootStack.Screen name="Tutorial"       component={TutorialScreen}       options={{ headerShown: false, gestureEnabled: false }} />
         <RootStack.Screen name="ForgotPassword" component={ForgotPasswordScreen} options={{ title: 'איפוס סיסמה' }} />
         <RootStack.Screen name="MainTabs"       component={MainTabs}             options={{ headerShown: false }} />
 
@@ -240,8 +243,14 @@ export default function App() {
 
   useEffect(() => {
     try {
-      const unsub = onAuthStateChanged(auth, user => {
-        setInitialRoute(user ? 'MainTabs' : 'Onboarding');
+      const unsub = onAuthStateChanged(auth, async user => {
+        if (user) {
+          // Show tutorial only once — on first-ever login after install.
+          const seen = await AsyncStorage.getItem('@hs_tutorial_seen').catch(() => '1');
+          setInitialRoute(seen ? 'MainTabs' : 'Tutorial');
+        } else {
+          setInitialRoute('Onboarding');
+        }
       });
       return unsub;
     } catch (e: unknown) {
