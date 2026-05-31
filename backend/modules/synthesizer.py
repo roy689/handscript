@@ -854,6 +854,12 @@ _INK_RGB: dict[str, tuple[int, int, int]] = {
     "red":   (185, 28,  28),
 }
 
+# Target stroke width as a fraction of character height.
+# At 80 px char height → target stroke ≈ 6 px (≈ 0.5 mm at 300 DPI — medium pen).
+_STROKE_RATIO     = 0.075
+# Maximum morphological iterations per glyph (safety cap; 6 covers ~6 px of correction).
+_STROKE_MAX_ITERS = 6
+
 
 def normalize_stroke_width(img: np.ndarray, target_char_h: int, stroke_ratio: float = _STROKE_RATIO) -> np.ndarray:
     """
@@ -910,13 +916,6 @@ def normalize_stroke_width(img: np.ndarray, target_char_h: int, stroke_ratio: fl
     out = img.copy()
     out[:, :, 3] = new_alpha
     return out
-
-
-# Target stroke width as a fraction of character height.
-# At 80 px char height → target stroke ≈ 6 px (≈ 0.5 mm at 300 DPI — medium pen).
-_STROKE_RATIO    = 0.075
-# Maximum morphological iterations per glyph (safety cap; 6 covers ~6 px of correction).
-_STROKE_MAX_ITERS = 6
 
 
 def _recolor_glyph(img: np.ndarray, ink_color: str) -> np.ndarray:

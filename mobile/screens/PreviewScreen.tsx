@@ -63,7 +63,7 @@ const FALLBACK_RATIO = 0.78; // fallback glyph aspect ratio
 const SRV_PAGE_W      = 2480;
 const SRV_PAGE_H      = 3508;
 const SRV_TOP_MARGIN  = 200;   // top margin — text AND background lines start here
-const SRV_LINE_H      = 180;   // line pitch (= _LINES_SPACING = _LINE_HEIGHT in layout.py)
+const SRV_LINE_H      = 184;   // line pitch = _LINE_HEIGHT(180) + _LINE_GAP(4) in layout.py
 const SRV_SIDE_MARGIN = 200;   // left/right margin for text
 // Usable text width on server: SRV_PAGE_W - 2×SRV_SIDE_MARGIN = 2080 px
 const SRV_USABLE_W    = SRV_PAGE_W - 2 * SRV_SIDE_MARGIN;   // 2080
@@ -72,7 +72,7 @@ const SRV_USABLE_W    = SRV_PAGE_W - 2 * SRV_SIDE_MARGIN;   // 2080
 const A4_RATIO = 297 / 210;
 
 // Lines of text per page — must match render_full_page capacity:
-// floor((SRV_PAGE_H - 2*SRV_TOP_MARGIN) / (SRV_LINE_H + 4)) = 16
+// floor((SRV_PAGE_H - 2*SRV_TOP_MARGIN) / SRV_LINE_H) = floor(3108/184) = 16
 const PAGE_LINES = 16;
 
 // Slider (0-100) → backend px conversion factors (used in FinalViewScreen too)
@@ -518,23 +518,15 @@ const HandwritingCanvas = React.memo(function HandwritingCanvas({
                 }}
               >
                 {url ? (
-                  <>
-                    {/* Blur layer simulates stroke width: more blur = thicker strokes.
-                        strokeBlur is proportional to strokeWidth slider so the preview
-                        gives a live approximation of the server's stroke_ratio output. */}
-                    <Image
-                      source={{ uri: absUrl(url) }}
-                      style={{ position: 'absolute', width: cw, height: gh, tintColor: inkHex }}
-                      resizeMode="contain"
-                      blurRadius={gh * strokeBlur}
-                    />
-                    {/* Sharp layer on top for crisp edges */}
-                    <Image
-                      source={{ uri: absUrl(url) }}
-                      style={{ width: cw, height: gh, tintColor: inkHex }}
-                      resizeMode="contain"
-                    />
-                  </>
+                  /* Single blurred image: blurRadius scales with strokeWidth so the
+                     ink "bleeds" outward at higher values — simulates thicker strokes.
+                     No sharp layer on top; the blur itself IS the preview feedback. */
+                  <Image
+                    source={{ uri: absUrl(url) }}
+                    style={{ width: cw, height: gh, tintColor: inkHex }}
+                    resizeMode="contain"
+                    blurRadius={gh * strokeBlur}
+                  />
                 ) : (
                   /* Character not in glyphMap — show a subtle strikethrough
                      placeholder instead of computer-font text so the user can
@@ -682,11 +674,13 @@ export default function PreviewScreen({ navigation, route }: Props) {
   // Server sends slant = slider * 0.4 (server px), scaled by pixelScale → preview px.
   const slantPx  = liveHs.slant * 0.4 * pixelScale;
   const blobProb = liveHs.inkBlobs * 0.003; // 0-0.30
-  // strokeBlur: blur factor for preview simulation.
-  //   slider 0  → factor 0.01 (minimal blur, visually thin)
-  //   slider 50 → factor 0.055 (default, matches _STROKE_RATIO 0.075)
-  //   slider 100 → factor 0.10 (strong blur, visually thick)
-  const strokeBlur = 0.01 + liveHs.strokeWidth * 0.0009;
+  // strokeBlur: blur-radius-per-px-height for the preview stroke simulation.
+  //   slider 0   → 0     (no blur, crisp thin strokes)
+  //   slider 50  → 0.055 (matches _STROKE_RATIO=0.075 default)
+  //   slider 100 → 0.11  (visible fattening of strokes)
+  // The glyph image is rendered once with this blur so the ink "bleeds" outward —
+  // higher = appears thicker. A sharp top layer is NOT added so the blur is visible.
+  const strokeBlur = liveHs.strokeWidth * 0.0011;
 
   // ── Prefetch glyph images ──────────────────────────────────────────────────
   useEffect(() => {
@@ -916,7 +910,7 @@ export default function PreviewScreen({ navigation, route }: Props) {
             </View>
           ))}
 
-          {/* Full-width stroke width slider — controls ALL characters uniformly */}
+          {/* Stroke width — half-width, paired with empty spacer so it matches other sliders */}
           <View style={[styles.slidersRow, { marginBottom: 14 }]}>
             <View style={styles.sliderHalf}>
               <View style={styles.sliderHeader}>
@@ -950,6 +944,8 @@ export default function PreviewScreen({ navigation, route }: Props) {
                 thumbTintColor={colors.accent}
               />
             </View>
+            {/* Empty spacer — keeps this row half-width like all other slider pairs */}
+            <View style={styles.sliderHalf} />
           </View>
 
           <View style={styles.divider} />
