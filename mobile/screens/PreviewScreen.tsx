@@ -187,7 +187,7 @@ const CHAR_HEIGHT_RATIO: Record<string, number> = {
   // Ascender — rises above x-height, bottom on baseline
   'ל': 1.35,
   // Descenders — body at x-height, stem drops below baseline
-  'ן': 1.25, 'ך': 1.56, 'ק': 1.19,
+  'ן': 1.80, 'ך': 1.56, 'ק': 1.19,
   'ף': 1.38, 'ץ': 1.31,   // final pe / final tsadi are DESCENDERS in Hebrew
 
   // ── Latin uppercase — cap-height ──────────────────────────────────────
@@ -248,7 +248,7 @@ const CHAR_ASCENDER_RATIO: Record<string, number> = {
   // ── Hebrew descenders — top aligns with x-height, tail below ──────────
   // Formula: ascender = 1 / CHAR_HEIGHT_RATIO  (top pins to x-height top)
   // Values MUST stay in sync with _CHAR_HEIGHT_RATIO in synthesizer.py.
-  'ן': 1 / 1.25, 'ך': 1 / 1.56, 'ק': 1 / 1.19,
+  'ן': 1 / 1.80, 'ך': 1 / 1.56, 'ק': 1 / 1.19,
   'ף': 1 / 1.38, 'ץ': 1 / 1.31,
   // ── Hebrew yod — tiny mark in the upper part of the line ─────────────
   // Same formula as descenders: top aligns with x-height top.

@@ -595,7 +595,7 @@ _CHAR_HEIGHT_RATIO: dict[str, float] = {
     # ── Hebrew: descenders (top at x-height, stem below baseline) ────────────
     "ק": 1.19,   # qof — slight descender (~15 px)
     "ך": 1.56,   # final kaf — long descender (~45 px)
-    "ן": 1.25,   # final nun — small descender (~20 px), top at x-height
+    "ן": 1.80,   # final nun — long descender fills full space to next ruled line
     "ף": 1.38,   # final pe — medium descender (~30 px)
     "ץ": 1.31,   # final tsadi — medium descender (~25 px)
     # ── Hebrew: closed final forms (no descender) ─────────────────────────────
@@ -710,7 +710,7 @@ _CHAR_ASCENDER_RATIO: dict[str, float] = {
     # ── Hebrew: descenders — top at x-height top, stem below baseline ────────
     "ק": _asc(1.19),   # ≈ 0.840
     "ך": _asc(1.56),   # ≈ 0.641
-    "ן": _asc(1.25),   # ≈ 0.800 — top at x-height, small tail below baseline
+    "ן": _asc(1.80),   # ≈ 0.556 — top at x-height, long tail fills space to next line
     "ף": _asc(1.38),   # ≈ 0.725
     "ץ": _asc(1.31),   # ≈ 0.763
     # ── Digits — on baseline ──────────────────────────────────────────────────
@@ -1169,21 +1169,26 @@ def compose_line(
             ch_here     = chars[idx]
             asc_ratio   = _CHAR_ASCENDER_RATIO.get(ch_here, 1.0)
             pil_g       = Image.fromarray(img, "RGBA")
-            # Pre-jitter target height for this character — used for POSITION so that
-            # jitter scale/rotation don't shift the glyph up unexpectedly.
+            # Pre-jitter target height — used for POSITION so jitter scale/rotation
+            # don't push the glyph above the top ruled line unexpectedly.
             h_ratio_here    = _CHAR_HEIGHT_RATIO.get(ch_here, 1.0)
             target_h_here   = max(1, round(target_char_h_global * h_ratio_here))
             ascender_h_here = round(target_h_here * asc_ratio)
-            # Baseline dance uses target_h (stable) not pil_g.height (varies with jitter)
-            baseline_dance = int(random.gauss(0, target_h_here * (jitter_pct / 100.0)))
+            # Descenders (asc_ratio < 1.0): skip baseline_dance so the tail stays
+            # anchored below the baseline, not drifting into the next line or above.
+            is_descender = asc_ratio < 1.0
+            baseline_dance = (
+                0
+                if is_descender
+                else int(random.gauss(0, target_h_here * (jitter_pct / 100.0)))
+            )
             if ch_here == 'י':
-                # Yod is tiny — pin its top to where normal letters' tops are.
+                # Yod: pin top to normal x-height top.
                 y = baseline_y - target_char_h_global + v_off
             else:
-                # Use pre-jitter ascender height so rotation/scale jitter doesn't
-                # shift the glyph above the top ruled line.
+                # Use pre-jitter ascender so scale/rotation jitter don't shift position.
                 y = baseline_y - ascender_h_here + v_off + baseline_dance
-            # Never let a glyph start above the line canvas — clips uncomfortably.
+            # Clamp: never let a glyph start above the line canvas top.
             y = max(0, y)
             canvas.paste(pil_g, (x, y), pil_g)
             # Ink blobs at stroke endpoints
