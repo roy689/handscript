@@ -496,9 +496,8 @@ class StyleParams(BaseModel):
     letter_spacing:   float = Field(4.0,  ge=0.0, le=30.0)
     word_spacing:     int   = Field(35,   ge=15,  le=100)
     baseline_jitter:  float = Field(7.5,  ge=0.0, le=25.0)
-    slant:            float = Field(2.25,  ge=0.0,  le=40.0)
-    ink_blobs:        float = Field(0.03,  ge=0.0,  le=0.30)
-    stroke_ratio:     float = Field(0.075, ge=0.03, le=0.12)
+    slant:            float = Field(2.25, ge=0.0, le=40.0)
+    ink_blobs:        float = Field(0.03, ge=0.0, le=0.30)
 
 
 class ConvertRequest(BaseModel):
@@ -1662,7 +1661,6 @@ async def convert(body: ConvertRequest, uid: str = Depends(require_auth)):
             "baseline_jitter": body.style.baseline_jitter,
             "slant":           body.style.slant,
             "ink_blobs":       body.style.ink_blobs,
-            "stroke_ratio":    body.style.stroke_ratio,
         }
         lines = await asyncio.to_thread(
             compose_paragraph,
@@ -1809,7 +1807,6 @@ async def convert_both(body: ConvertBothRequest, uid: str = Depends(require_auth
             "baseline_jitter": body.style.baseline_jitter,
             "slant":           body.style.slant,
             "ink_blobs":       body.style.ink_blobs,
-            "stroke_ratio":    body.style.stroke_ratio,
         }
 
         lines = await asyncio.to_thread(
@@ -1826,7 +1823,8 @@ async def convert_both(body: ConvertBothRequest, uid: str = Depends(require_auth
                     "error": "No content to render"}
 
         valid_bgs = {"blank", "lines", "grid"}
-        bg_type   = body.background if body.background in valid_bgs else "blank"
+        bg_type   = body.background if body.background in valid_bgs else "lines"
+        logger.info("convert-both: background received=%r → bg_type=%r", body.background, bg_type)
         background = load_background(bg_type)
 
         # Render clean pages once (CPU-bound — run off the event loop)

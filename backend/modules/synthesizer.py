@@ -579,7 +579,7 @@ _CHAR_HEIGHT_RATIO: dict[str, float] = {
     "ז": 0.78,   # zayin — slightly shorter
     "ח": 0.92,   # het
     "ט": 0.92,   # tet — round, full x-height
-    "י": 0.45,   # yod — very tiny (compose_line pins its top to x-height)
+    "י": 0.30,   # yod — tiny mark, 30 % of x-height (top pinned to x-height top)
     "כ": 0.90,   # kaf (open)
     "מ": 0.92,   # mem (open)
     "נ": 0.82,   # nun (open) — slightly shorter
@@ -595,7 +595,7 @@ _CHAR_HEIGHT_RATIO: dict[str, float] = {
     # ── Hebrew: descenders (top at x-height, stem below baseline) ────────────
     "ק": 1.19,   # qof — slight descender (~15 px)
     "ך": 1.56,   # final kaf — long descender (~45 px)
-    "ן": 1.56,   # final nun — long descender (~45 px)
+    "ן": 1.25,   # final nun — small descender (~20 px), top at x-height
     "ף": 1.38,   # final pe — medium descender (~30 px)
     "ץ": 1.31,   # final tsadi — medium descender (~25 px)
     # ── Hebrew: closed final forms (no descender) ─────────────────────────────
@@ -699,8 +699,8 @@ def _asc(h_ratio: float) -> float:
 
 _CHAR_ASCENDER_RATIO: dict[str, float] = {
     # ── Hebrew: entirely above baseline ──────────────────────────────────────
-    # yod: 1/0.45 ≈ 2.22 pins its tiny top to where normal letters' tops are
-    "י": 2.22,
+    # yod: 1/0.30 ≈ 3.33 — top aligns with x-height top (upper part of line)
+    "י": 3.33,
     "א": 1.0, "ב": 1.0, "ג": 1.0, "ד": 1.0, "ה": 1.0,
     "ו": 1.0, "ז": 1.0, "ח": 1.0, "ט": 1.0, "כ": 1.0,
     "מ": 1.0, "נ": 1.0, "ס": 1.0, "ע": 1.0, "פ": 1.0,
@@ -710,7 +710,7 @@ _CHAR_ASCENDER_RATIO: dict[str, float] = {
     # ── Hebrew: descenders — top at x-height top, stem below baseline ────────
     "ק": _asc(1.19),   # ≈ 0.840
     "ך": _asc(1.56),   # ≈ 0.641
-    "ן": _asc(1.56),   # ≈ 0.641
+    "ן": _asc(1.25),   # ≈ 0.800 — top at x-height, small tail below baseline
     "ף": _asc(1.38),   # ≈ 0.725
     "ץ": _asc(1.31),   # ≈ 0.763
     # ── Digits — on baseline ──────────────────────────────────────────────────
@@ -861,7 +861,7 @@ _STROKE_RATIO     = 0.075
 _STROKE_MAX_ITERS = 6
 
 
-def normalize_stroke_width(img: np.ndarray, target_char_h: int, stroke_ratio: float = _STROKE_RATIO) -> np.ndarray:
+def normalize_stroke_width(img: np.ndarray, target_char_h: int) -> np.ndarray:
     """
     Normalize the stroke width of a glyph so ALL characters have the same
     visual weight regardless of pen pressure, photo conditions, or drawing style.
@@ -895,7 +895,7 @@ def normalize_stroke_width(img: np.ndarray, target_char_h: int, stroke_ratio: fl
         return img
 
     current_radius = float(np.median(ink_dist))
-    target_radius  = target_char_h * stroke_ratio / 2.0
+    target_radius  = target_char_h * _STROKE_RATIO / 2.0
     if target_radius <= 0:
         return img
 
@@ -1039,7 +1039,6 @@ def compose_line(
     # ------------------------------------------------------------------
     _st = style or {}
     target_char_h_global = int(_st.get("char_height", _TARGET_CHAR_H))
-    _stroke_ratio = max(0.03, min(0.12, float(_st.get("stroke_ratio", _STROKE_RATIO))))
 
     # ------------------------------------------------------------------
     # Step 1 — Render every glyph in logical order
@@ -1067,7 +1066,7 @@ def compose_line(
                         pil_raw = pil_raw.resize((new_w, target_h), Image.LANCZOS)
                         raw     = np.array(pil_raw, dtype=np.uint8)
                     # Normalize stroke width so all glyphs have consistent weight
-                    raw = normalize_stroke_width(raw, target_char_h_global, _stroke_ratio)
+                    raw = normalize_stroke_width(raw, target_char_h_global)
                     logger.debug("compose_line: char=%r  raw=%dx%d → scaled=%dx%d (h_ratio=%.2f)",
                                  ch, raw_h, raw_w, raw.shape[0], raw.shape[1], h_ratio)
                     jittered, v_off = apply_jitter(raw)

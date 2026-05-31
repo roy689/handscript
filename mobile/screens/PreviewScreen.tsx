@@ -50,7 +50,6 @@ interface HandwritingStyle {
   baselineJitter: number;  // 0-100 → 0-25 % of char height
   slant:          number;  // 0-100 → 0-40 px line-tilt
   inkBlobs:       number;  // 0-100 → 0-0.30 blob probability
-  strokeWidth:    number;  // 0-100 → stroke_ratio 0.03-0.12 (uniform for ALL chars)
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -188,7 +187,7 @@ const CHAR_HEIGHT_RATIO: Record<string, number> = {
   // Ascender — rises above x-height, bottom on baseline
   'ל': 1.35,
   // Descenders — body at x-height, stem drops below baseline
-  'ן': 1.56, 'ך': 1.56, 'ק': 1.19,
+  'ן': 1.25, 'ך': 1.56, 'ק': 1.19,
   'ף': 1.38, 'ץ': 1.31,   // final pe / final tsadi are DESCENDERS in Hebrew
 
   // ── Latin uppercase — cap-height ──────────────────────────────────────
@@ -249,8 +248,12 @@ const CHAR_ASCENDER_RATIO: Record<string, number> = {
   // ── Hebrew descenders — top aligns with x-height, tail below ──────────
   // Formula: ascender = 1 / CHAR_HEIGHT_RATIO  (top pins to x-height top)
   // Values MUST stay in sync with _CHAR_HEIGHT_RATIO in synthesizer.py.
-  'ן': 1 / 1.56, 'ך': 1 / 1.56, 'ק': 1 / 1.19,
+  'ן': 1 / 1.25, 'ך': 1 / 1.56, 'ק': 1 / 1.19,
   'ף': 1 / 1.38, 'ץ': 1 / 1.31,
+  // ── Hebrew yod — tiny mark in the upper part of the line ─────────────
+  // Same formula as descenders: top aligns with x-height top.
+  // 1/0.30 ≈ 3.33 → top of yod = top of regular-height letters.
+  'י': 1 / 0.30,
 
   // ── Latin descenders ──────────────────────────────────────────────────
   'g': 0.65, 'j': 0.62, 'p': 0.65, 'q': 0.65, 'y': 0.65,
@@ -436,7 +439,7 @@ function lineDirection(words: string[]): 'rtl' | 'ltr' {
 
 const HandwritingCanvas = React.memo(function HandwritingCanvas({
   pageLines, glyphMap, displayCharH, lsp, wsp, jitter,
-  slantPx, blobProb, strokeBlur,
+  slantPx, blobProb,
   canvasInnerW, lineH, topM, dims, inkColor,
 }: {
   pageLines:    string[][];
@@ -447,7 +450,6 @@ const HandwritingCanvas = React.memo(function HandwritingCanvas({
   jitter:       number;
   slantPx:      number;
   blobProb:     number;
-  strokeBlur:   number;  // blur radius factor for stroke-width preview simulation
   canvasInnerW: number;
   lineH:        number;
   topM:         number;
@@ -518,14 +520,10 @@ const HandwritingCanvas = React.memo(function HandwritingCanvas({
                 }}
               >
                 {url ? (
-                  /* Single blurred image: blurRadius scales with strokeWidth so the
-                     ink "bleeds" outward at higher values — simulates thicker strokes.
-                     No sharp layer on top; the blur itself IS the preview feedback. */
                   <Image
                     source={{ uri: absUrl(url) }}
                     style={{ width: cw, height: gh, tintColor: inkHex }}
                     resizeMode="contain"
-                    blurRadius={gh * strokeBlur}
                   />
                 ) : (
                   /* Character not in glyphMap — show a subtle strikethrough
@@ -619,7 +617,6 @@ export default function PreviewScreen({ navigation, route }: Props) {
     baselineJitter: clamp(initStyle.baselineJitter / 0.25),          // 3→12
     slant:          15,   // slight natural lean by default
     inkBlobs:       10,   // subtle blob effect by default
-    strokeWidth:    50,   // 50 = stroke_ratio 0.075 (default, matches _STROKE_RATIO)
   });
 
   const [inkColor, setInkColor] = useState<InkColor>(initInkColor ?? 'black');
@@ -674,14 +671,6 @@ export default function PreviewScreen({ navigation, route }: Props) {
   // Server sends slant = slider * 0.4 (server px), scaled by pixelScale → preview px.
   const slantPx  = liveHs.slant * 0.4 * pixelScale;
   const blobProb = liveHs.inkBlobs * 0.003; // 0-0.30
-  // strokeBlur: blur-radius-per-px-height for the preview stroke simulation.
-  //   slider 0   → 0     (no blur, crisp thin strokes)
-  //   slider 50  → 0.055 (matches _STROKE_RATIO=0.075 default)
-  //   slider 100 → 0.11  (visible fattening of strokes)
-  // The glyph image is rendered once with this blur so the ink "bleeds" outward —
-  // higher = appears thicker. A sharp top layer is NOT added so the blur is visible.
-  const strokeBlur = liveHs.strokeWidth * 0.0011;
-
   // ── Prefetch glyph images ──────────────────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
@@ -799,7 +788,6 @@ export default function PreviewScreen({ navigation, route }: Props) {
                   jitter={jitter}
                   slantPx={slantPx}
                   blobProb={blobProb}
-                  strokeBlur={strokeBlur}
                   canvasInnerW={canvasInnerW}
                   lineH={lineH}
                   topM={topM}
@@ -864,7 +852,7 @@ export default function PreviewScreen({ navigation, route }: Props) {
             [['ריווח מילה', 'wordSpacing'], ['ריקוד', 'baselineJitter']],
             [['נטייה', 'slant'], ['צבירת דיו', 'inkBlobs']],
           ] as [string, keyof HandwritingStyle][][]).map((row, ri) => (
-            <View key={ri} style={styles.slidersRow}>
+            <View key={ri} style={[styles.slidersRow, ri === 2 && { marginBottom: 14 }]}>
               {row.map(([label, key]) => (
                 <View key={key} style={styles.sliderHalf}>
                   <View style={styles.sliderHeader}>
@@ -909,44 +897,6 @@ export default function PreviewScreen({ navigation, route }: Props) {
               ))}
             </View>
           ))}
-
-          {/* Stroke width — half-width, paired with empty spacer so it matches other sliders */}
-          <View style={[styles.slidersRow, { marginBottom: 14 }]}>
-            <View style={styles.sliderHalf}>
-              <View style={styles.sliderHeader}>
-                <Text style={styles.sliderLabel}>עובי קו</Text>
-                <Text style={styles.sliderValue}>{Math.round(liveHs.strokeWidth)}</Text>
-              </View>
-              <Slider
-                style={styles.sliderControl}
-                minimumValue={0} maximumValue={100} step={1}
-                value={hs.strokeWidth}
-                onValueChange={v => {
-                  pendingHsRef.current = { ...pendingHsRef.current, strokeWidth: v };
-                  if (!isDragging) setIsDragging(true);
-                  if (!throttleRef.current) {
-                    throttleRef.current = setTimeout(() => {
-                      setLiveHs({ ...pendingHsRef.current });
-                      throttleRef.current = null;
-                    }, 80);
-                  }
-                }}
-                onSlidingComplete={v => {
-                  if (throttleRef.current) { clearTimeout(throttleRef.current); throttleRef.current = null; }
-                  const next = { ...pendingHsRef.current, strokeWidth: v };
-                  pendingHsRef.current = next;
-                  setLiveHs(next);
-                  setHs(next);
-                  setIsDragging(false);
-                }}
-                minimumTrackTintColor={colors.accent}
-                maximumTrackTintColor={colors.border}
-                thumbTintColor={colors.accent}
-              />
-            </View>
-            {/* Empty spacer — keeps this row half-width like all other slider pairs */}
-            <View style={styles.sliderHalf} />
-          </View>
 
           <View style={styles.divider} />
 

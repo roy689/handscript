@@ -54,7 +54,6 @@ interface GlyphStyle {
   baselineJitter: number;
   slant:          number;
   inkBlobs:       number;
-  strokeWidth:    number;  // 0-100 slider → stroke_ratio 0.03-0.12
 }
 
 const FRAME_MH = 14;
@@ -86,6 +85,9 @@ async function fetchBothModes(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 90_000); // 90s — image generation is heavy
 
+  // Debug: log exactly what we're sending so sync issues can be diagnosed from Railway logs
+  console.log('[FinalView] fetchBothModes → background=%s inkColor=%s', background, inkColor);
+
   try {
     const res = await fetch(`${BACKEND_URL}/convert-both`, {
       method:  'POST',
@@ -103,7 +105,6 @@ async function fetchBothModes(
           baseline_jitter: style.baselineJitter * 0.25,
           slant:           style.slant * 0.4,
           ink_blobs:       style.inkBlobs * 0.003,
-          stroke_ratio:    0.03 + style.strokeWidth * 0.0009,
         },
       }),
     });
