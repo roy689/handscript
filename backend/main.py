@@ -496,8 +496,9 @@ class StyleParams(BaseModel):
     letter_spacing:   float = Field(4.0,  ge=0.0, le=30.0)
     word_spacing:     int   = Field(35,   ge=15,  le=100)
     baseline_jitter:  float = Field(7.5,  ge=0.0, le=25.0)
-    slant:            float = Field(2.25, ge=0.0, le=40.0)
-    ink_blobs:        float = Field(0.03, ge=0.0, le=0.30)
+    slant:            float = Field(2.25,  ge=0.0,  le=40.0)
+    ink_blobs:        float = Field(0.03,  ge=0.0,  le=0.30)
+    stroke_ratio:     float = Field(0.075, ge=0.03, le=0.12)
 
 
 class ConvertRequest(BaseModel):
@@ -641,29 +642,34 @@ def _svg_to_rgba(svg_text: str, target_h: int, ink_rgb: tuple[int,int,int]) -> "
 
 def _normalize_stroke_width(
     rgba: np.ndarray,
-    target_frac: float = 0.07,
+    target_frac: float = 0.075,
 ) -> np.ndarray:
     """
-    Normalise stroke width so every stored glyph has a consistent thickness
-    relative to its bounding-box height.
+    Normalise stroke width so every STORED glyph has the same thickness
+    relative to its bounding-box height, regardless of pen pressure or photo
+    conditions.  This is the extraction-time pass; a second pass runs at
+    synthesis time (synthesizer.normalize_stroke_width) to handle any residual
+    differences after the glyph is scaled to the render character height.
 
     Algorithm
     ---------
     1. Extract the alpha channel (ink mask).
-    2. Run cv2.distanceTransform – each ink pixel gets its distance to the
-       nearest background pixel, which equals the local stroke *radius*.
-    3. Take the median of all nonzero distances → current_radius.
-    4. Compare to target_radius = target_frac * h / 2.
-    5. Erode or dilate by round(|delta|) iterations of a 3×3 elliptic kernel
-       to match the target.
+    2. Median of distanceTransform nonzero values → current_radius.
+    3. Iteratively dilate (too thin) or erode (too thick) with a 3×3 elliptic
+       kernel until within ±8 % of target_radius, up to 8 iterations.
 
-    target_frac=0.07 means the target stroke width is 7 % of the glyph
-    bounding-box height.  At the stored resolution (_TARGET_CHAR_H × 2 ≈
-    160 px) that is about 11 px per stroke, which maps to ~5 px after the
-    0.5× scale applied during synthesis – visually consistent and natural.
+    target_frac=0.075 matches _STROKE_RATIO in synthesizer.py so both passes
+    converge to the same target.  The stored resolution is _TARGET_CHAR_H × 2
+    ≈ 160 px, giving target_radius ≈ 6 px (≈ 0.5 mm, medium ballpoint pen).
+
+    Tolerance tightened from the previous absolute 0.75 px (≈ 13 %) to ±8 %
+    so that characters photographed with different pens or pressures reach the
+    same visual weight before being saved to Firebase Storage.
     """
     alpha = rgba[:, :, 3].copy()
     h = alpha.shape[0]
+    if h == 0:
+        return rgba
 
     dist = cv2.distanceTransform(alpha, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
     nonzero_dists = dist[dist > 0]
@@ -672,30 +678,36 @@ def _normalize_stroke_width(
 
     current_radius = float(np.median(nonzero_dists))
     target_radius  = target_frac * h / 2.0
-    delta          = target_radius - current_radius
-
-    logger.info(
-        "stroke_norm: h=%dpx  current_r=%.2f  target_r=%.2f  delta=%.2f",
-        h, current_radius, target_radius, delta,
-    )
-
-    if abs(delta) < 0.75:
-        logger.info("stroke_norm: within tolerance — no adjustment")
+    if target_radius <= 0:
         return rgba
 
-    iters  = max(1, round(abs(delta)))
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    logger.info(
+        "stroke_norm: h=%dpx  current_r=%.2f  target_r=%.2f  ratio=%.2f",
+        h, current_radius, target_radius,
+        current_radius / target_radius if target_radius > 0 else 0,
+    )
 
-    if delta > 0:
-        new_alpha = cv2.dilate(alpha, kernel, iterations=iters)
-        logger.info("stroke_norm: DILATE %d iters (thicken)", iters)
-    else:
-        new_alpha = cv2.erode(alpha, kernel, iterations=iters)
-        logger.info("stroke_norm: ERODE  %d iters (thin)", iters)
+    kernel    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    new_alpha = alpha.copy()
+    _MAX_ITERS = 8   # at 1 px/iter this corrects up to 8 px deviation
+
+    for i in range(_MAX_ITERS):
+        ratio = current_radius / target_radius
+        if 0.92 <= ratio <= 1.08:   # within ±8 % — stop
+            logger.info("stroke_norm: converged after %d iter(s)  ratio=%.2f", i, ratio)
+            break
+        if ratio > 1.08:
+            new_alpha      = cv2.erode(new_alpha, kernel, iterations=1)
+            current_radius = max(0.5, current_radius - 1.0)
+            logger.debug("stroke_norm: ERODE iter %d  r≈%.1f", i + 1, current_radius)
+        else:
+            new_alpha      = cv2.dilate(new_alpha, kernel, iterations=1)
+            current_radius = current_radius + 1.0
+            logger.debug("stroke_norm: DILATE iter %d  r≈%.1f", i + 1, current_radius)
 
     result = rgba.copy()
     result[:, :, 3] = new_alpha
-    # Paint newly added pixels with the same ink colour as existing ones
+    # Paint newly-dilated pixels with the existing ink colour so they blend in.
     existing_ink = rgba[:, :, 3] > 0
     if existing_ink.any():
         ink_r = int(np.mean(rgba[existing_ink, 0]))
@@ -1108,6 +1120,39 @@ async def auth_check_verification(body: _CheckVerificationRequest, request: Requ
         return {"verified": verified}
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+
+class _AcceptTermsRequest(BaseModel):
+    id_token: str
+    version:  str = "1.0"
+
+
+@app.post("/auth/accept-terms")
+async def auth_accept_terms(body: _AcceptTermsRequest, request: Request):
+    """
+    Record that the authenticated user has accepted the Terms of Service.
+    Writes { termsAcceptedAt, termsVersion } to users/{uid} in Firestore.
+    This is the legal backend record; the mobile side also writes to AsyncStorage.
+    """
+    _check_ip_rate_limit(request.client.host)
+    try:
+        import firebase_admin.auth as fb_auth
+        decoded = fb_auth.verify_id_token(body.id_token)
+        uid = decoded["uid"]
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="טוקן לא תקין")
+    try:
+        from datetime import datetime, timezone
+        db = firebase_service._db()
+        db.collection("users").document(uid).set({
+            "termsAcceptedAt": datetime.now(timezone.utc).isoformat(),
+            "termsVersion":    body.version,
+        }, merge=True)
+    except Exception as exc:
+        logger.error("accept-terms: Firestore write failed for uid=%s: %s", uid, exc)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail="שמירת האישור נכשלה")
+    return {"ok": True}
 
 
 @app.delete("/auth/account")
@@ -1617,6 +1662,7 @@ async def convert(body: ConvertRequest, uid: str = Depends(require_auth)):
             "baseline_jitter": body.style.baseline_jitter,
             "slant":           body.style.slant,
             "ink_blobs":       body.style.ink_blobs,
+            "stroke_ratio":    body.style.stroke_ratio,
         }
         lines = await asyncio.to_thread(
             compose_paragraph,
@@ -1763,6 +1809,7 @@ async def convert_both(body: ConvertBothRequest, uid: str = Depends(require_auth
             "baseline_jitter": body.style.baseline_jitter,
             "slant":           body.style.slant,
             "ink_blobs":       body.style.ink_blobs,
+            "stroke_ratio":    body.style.stroke_ratio,
         }
 
         lines = await asyncio.to_thread(
@@ -1925,7 +1972,8 @@ async def get_glyphs(body: GlyphsRequest, uid: str = Depends(require_auth)):
         norm      = normalize_char(ch)
         char_data = bank.get(ch) or bank.get(norm) or {}
         variants  = char_data.get("variants", [])
-        urls = [v["url"] for v in variants if v.get("url")]
+        # Guard: some Firestore docs can have null entries in the variants array
+        urls = [v["url"] for v in variants if v is not None and isinstance(v, dict) and v.get("url")]
         if urls:
             glyph_map[ch] = urls
             logger.info("[glyphs] char=%r → %d variant(s)", ch, len(urls))

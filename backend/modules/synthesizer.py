@@ -141,9 +141,10 @@ class VariantPicker:
             ``firebase_client.load_character_bank``.  Values must contain
             a ``"variants"`` list.
         """
-        self._bank      = bank
-        self._last_used: dict[str, int] = {}
-        self._cache:     OrderedDict    = OrderedDict()
+        self._bank        = bank
+        self._last_used:  dict[str, int]       = {}
+        self._pick_queues: dict[str, list[int]] = {}   # shuffled deck per char
+        self._cache:       OrderedDict          = OrderedDict()
         self._MAX_CACHE = 200
 
     # ------------------------------------------------------------------
@@ -158,8 +159,8 @@ class VariantPicker:
         ---------------
         - 0 variants in bank → None
         - 1 variant          → always return it (no other choice)
-        - N ≥ 2 variants     → pick uniformly at random, excluding the
-                               variant used on the previous call for this char
+        - N ≥ 2 variants     → shuffled-deck rotation: each variant appears
+                               exactly once per N calls before any repeats
 
         Parameters
         ----------
@@ -192,13 +193,25 @@ class VariantPicker:
         if n == 1:
             return self._get_image(bank_key, 0)
 
-        last = self._last_used.get(bank_key)
-        candidates = [i for i in range(n) if i != last]
-        if not candidates:
-            candidates = list(range(n))
+        # ── Shuffled-deck variant selection ───────────────────────────────────
+        # Each character gets its own deck (a shuffled list of variant indices).
+        # We pop from the front until it's empty, then re-shuffle a new deck.
+        # This guarantees every variant appears exactly once per cycle —
+        # far more natural-looking than random.choice, which often repeats.
+        queue = self._pick_queues.get(bank_key)
+        if not queue:
+            deck = list(range(n))
+            random.shuffle(deck)
+            # Avoid starting the fresh deck with the card we just used.
+            last = self._last_used.get(bank_key)
+            if last is not None and len(deck) > 1 and deck[0] == last:
+                deck[0], deck[-1] = deck[-1], deck[0]
+            self._pick_queues[bank_key] = deck
+            queue = deck
 
-        chosen = random.choice(candidates)
+        chosen = queue.pop(0)
         self._last_used[bank_key] = chosen
+        logger.debug("pick: char=%r → variant %d/%d", bank_key, chosen, n)
 
         return self._get_image(bank_key, chosen)
 
@@ -212,6 +225,7 @@ class VariantPicker:
         between documents and re-downloading them would waste time.
         """
         self._last_used.clear()
+        self._pick_queues.clear()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -841,17 +855,25 @@ _INK_RGB: dict[str, tuple[int, int, int]] = {
 }
 
 
-def normalize_stroke_width(img: np.ndarray, target_char_h: int) -> np.ndarray:
+def normalize_stroke_width(img: np.ndarray, target_char_h: int, stroke_ratio: float = _STROKE_RATIO) -> np.ndarray:
     """
-    Normalize the stroke width of a glyph so all characters have visually
-    consistent weight regardless of how large or small they were photographed.
+    Normalize the stroke width of a glyph so ALL characters have the same
+    visual weight regardless of pen pressure, photo conditions, or drawing style.
 
     Strategy
     --------
-    1. Estimate current mean stroke radius via distance transform on the ink mask.
-    2. Compute target radius = target_char_h * _STROKE_RATIO.
-    3. If current radius is outside a ±25 % tolerance band, dilate or erode
-       the ink mask to reach the target, then reconstruct the RGBA image.
+    1. Measure the current stroke radius via the distance transform median.
+    2. Compute target_radius = target_char_h * _STROKE_RATIO / 2.
+    3. Iteratively dilate (too thin) or erode (too thick) with a 3×3 elliptic
+       kernel until the measured radius is within ±8 % of the target, up to
+       _STROKE_MAX_ITERS iterations.  One iteration shifts the radius by ~1 px,
+       so large deviations are corrected in several small steps — more stable
+       than a single large-kernel operation.
+
+    Tolerance tightened from the previous ±25 % to ±8 %:
+    at a 80-px character, ±25 % was ±1.5 px of stroke radius — enough to make
+    a thin-pen character look completely different from a thick-pen one.  ±8 %
+    (≈ ±0.5 px at 80 px) is imperceptible and keeps all glyphs uniform.
 
     The RGB channels are preserved; only the alpha mask is reshaped.
     """
@@ -861,32 +883,29 @@ def normalize_stroke_width(img: np.ndarray, target_char_h: int) -> np.ndarray:
 
     ink = (alpha > 128).astype(np.uint8) * 255
 
-    # Distance transform: each ink pixel gets its distance to nearest background px.
-    # Mean of these distances ≈ mean stroke radius.
     dist = cv2.distanceTransform(ink, cv2.DIST_L2, 5)
     ink_dist = dist[dist > 0]
-    if len(ink_dist) == 0:
+    if len(ink_dist) < 20:
         return img
 
-    current_radius = float(np.median(ink_dist))   # median is more robust than mean
-    target_radius  = target_char_h * _STROKE_RATIO / 2.0
-
-    ratio = current_radius / target_radius if target_radius > 0 else 1.0
-
-    # Only adjust when deviation is meaningful (>25 %)
-    if 0.75 <= ratio <= 1.25:
+    current_radius = float(np.median(ink_dist))
+    target_radius  = target_char_h * stroke_ratio / 2.0
+    if target_radius <= 0:
         return img
 
-    delta_r = abs(target_radius - current_radius)
-    ks      = max(3, int(round(delta_r)) * 2 + 1)   # kernel size must be odd ≥ 3
-    kernel  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ks, ks))
+    kernel    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    new_alpha = ink.copy()
 
-    if ratio > 1.25:
-        # Too thick → erode
-        new_alpha = cv2.erode(ink, kernel, iterations=1)
-    else:
-        # Too thin → dilate
-        new_alpha = cv2.dilate(ink, kernel, iterations=1)
+    for _ in range(_STROKE_MAX_ITERS):
+        ratio = current_radius / target_radius
+        if 0.92 <= ratio <= 1.08:   # within ±8 % → done
+            break
+        if ratio > 1.08:
+            new_alpha      = cv2.erode(new_alpha, kernel, iterations=1)
+            current_radius = max(0.5, current_radius - 1.0)   # bookkeeping
+        else:
+            new_alpha      = cv2.dilate(new_alpha, kernel, iterations=1)
+            current_radius = current_radius + 1.0
 
     out = img.copy()
     out[:, :, 3] = new_alpha
@@ -894,8 +913,10 @@ def normalize_stroke_width(img: np.ndarray, target_char_h: int) -> np.ndarray:
 
 
 # Target stroke width as a fraction of character height.
-# At 80 px char height → target stroke ≈ 6 px  (≈ 0.5 mm at 300 DPI — medium pen).
-_STROKE_RATIO = 0.075
+# At 80 px char height → target stroke ≈ 6 px (≈ 0.5 mm at 300 DPI — medium pen).
+_STROKE_RATIO    = 0.075
+# Maximum morphological iterations per glyph (safety cap; 6 covers ~6 px of correction).
+_STROKE_MAX_ITERS = 6
 
 
 def _recolor_glyph(img: np.ndarray, ink_color: str) -> np.ndarray:
@@ -1019,6 +1040,7 @@ def compose_line(
     # ------------------------------------------------------------------
     _st = style or {}
     target_char_h_global = int(_st.get("char_height", _TARGET_CHAR_H))
+    _stroke_ratio = max(0.03, min(0.12, float(_st.get("stroke_ratio", _STROKE_RATIO))))
 
     # ------------------------------------------------------------------
     # Step 1 — Render every glyph in logical order
@@ -1046,7 +1068,7 @@ def compose_line(
                         pil_raw = pil_raw.resize((new_w, target_h), Image.LANCZOS)
                         raw     = np.array(pil_raw, dtype=np.uint8)
                     # Normalize stroke width so all glyphs have consistent weight
-                    raw = normalize_stroke_width(raw, target_char_h_global)
+                    raw = normalize_stroke_width(raw, target_char_h_global, _stroke_ratio)
                     logger.debug("compose_line: char=%r  raw=%dx%d → scaled=%dx%d (h_ratio=%.2f)",
                                  ch, raw_h, raw_w, raw.shape[0], raw.shape[1], h_ratio)
                     jittered, v_off = apply_jitter(raw)

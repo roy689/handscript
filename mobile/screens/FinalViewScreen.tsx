@@ -54,6 +54,7 @@ interface GlyphStyle {
   baselineJitter: number;
   slant:          number;
   inkBlobs:       number;
+  strokeWidth:    number;  // 0-100 slider → stroke_ratio 0.03-0.12
 }
 
 const FRAME_MH = 14;
@@ -102,6 +103,7 @@ async function fetchBothModes(
           baseline_jitter: style.baselineJitter * 0.25,
           slant:           style.slant * 0.4,
           ink_blobs:       style.inkBlobs * 0.003,
+          stroke_ratio:    0.03 + style.strokeWidth * 0.0009,
         },
       }),
     });

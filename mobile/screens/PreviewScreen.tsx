@@ -48,8 +48,9 @@ interface HandwritingStyle {
   letterSpacing:  number;  // 0-100 → letter_spacing 0-30 backend px
   wordSpacing:    number;  // 0-100 → word_spacing  15-100 backend px
   baselineJitter: number;  // 0-100 → 0-25 % of char height
-  slant:          number;  // 0-100 → 0-15 degrees forward lean
+  slant:          number;  // 0-100 → 0-40 px line-tilt
   inkBlobs:       number;  // 0-100 → 0-0.30 blob probability
+  strokeWidth:    number;  // 0-100 → stroke_ratio 0.03-0.12 (uniform for ALL chars)
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -61,9 +62,11 @@ const FALLBACK_RATIO = 0.78; // fallback glyph aspect ratio
 // Server-side page geometry (A4 @ 300 DPI) — used as ratio source
 const SRV_PAGE_W      = 2480;
 const SRV_PAGE_H      = 3508;
-const SRV_TOP_MARGIN  = 200;   // top padding before first line
-const SRV_LINE_H      = 180;   // line pitch (= _LINES_SPACING = _LINE_HEIGHT)
+const SRV_TOP_MARGIN  = 200;   // top margin — text AND background lines start here
+const SRV_LINE_H      = 180;   // line pitch (= _LINES_SPACING = _LINE_HEIGHT in layout.py)
 const SRV_SIDE_MARGIN = 200;   // left/right margin for text
+// Usable text width on server: SRV_PAGE_W - 2×SRV_SIDE_MARGIN = 2080 px
+const SRV_USABLE_W    = SRV_PAGE_W - 2 * SRV_SIDE_MARGIN;   // 2080
 
 // A4 height/width ratio
 const A4_RATIO = 297 / 210;
@@ -73,12 +76,12 @@ const A4_RATIO = 297 / 210;
 const PAGE_LINES = 16;
 
 // Slider (0-100) → backend px conversion factors (used in FinalViewScreen too)
-// charHeight  : backend = 40 + slider * 0.9  (range 40-130 px)
-// letterSpacing: backend = slider * 0.30      (range 0-30 px)
-// wordSpacing  : backend = 15 + slider * 0.85 (range 15-100 px)
-// baselineJitter: backend = slider * 0.25     (range 0-25 %)
-// slant        : backend = slider * 0.15      (range 0-15 °)
-// inkBlobs     : backend = slider * 0.003     (range 0-0.30)
+// charHeight   : backend = 40 + slider * 0.9   (range 40–130 px)
+// letterSpacing: backend = slider * 0.30        (range  0–30 px)
+// wordSpacing  : backend = 15 + slider * 0.85  (range 15–100 px)
+// baselineJitter: backend = slider * 0.25      (range  0–25 %)
+// slant        : backend = slider * 0.4        (range  0–40 px line-tilt)
+// inkBlobs     : backend = slider * 0.003      (range  0–0.30)
 
 // Notebook visual colours
 const NOTEBOOK_BG       = '#FAFAF8';
@@ -105,33 +108,44 @@ function absUrl(url: string): string {
 }
 
 function seededRand(seed: number): number {
-  const x = Math.sin(seed * 9301 + 49297) * 233280;
-  return x - Math.floor(x);
+  // Mulberry32-style integer hash — much better distribution than sin-based PRNG,
+  // especially for seeds that differ only in one component (e.g. same li/wi, different ci).
+  let s = (seed ^ 0x9e3779b9) >>> 0;
+  s = Math.imul(s ^ (s >>> 16), 0x85ebca6b) >>> 0;
+  s = Math.imul(s ^ (s >>> 13), 0xc2b2ae35) >>> 0;
+  // IMPORTANT: the final `>>> 0` converts the XOR result to unsigned 32-bit.
+  // Without it, JavaScript's ^ operator can return a signed (negative) integer
+  // when bit 31 is set, causing seededRand to return values in [-1, 0) instead
+  // of [0, 1). That breaks any caller that compares the result to 0 — most
+  // critically the ink-blob gate `blobSeed < blobProb`, which would fire even
+  // when blobProb is 0 (ink-blob slider fully off).
+  return ((s ^ (s >>> 16)) >>> 0) / 0x100000000;
 }
 
 /**
  * Pick one variant URL for a single character occurrence.
  *
- * `variants` is the list of all sample URLs for a character (the new /glyphs
- * response shape). We use a position-derived seed so the choice is:
- *   • varied   — different occurrences of the same character get different
- *                samples, which is the whole point of uploading multiple.
- *   • stable   — the same position always resolves to the same sample, so the
- *                preview doesn't flicker between re-renders / slider tweaks.
+ * Uses a strict round-robin approach: each occurrence of the same character
+ * gets the next sample in sequence, cycling back to the first after the last.
+ * This guarantees perfectly uniform distribution — with 3 samples, every
+ * third occurrence cycles back, so no sample ever dominates.
+ *
+ * `occurrence` is the 0-based count of how many times this character has
+ * already appeared in the document before this instance.
  *
  * Accepts a plain string too, for resilience against an older server build
  * that still returns a single URL per character.
  */
 function pickVariantUrl(
   variants: string[] | string | undefined,
-  seed: number,
+  occurrence: number,
 ): string | undefined {
   if (!variants) return undefined;
-  const arr = Array.isArray(variants) ? variants : [variants];
+  const arr = (Array.isArray(variants) ? variants : [variants]).filter(Boolean);
   if (arr.length === 0) return undefined;
   if (arr.length === 1) return arr[0];
-  const idx = Math.floor(seededRand(seed) * arr.length) % arr.length;
-  return arr[idx];
+  // Round-robin: occurrence 0 → arr[0], occurrence 1 → arr[1], ...
+  return arr[occurrence % arr.length];
 }
 
 // ── Per-character typography ──────────────────────────────────────────────────
@@ -147,14 +161,35 @@ function pickVariantUrl(
 const CAP = 1.40;  // cap-height / x-height ratio (uppercase, digits)
 
 const CHAR_HEIGHT_RATIO: Record<string, number> = {
-  // ── Hebrew — normal x-height letters (omitted = 1.0): א ט מ נ ס ע פ צ ש ת ם ──
-  'י': 0.45, 'ו': 0.70, 'ז': 0.75, 'ר': 0.82, 'ד': 0.85,
-  'ג': 0.85, 'ח': 0.90, 'ה': 0.90, 'ב': 0.92, 'כ': 0.90,
+  // ── Hebrew — values MUST match _CHAR_HEIGHT_RATIO in backend/modules/synthesizer.py
+  //    exactly so that line-breaking in the preview produces the same wrapping as
+  //    the server-rendered final output.
+  'א': 0.92,  // alef
+  'ב': 0.92,  // bet
+  'ג': 0.82,  // gimel
+  'ד': 0.82,  // dalet
+  'ה': 0.90,  // he
+  'ו': 0.68,  // vav
+  'ז': 0.78,  // zayin
+  'ח': 0.92,  // het
+  'ט': 0.92,  // tet
+  'י': 0.30,  // yod — small, ~30 % of x-height
+  'כ': 0.90,  // kaf
+  'מ': 0.92,  // mem
+  'נ': 0.82,  // nun
+  'ס': 0.92,  // samekh
+  'ע': 0.90,  // ayin
+  'פ': 0.90,  // pe
+  'צ': 0.85,  // tsadi
+  'ר': 0.75,  // resh
+  'ש': 0.92,  // shin
+  'ת': 0.92,  // tav
+  'ם': 0.95,  // final mem (closed)
   // Ascender — rises above x-height, bottom on baseline
-  'ל': 1.32,
+  'ל': 1.35,
   // Descenders — body at x-height, stem drops below baseline
-  'ן': 1.28, 'ך': 1.28, 'ק': 1.20,
-  'ף': 1.30, 'ץ': 1.30,   // final pe / final tsadi are DESCENDERS in Hebrew
+  'ן': 1.56, 'ך': 1.56, 'ק': 1.19,
+  'ף': 1.38, 'ץ': 1.31,   // final pe / final tsadi are DESCENDERS in Hebrew
 
   // ── Latin uppercase — cap-height ──────────────────────────────────────
   'A': CAP, 'B': CAP, 'C': CAP, 'D': CAP, 'E': CAP, 'F': CAP,
@@ -212,8 +247,10 @@ const CHAR_HEIGHT_RATIO: Record<string, number> = {
 // glyphTop = baselineY - gh * ascRatio
 const CHAR_ASCENDER_RATIO: Record<string, number> = {
   // ── Hebrew descenders — top aligns with x-height, tail below ──────────
-  'ן': 1 / 1.28, 'ך': 1 / 1.28, 'ק': 1 / 1.20,
-  'ף': 1 / 1.30, 'ץ': 1 / 1.30,
+  // Formula: ascender = 1 / CHAR_HEIGHT_RATIO  (top pins to x-height top)
+  // Values MUST stay in sync with _CHAR_HEIGHT_RATIO in synthesizer.py.
+  'ן': 1 / 1.56, 'ך': 1 / 1.56, 'ק': 1 / 1.19,
+  'ף': 1 / 1.38, 'ץ': 1 / 1.31,
 
   // ── Latin descenders ──────────────────────────────────────────────────
   'g': 0.65, 'j': 0.62, 'p': 0.65, 'q': 0.65, 'y': 0.65,
@@ -317,9 +354,12 @@ function NotebookPage({
   lineH: number; topM: number; marginLineX: number;
   pageBg: PageBg; children: React.ReactNode;
 }) {
+  // Background lines start at topM (= _TOP_MARGIN scaled), matching the server's
+  // layout.py which now also starts ruled lines at _TOP_MARGIN (not _LINES_SPACING).
   const hLines: number[] = [];
   for (let y = topM; y < pageH; y += lineH) hLines.push(y);
 
+  // Vertical grid lines: same pitch as horizontal for square cells.
   const vLines: number[] = [];
   if (pageBg === 'grid') {
     for (let x = lineH; x < pageW; x += lineH) vLines.push(x);
@@ -396,7 +436,7 @@ function lineDirection(words: string[]): 'rtl' | 'ltr' {
 
 const HandwritingCanvas = React.memo(function HandwritingCanvas({
   pageLines, glyphMap, displayCharH, lsp, wsp, jitter,
-  slantPx, blobProb,
+  slantPx, blobProb, strokeBlur,
   canvasInnerW, lineH, topM, dims, inkColor,
 }: {
   pageLines:    string[][];
@@ -407,6 +447,7 @@ const HandwritingCanvas = React.memo(function HandwritingCanvas({
   jitter:       number;
   slantPx:      number;
   blobProb:     number;
+  strokeBlur:   number;  // blur radius factor for stroke-width preview simulation
   canvasInnerW: number;
   lineH:        number;
   topM:         number;
@@ -415,6 +456,11 @@ const HandwritingCanvas = React.memo(function HandwritingCanvas({
 }) {
   const { colors } = useTheme();
   const inkHex = INK_COLORS[inkColor];
+
+  // Track how many times each character has appeared so far on this page,
+  // so we can do strict round-robin sample selection across all occurrences.
+  // Declared here so it persists across all lines/words in the page render.
+  const charOccurrences: Record<string, number> = {};
 
   // All glyphs rendered at uniform displayCharH → consistent stroke weight
   return (
@@ -431,8 +477,10 @@ const HandwritingCanvas = React.memo(function HandwritingCanvas({
         const tiltVar   = 0.6 + 0.8 * ((lineSeed & 0xFFFF) / 65535);
         const lineTilt  = slantPx > 0 ? tiltDir * slantPx * tiltVar : 0;
 
-        // Baseline Y within each line row (in px from top of the row)
-        const baselineY = lineH * BASELINE_Y_RATIO;
+        // Baseline Y fixed at the bottom of the row so the glyph bottom always
+        // sits on the lower ruled line. Growth happens only upward (glyphTop moves
+        // toward and past the upper ruled line as displayCharH increases).
+        const baselineY = lineH;
 
         line.forEach((word, wi) => {
           word.split('').forEach((ch, ci) => {
@@ -451,9 +499,11 @@ const HandwritingCanvas = React.memo(function HandwritingCanvas({
             const tiltY = rtl
               ? lineTilt * (1 - glyphX / canvasInnerW)
               : lineTilt * (glyphX / canvasInnerW);
-            // Pick a different sample per occurrence (seed derived from the
-            // glyph's position so it stays stable across re-renders).
-            const url  = pickVariantUrl(glyphMap[ch], li * 997 + wi * 97 + ci * 53 + 19);
+            // Pick variant by round-robin: count how many times this character
+            // has appeared so far on the page and advance the counter.
+            const occurrence = charOccurrences[ch] ?? 0;
+            charOccurrences[ch] = occurrence + 1;
+            const url  = pickVariantUrl(glyphMap[ch], occurrence);
             cells.push(
               <View
                 key={`${li}_${wi}_${ci}`}
@@ -469,12 +519,14 @@ const HandwritingCanvas = React.memo(function HandwritingCanvas({
               >
                 {url ? (
                   <>
-                    {/* Blur layer simulates normalize_stroke_width dilation */}
+                    {/* Blur layer simulates stroke width: more blur = thicker strokes.
+                        strokeBlur is proportional to strokeWidth slider so the preview
+                        gives a live approximation of the server's stroke_ratio output. */}
                     <Image
                       source={{ uri: absUrl(url) }}
                       style={{ position: 'absolute', width: cw, height: gh, tintColor: inkHex }}
                       resizeMode="contain"
-                      blurRadius={gh * 0.055}
+                      blurRadius={gh * strokeBlur}
                     />
                     {/* Sharp layer on top for crisp edges */}
                     <Image
@@ -484,14 +536,22 @@ const HandwritingCanvas = React.memo(function HandwritingCanvas({
                     />
                   </>
                 ) : (
+                  /* Character not in glyphMap — show a subtle strikethrough
+                     placeholder instead of computer-font text so the user can
+                     see which glyphs are missing without it looking like output. */
                   <View style={{
                     width: cw, height: gh,
-                    backgroundColor: colors.accentLight, borderRadius: 3,
+                    borderWidth: 1,
+                    borderColor: colors.border,
+                    borderRadius: 3,
+                    borderStyle: 'dashed',
                     alignItems: 'center', justifyContent: 'center',
+                    opacity: 0.5,
                   }}>
                     <Text style={{
-                      color: colors.accent, fontFamily: fonts.bold,
-                      fontSize: Math.max(7, gh * 0.55),
+                      color: colors.inkFaint,
+                      fontFamily: fonts.regular,
+                      fontSize: Math.max(6, gh * 0.45),
                     }}>{ch}</Text>
                   </View>
                 )}
@@ -567,6 +627,7 @@ export default function PreviewScreen({ navigation, route }: Props) {
     baselineJitter: clamp(initStyle.baselineJitter / 0.25),          // 3→12
     slant:          15,   // slight natural lean by default
     inkBlobs:       10,   // subtle blob effect by default
+    strokeWidth:    50,   // 50 = stroke_ratio 0.075 (default, matches _STROKE_RATIO)
   });
 
   const [inkColor, setInkColor] = useState<InkColor>(initInkColor ?? 'black');
@@ -588,19 +649,44 @@ export default function PreviewScreen({ navigation, route }: Props) {
     if (draftDebounce.current) { clearTimeout(draftDebounce.current); draftDebounce.current = null; }
   }, []);
 
-  // Slider 0-100 → backend char_height → preview px (scaled to lineH)
-  // pixelScale: ratio of preview px per backend px (constant for a given screen)
-  // Use liveHs so the canvas responds immediately during drag
-  const charHBackend = 40 + liveHs.charHeight * 0.9;                       // 40-130 backend px
-  const pixelScale   = lineH * 0.72 / 85;                                  // ≈ 0.47 on typical screen
-  const displayCharH = Math.max(4, Math.round(charHBackend * pixelScale));
+  // ── Unified pixel scale ─────────────────────────────────────────────────
+  //
+  // pixelScale = (preview usable width) / (server usable width)
+  //            = canvasInnerW / SRV_USABLE_W
+  //
+  // This single factor converts any server-pixel value to a preview-pixel value
+  // so that character widths, letter/word spacing, and slant all maintain the
+  // same PROPORTIONS as the server render.  Crucially, this makes line-breaking
+  // in the preview produce the same wraps as render_full_page on the server.
+  //
+  // canvasInnerW = notebookW - 2*NOTEBOOK_HPAD  (preview usable width)
+  // SRV_USABLE_W = SRV_PAGE_W - 2*SRV_SIDE_MARGIN = 2080  (server usable width)
+  //
+  const pixelScale = canvasInnerW / SRV_USABLE_W;   // e.g. 334/2080 ≈ 0.161
 
-  // Spacing proportional to backend values so preview visually matches final output
-  const lsp    = Math.max(0, Math.round(liveHs.letterSpacing * 0.30 * pixelScale));
-  const wsp    = Math.max(1, Math.round((15 + liveHs.wordSpacing * 0.85) * pixelScale));
-  const jitter = Math.max(0, charHBackend * liveHs.baselineJitter * 0.0025 * pixelScale);
-  const slantPx  = liveHs.slant * 0.4 * pixelScale; // 0-19px line tilt at preview scale
+  // Backend char height (server pixels): slider 0→40 px, slider 100→130 px
+  const charHBackend = 40 + liveHs.charHeight * 0.9;   // 40-130 server px
+
+  // Display char height for the preview canvas.
+  // Bottom of glyph is always anchored to the bottom ruled line.
+  // Only the top grows upward as the slider increases:
+  //   slider = 0   → 0.50 × lineH  (top sits at the middle of the line)
+  //   slider = 100 → 1.10 × lineH  (top slightly overflows the upper ruled line)
+  const displayCharH = Math.max(4, Math.round(lineH * (0.50 + 0.60 * liveHs.charHeight / 100)));
+
+  // All spacing values are scaled by the same pixelScale for consistency.
+  const lsp     = Math.max(0, Math.round(liveHs.letterSpacing * 0.30 * pixelScale));
+  const wsp     = Math.max(1, Math.round((15 + liveHs.wordSpacing * 0.85) * pixelScale));
+  const jitter  = Math.max(0, charHBackend * liveHs.baselineJitter * 0.0025 * pixelScale);
+  // slantPx: line tilt per line in preview pixels.
+  // Server sends slant = slider * 0.4 (server px), scaled by pixelScale → preview px.
+  const slantPx  = liveHs.slant * 0.4 * pixelScale;
   const blobProb = liveHs.inkBlobs * 0.003; // 0-0.30
+  // strokeBlur: blur factor for preview simulation.
+  //   slider 0  → factor 0.01 (minimal blur, visually thin)
+  //   slider 50 → factor 0.055 (default, matches _STROKE_RATIO 0.075)
+  //   slider 100 → factor 0.10 (strong blur, visually thick)
+  const strokeBlur = 0.01 + liveHs.strokeWidth * 0.0009;
 
   // ── Prefetch glyph images ──────────────────────────────────────────────────
   useEffect(() => {
@@ -658,28 +744,29 @@ export default function PreviewScreen({ navigation, route }: Props) {
   useEffect(() => { pendingHsRef.current = hs; setLiveHs(hs); }, [hs]);
 
   // ── Draft persistence ──────────────────────────────────────────────────────
-  // Only hs and inkColor are saved — pageBg is a document-level setting that
-  // comes from the editor and must not be overridden by a stale draft.
+  // Saves hs, inkColor, AND pageBg so that going back from FinalView to Preview
+  // and pressing Finish again sends the exact same settings the user chose.
   useEffect(() => {
     AsyncStorage.getItem(DRAFT_KEY).then(raw => {
       if (!raw) return;
       try {
-        const draft = JSON.parse(raw) as { hs?: HandwritingStyle; inkColor?: InkColor };
+        const draft = JSON.parse(raw) as { hs?: HandwritingStyle; inkColor?: InkColor; pageBg?: PageBg };
         if (draft.hs)       { setHs(draft.hs); setLiveHs(draft.hs); pendingHsRef.current = draft.hs; }
         if (draft.inkColor) setInkColor(draft.inkColor);
+        if (draft.pageBg)   setPageBg(draft.pageBg);
       } catch {}
     }).catch(() => {});
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Auto-save draft whenever style or ink color changes (debounced 800ms)
+  // Auto-save draft whenever style, ink color, or background changes (debounced 800ms)
   useEffect(() => {
     if (draftDebounce.current) clearTimeout(draftDebounce.current);
     draftDebounce.current = setTimeout(() => {
-      AsyncStorage.setItem(DRAFT_KEY, JSON.stringify({ hs, inkColor }));
+      AsyncStorage.setItem(DRAFT_KEY, JSON.stringify({ hs, inkColor, pageBg }));
     }, 800);
     return () => { if (draftDebounce.current) clearTimeout(draftDebounce.current); };
-  }, [hs, inkColor]);
+  }, [hs, inkColor, pageBg]);
 
   const handleFinish = useCallback(() => {
     navigation.navigate('FinalView', {
@@ -718,6 +805,7 @@ export default function PreviewScreen({ navigation, route }: Props) {
                   jitter={jitter}
                   slantPx={slantPx}
                   blobProb={blobProb}
+                  strokeBlur={strokeBlur}
                   canvasInnerW={canvasInnerW}
                   lineH={lineH}
                   topM={topM}
@@ -782,7 +870,7 @@ export default function PreviewScreen({ navigation, route }: Props) {
             [['ריווח מילה', 'wordSpacing'], ['ריקוד', 'baselineJitter']],
             [['נטייה', 'slant'], ['צבירת דיו', 'inkBlobs']],
           ] as [string, keyof HandwritingStyle][][]).map((row, ri) => (
-            <View key={ri} style={[styles.slidersRow, ri === 2 && { marginBottom: 14 }]}>
+            <View key={ri} style={styles.slidersRow}>
               {row.map(([label, key]) => (
                 <View key={key} style={styles.sliderHalf}>
                   <View style={styles.sliderHeader}>
@@ -827,6 +915,42 @@ export default function PreviewScreen({ navigation, route }: Props) {
               ))}
             </View>
           ))}
+
+          {/* Full-width stroke width slider — controls ALL characters uniformly */}
+          <View style={[styles.slidersRow, { marginBottom: 14 }]}>
+            <View style={styles.sliderHalf}>
+              <View style={styles.sliderHeader}>
+                <Text style={styles.sliderLabel}>עובי קו</Text>
+                <Text style={styles.sliderValue}>{Math.round(liveHs.strokeWidth)}</Text>
+              </View>
+              <Slider
+                style={styles.sliderControl}
+                minimumValue={0} maximumValue={100} step={1}
+                value={hs.strokeWidth}
+                onValueChange={v => {
+                  pendingHsRef.current = { ...pendingHsRef.current, strokeWidth: v };
+                  if (!isDragging) setIsDragging(true);
+                  if (!throttleRef.current) {
+                    throttleRef.current = setTimeout(() => {
+                      setLiveHs({ ...pendingHsRef.current });
+                      throttleRef.current = null;
+                    }, 80);
+                  }
+                }}
+                onSlidingComplete={v => {
+                  if (throttleRef.current) { clearTimeout(throttleRef.current); throttleRef.current = null; }
+                  const next = { ...pendingHsRef.current, strokeWidth: v };
+                  pendingHsRef.current = next;
+                  setLiveHs(next);
+                  setHs(next);
+                  setIsDragging(false);
+                }}
+                minimumTrackTintColor={colors.accent}
+                maximumTrackTintColor={colors.border}
+                thumbTintColor={colors.accent}
+              />
+            </View>
+          </View>
 
           <View style={styles.divider} />
 
