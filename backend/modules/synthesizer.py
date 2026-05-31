@@ -579,7 +579,7 @@ _CHAR_HEIGHT_RATIO: dict[str, float] = {
     "ז": 0.78,   # zayin — slightly shorter
     "ח": 0.92,   # het
     "ט": 0.92,   # tet — round, full x-height
-    "י": 0.30,   # yod — tiny mark, 30 % of x-height (top pinned to x-height top)
+    "י": 0.22,   # yod — tiny mark, 22 % of x-height (top pinned to x-height top)
     "כ": 0.90,   # kaf (open)
     "מ": 0.92,   # mem (open)
     "נ": 0.82,   # nun (open) — slightly shorter
@@ -699,8 +699,8 @@ def _asc(h_ratio: float) -> float:
 
 _CHAR_ASCENDER_RATIO: dict[str, float] = {
     # ── Hebrew: entirely above baseline ──────────────────────────────────────
-    # yod: 1/0.30 ≈ 3.33 — top aligns with x-height top (upper part of line)
-    "י": 3.33,
+    # yod: 1/0.22 ≈ 4.54 — top aligns with x-height top (upper part of line)
+    "י": 4.54,
     "א": 1.0, "ב": 1.0, "ג": 1.0, "ד": 1.0, "ה": 1.0,
     "ו": 1.0, "ז": 1.0, "ח": 1.0, "ט": 1.0, "כ": 1.0,
     "מ": 1.0, "נ": 1.0, "ס": 1.0, "ע": 1.0, "פ": 1.0,
@@ -857,8 +857,9 @@ _INK_RGB: dict[str, tuple[int, int, int]] = {
 # Target stroke width as a fraction of character height.
 # At 80 px char height → target stroke ≈ 6 px (≈ 0.5 mm at 300 DPI — medium pen).
 _STROKE_RATIO     = 0.075
-# Maximum morphological iterations per glyph (safety cap; 6 covers ~6 px of correction).
-_STROKE_MAX_ITERS = 6
+# Maximum morphological iterations per glyph (10 covers ~10 px of correction — enough for
+# thick-pen vs thin-pen differences without distorting the glyph shape).
+_STROKE_MAX_ITERS = 10
 
 
 def normalize_stroke_width(img: np.ndarray, target_char_h: int) -> np.ndarray:
@@ -1168,14 +1169,22 @@ def compose_line(
             ch_here     = chars[idx]
             asc_ratio   = _CHAR_ASCENDER_RATIO.get(ch_here, 1.0)
             pil_g       = Image.fromarray(img, "RGBA")
-            # Baseline shift: σ = jitter_pct % of glyph height
-            baseline_dance = int(random.gauss(0, pil_g.height * (jitter_pct / 100.0)))
+            # Pre-jitter target height for this character — used for POSITION so that
+            # jitter scale/rotation don't shift the glyph up unexpectedly.
+            h_ratio_here    = _CHAR_HEIGHT_RATIO.get(ch_here, 1.0)
+            target_h_here   = max(1, round(target_char_h_global * h_ratio_here))
+            ascender_h_here = round(target_h_here * asc_ratio)
+            # Baseline dance uses target_h (stable) not pil_g.height (varies with jitter)
+            baseline_dance = int(random.gauss(0, target_h_here * (jitter_pct / 100.0)))
             if ch_here == 'י':
-                # Yod is tiny — pin its top to where normal letters' tops are,
-                # ignoring pil_g.height which is unreliable for short glyphs.
+                # Yod is tiny — pin its top to where normal letters' tops are.
                 y = baseline_y - target_char_h_global + v_off
             else:
-                y = baseline_y - round(pil_g.height * asc_ratio) + v_off + baseline_dance
+                # Use pre-jitter ascender height so rotation/scale jitter doesn't
+                # shift the glyph above the top ruled line.
+                y = baseline_y - ascender_h_here + v_off + baseline_dance
+            # Never let a glyph start above the line canvas — clips uncomfortably.
+            y = max(0, y)
             canvas.paste(pil_g, (x, y), pil_g)
             # Ink blobs at stroke endpoints
             _add_ink_blob(canvas, x, y, pil_g.width, pil_g.height, blob_prob, ink_rgb)

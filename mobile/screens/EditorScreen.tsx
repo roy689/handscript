@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import { showAlert } from '../src/utils/alert';
 import {
-  KeyboardAvoidingView,
+  Keyboard,
   Platform,
   Pressable,
   StyleSheet,
@@ -9,7 +9,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
 import { getCurrentUserId }        from '../src/services/auth';
@@ -59,6 +59,20 @@ export default function EditorScreen({ navigation }: Props) {
 
   const [lastConvertTime, setLastConvertTime] = useState(0);
   const MIN_INTERVAL_MS = 2000;
+
+  // ── Keyboard height tracking ───────────────────────────────────────────────
+  // KeyboardAvoidingView conflicts with SafeAreaView from react-native-safe-area-context.
+  // Instead, we listen directly to keyboard events and apply paddingBottom to
+  // the root View so the layout compresses naturally, keeping the button visible.
+  const insets   = useSafeAreaInsets();
+  const [kbHeight, setKbHeight] = useState(0);
+  useEffect(() => {
+    const showEvt = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvt = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const s1 = Keyboard.addListener(showEvt, e => setKbHeight(e.endCoordinates.height));
+    const s2 = Keyboard.addListener(hideEvt, () => setKbHeight(0));
+    return () => { s1.remove(); s2.remove(); };
+  }, []);
 
   // Default style values passed to Preview (user adjusts them there via sliders)
   const textSize      = 85;
@@ -138,7 +152,19 @@ export default function EditorScreen({ navigation }: Props) {
     setLastConvertTime(now);
 
     // Validation #1: Text validation
-    const sanitizedText = text.trim();
+    // Strip invisible Unicode control chars (bidi marks, ZWJ, BOM, directional
+    // overrides) that can sneak in via paste/autocorrect.  They are never in the
+    // glyph bank and would trigger the computer-font fallback in the preview canvas.
+    // Removed ranges: U+200B-U+200F, U+202A-U+202E, U+2060-U+206F, U+FEFF
+    const sanitizedText = [...text.trim()].filter(ch => {
+      const c = ch.codePointAt(0) ?? 0;
+      return !(
+        (c >= 0x200B && c <= 0x200F) ||  // zero-width space / bidi marks
+        (c >= 0x202A && c <= 0x202E) ||  // directional embedding / override
+        (c >= 0x2060 && c <= 0x206F) ||  // word joiner + deprecated format chars
+        c === 0xFEFF                      // BOM / zero-width no-break space
+      );
+    }).join('');
     if (sanitizedText.length === 0) {
       setError('כתוב משהו קודם');
       return;
@@ -217,12 +243,20 @@ export default function EditorScreen({ navigation }: Props) {
       await clearPendingConversion(); // discard any queued item — we just succeeded
       await clearDraft();             // text successfully sent — drop saved draft
 
+      // Sanitise the glyph map: filter out any empty/null URLs that could
+      // cause the placeholder box to appear for characters that ARE in the bank.
+      const cleanGlyphMap: Record<string, string[]> = {};
+      for (const [ch, urls] of Object.entries(gData.glyphs)) {
+        const validUrls = (urls ?? []).filter((u): u is string => typeof u === 'string' && u.length > 0);
+        if (validUrls.length > 0) cleanGlyphMap[ch] = validUrls;
+      }
+
       // Navigate first — the overlay unmounts with EditorScreen so no flicker
       navigation.navigate('Preview', {
         text: sanitizedText,
         background: paperStyle,
         inkColor,
-        glyphMap: gData.glyphs,
+        glyphMap: cleanGlyphMap,
         style: {
           charHeight:     textSize,
           letterSpacing:  letterSpacing,
@@ -255,12 +289,8 @@ export default function EditorScreen({ navigation }: Props) {
   }, [text, paperStyle, inkColor, navigation, lastConvertTime]);
 
   return (
-    <KeyboardAvoidingView
-      style={styles.kav}
-      behavior="padding"
-      keyboardVerticalOffset={Platform.OS === 'android' ? 20 : 0}
-    >
-      <SafeAreaView style={styles.safe}>
+    <View style={[styles.kav, { paddingBottom: kbHeight }]}>
+      <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
 
         {/* ── Header ────────────────────────────────────────────────────── */}
         <View style={styles.header}>
@@ -330,7 +360,7 @@ export default function EditorScreen({ navigation }: Props) {
         )}
 
         {/* ── Convert button ──────────────────────────────────────────────── */}
-        <View style={styles.actionBar}>
+        <View style={[styles.actionBar, { paddingBottom: kbHeight > 0 ? 8 : insets.bottom + 8 }]}>
           <Pressable
             style={({ pressed }) => [
               styles.convertBtn,
@@ -363,7 +393,7 @@ export default function EditorScreen({ navigation }: Props) {
 
       {/* Full-screen animated overlay while generating handwriting */}
       <HandwritingOverlay visible={converting} />
-    </KeyboardAvoidingView>
+    </View>
   );
 }
 
@@ -505,8 +535,7 @@ function getStyles(colors: ThemeColors) {
 
     // ── Action bar ────────────────────────────────────────────────────────────
     actionBar: {
-      paddingTop:    12,
-      paddingBottom: 16,
+      paddingTop: 12,
     },
     convertBtn: {
       backgroundColor: colors.accent,

@@ -172,7 +172,7 @@ const CHAR_HEIGHT_RATIO: Record<string, number> = {
   'ז': 0.78,  // zayin
   'ח': 0.92,  // het
   'ט': 0.92,  // tet
-  'י': 0.30,  // yod — small, ~30 % of x-height
+  'י': 0.22,  // yod — tiny mark, 22 % of x-height
   'כ': 0.90,  // kaf
   'מ': 0.92,  // mem
   'נ': 0.82,  // nun
@@ -253,7 +253,7 @@ const CHAR_ASCENDER_RATIO: Record<string, number> = {
   // ── Hebrew yod — tiny mark in the upper part of the line ─────────────
   // Same formula as descenders: top aligns with x-height top.
   // 1/0.30 ≈ 3.33 → top of yod = top of regular-height letters.
-  'י': 1 / 0.30,
+  'י': 1 / 0.22,
 
   // ── Latin descenders ──────────────────────────────────────────────────
   'g': 0.65, 'j': 0.62, 'p': 0.65, 'q': 0.65, 'y': 0.65,
@@ -1072,6 +1072,7 @@ function getStyles(colors: ThemeColors) {
       color:            colors.inkDark,
       textAlign:        'right',
       writingDirection: 'rtl',
+      alignSelf:        'flex-end',
       marginTop:        4,
       marginBottom:     10,
     },
