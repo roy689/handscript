@@ -688,7 +688,7 @@ def _normalize_stroke_width(
 
     kernel    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     new_alpha = alpha.copy()
-    _MAX_ITERS = 8   # at 1 px/iter this corrects up to 8 px deviation
+    _MAX_ITERS = 12   # re-measures after each step — converges reliably
 
     for i in range(_MAX_ITERS):
         ratio = current_radius / target_radius
@@ -696,13 +696,18 @@ def _normalize_stroke_width(
             logger.info("stroke_norm: converged after %d iter(s)  ratio=%.2f", i, ratio)
             break
         if ratio > 1.08:
-            new_alpha      = cv2.erode(new_alpha, kernel, iterations=1)
-            current_radius = max(0.5, current_radius - 1.0)
-            logger.debug("stroke_norm: ERODE iter %d  r≈%.1f", i + 1, current_radius)
+            new_alpha = cv2.erode(new_alpha, kernel, iterations=1)
+            logger.debug("stroke_norm: ERODE iter %d", i + 1)
         else:
-            new_alpha      = cv2.dilate(new_alpha, kernel, iterations=1)
-            current_radius = current_radius + 1.0
-            logger.debug("stroke_norm: DILATE iter %d  r≈%.1f", i + 1, current_radius)
+            new_alpha = cv2.dilate(new_alpha, kernel, iterations=1)
+            logger.debug("stroke_norm: DILATE iter %d", i + 1)
+        # Re-measure ACTUAL radius — old ±1.0 bookkeeping was wrong for complex glyphs
+        d = cv2.distanceTransform(new_alpha, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+        nz = d[d > 0]
+        if len(nz) < 10:
+            logger.debug("stroke_norm: glyph eroded away at iter %d", i + 1)
+            break
+        current_radius = float(np.median(nz))
 
     result = rgba.copy()
     result[:, :, 3] = new_alpha

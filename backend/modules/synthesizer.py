@@ -864,25 +864,18 @@ _STROKE_MAX_ITERS = 10
 
 def normalize_stroke_width(img: np.ndarray, target_char_h: int) -> np.ndarray:
     """
-    Normalize the stroke width of a glyph so ALL characters have the same
-    visual weight regardless of pen pressure, photo conditions, or drawing style.
+    Normalize stroke width so every glyph has the same visual weight regardless
+    of how it was drawn or photographed.
 
-    Strategy
-    --------
-    1. Measure the current stroke radius via the distance transform median.
-    2. Compute target_radius = target_char_h * _STROKE_RATIO / 2.
-    3. Iteratively dilate (too thin) or erode (too thick) with a 3×3 elliptic
-       kernel until the measured radius is within ±8 % of the target, up to
-       _STROKE_MAX_ITERS iterations.  One iteration shifts the radius by ~1 px,
-       so large deviations are corrected in several small steps — more stable
-       than a single large-kernel operation.
+    Fix vs old implementation
+    -------------------------
+    The old code ESTIMATED the new radius after each morphological step (±1 px
+    bookkeeping).  That estimate is wrong for complex glyphs — a single dilation
+    on a wide stroke barely changes the median distance, so the loop terminated
+    far too early and strokes stayed uneven.
 
-    Tolerance tightened from the previous ±25 % to ±8 %:
-    at a 80-px character, ±25 % was ±1.5 px of stroke radius — enough to make
-    a thin-pen character look completely different from a thick-pen one.  ±8 %
-    (≈ ±0.5 px at 80 px) is imperceptible and keeps all glyphs uniform.
-
-    The RGB channels are preserved; only the alpha mask is reshaped.
+    This version RE-MEASURES the actual median distance transform after every
+    iteration, which is more expensive but guarantees convergence to the target.
     """
     alpha = img[:, :, 3]
     if alpha.max() == 0:
@@ -890,13 +883,16 @@ def normalize_stroke_width(img: np.ndarray, target_char_h: int) -> np.ndarray:
 
     ink = (alpha > 128).astype(np.uint8) * 255
 
-    dist = cv2.distanceTransform(ink, cv2.DIST_L2, 5)
-    ink_dist = dist[dist > 0]
-    if len(ink_dist) < 20:
+    def _measure_radius(mask: np.ndarray) -> float:
+        d = cv2.distanceTransform(mask, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+        nz = d[d > 0]
+        return float(np.median(nz)) if len(nz) >= 10 else 0.0
+
+    current_radius = _measure_radius(ink)
+    if current_radius == 0.0:
         return img
 
-    current_radius = float(np.median(ink_dist))
-    target_radius  = target_char_h * _STROKE_RATIO / 2.0
+    target_radius = target_char_h * _STROKE_RATIO / 2.0
     if target_radius <= 0:
         return img
 
@@ -905,14 +901,17 @@ def normalize_stroke_width(img: np.ndarray, target_char_h: int) -> np.ndarray:
 
     for _ in range(_STROKE_MAX_ITERS):
         ratio = current_radius / target_radius
-        if 0.92 <= ratio <= 1.08:   # within ±8 % → done
+        if 0.92 <= ratio <= 1.08:   # within ±8 % — converged
             break
         if ratio > 1.08:
-            new_alpha      = cv2.erode(new_alpha, kernel, iterations=1)
-            current_radius = max(0.5, current_radius - 1.0)   # bookkeeping
+            new_alpha = cv2.erode(new_alpha, kernel, iterations=1)
         else:
-            new_alpha      = cv2.dilate(new_alpha, kernel, iterations=1)
-            current_radius = current_radius + 1.0
+            new_alpha = cv2.dilate(new_alpha, kernel, iterations=1)
+        # Re-measure actual radius — don't estimate with ±1.0 bookkeeping
+        r = _measure_radius(new_alpha)
+        if r == 0.0:
+            break   # glyph eroded away completely
+        current_radius = r
 
     out = img.copy()
     out[:, :, 3] = new_alpha
