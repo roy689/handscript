@@ -484,7 +484,7 @@ def _prune_rate_buckets() -> None:
 # Request models — all fields include length/range limits
 # ---------------------------------------------------------------------------
 
-_MAX_TEXT = 5_000   # characters
+_MAX_TEXT = 25_000   # characters
 
 class ValidateRequest(BaseModel):
     text:    str = Field(..., min_length=1, max_length=_MAX_TEXT)
