@@ -78,24 +78,27 @@ def load_background(
     draw = ImageDraw.Draw(img)
 
     if bg_type == "lines":
-        # Horizontal ruled lines starting at _LINES_SPACING from the top so
-        # the first line sits below the natural top margin of the page.
-        # Colour matches standard Clairefontaine / Rhodia notebook rules.
-        y = _LINES_SPACING
+        # Horizontal ruled lines.  Start at _TOP_MARGIN so the first line
+        # aligns with the text starting position (matches PreviewScreen.tsx topM).
+        # Line width: 7 px at A4-300DPI resolution ≈ 1 px when scaled to phone
+        # screen (~390 pt).  Previous 2 px was sub-pixel on common devices and
+        # rendered as an invisible "blank" page.
+        y = _TOP_MARGIN
         while y < h:
-            draw.line([(0, y), (w, y)], fill=_RULE_COLOUR, width=2)
+            draw.line([(0, y), (w, y)], fill=_RULE_COLOUR, width=7)
             y += _LINES_SPACING
 
     elif bg_type == "grid":
-        # Horizontal passes
-        y = _GRID_SPACING
+        # Horizontal and vertical grid lines.
+        # 4 px ≈ 0.6 px on screen — lighter than ruled lines, clearly visible.
+        y = _TOP_MARGIN
         while y < h:
-            draw.line([(0, y), (w, y)], fill=_GRID_COLOUR, width=1)
+            draw.line([(0, y), (w, y)], fill=_GRID_COLOUR, width=4)
             y += _GRID_SPACING
-        # Vertical passes
+        # Vertical passes (start from left margin so columns align with text area)
         x = _GRID_SPACING
         while x < w:
-            draw.line([(x, 0), (x, h)], fill=_GRID_COLOUR, width=1)
+            draw.line([(x, 0), (x, h)], fill=_GRID_COLOUR, width=4)
             x += _GRID_SPACING
 
     else:
@@ -250,7 +253,9 @@ def apply_photo_effect(page: np.ndarray) -> np.ndarray:
     arr[is_bg, 2] *= 0.930   # B: -7 %  → warm cream
 
     # ── 2. Paper fiber texture ────────────────────────────────────────────
-    rng   = np.random.default_rng(seed=42)
+    # Use a fresh, truly random seed each call so every document gets a unique
+    # paper texture — previously seed=42 made every scan identical.
+    rng   = np.random.default_rng()
     fiber = rng.normal(0.0, 12.0, (h, w)).astype(np.float32)
     arr[..., :3] += fiber[..., np.newaxis] * (0.08 * 255.0 / 12.0)
 
@@ -375,10 +380,13 @@ def render_full_page(
     def _flush_page(canvas: np.ndarray) -> np.ndarray:
         """Composite text canvas onto background, then draw the red margin line."""
         page = composite_text_on_background(canvas, background.copy())
-        # Red margin line on the LEFT side — matches PreviewScreen
+        # Red margin line on the RIGHT side — Hebrew text starts from the right,
+        # so the margin line marks the right edge of the writing area.
+        # x = page_w - margin (right margin, mirrors PreviewScreen's `right: marginLineX`).
+        # Width: 8 px ≈ 1.2 px on screen — clearly visible after downscaling.
         pil_page = Image.fromarray(page, "RGBA")
         draw     = ImageDraw.Draw(pil_page)
-        draw.line([(margin, 0), (margin, page_h)], fill=_MARGIN_COLOUR, width=3)
+        draw.line([(page_w - margin, 0), (page_w - margin, page_h)], fill=_MARGIN_COLOUR, width=8)
         result = np.array(pil_page, dtype=np.uint8)
         if scan_mode == 'photo':
             result = apply_photo_effect(result)

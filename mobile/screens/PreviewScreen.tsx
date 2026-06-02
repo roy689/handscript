@@ -19,6 +19,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
   useWindowDimensions,
 } from 'react-native';
@@ -29,10 +30,19 @@ import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList }     from '../navigation/types';
 import { fonts, radius }               from '../src/theme';
 import { useTheme, type ThemeColors }  from '../src/contexts/ThemeContext';
-import { BACKEND_URL }                 from '../src/config';
+import { BACKEND_URL, MAX_TEXT_LEN }   from '../src/config';
 import { impactLight }                 from '../src/utils/haptics';
+import { fetchJSON }                   from '../src/utils/api';
+import { getCurrentUserId }            from '../src/services/auth';
 
 const DRAFT_KEY = 'preview_draft';
+
+// Matches the same invisible Unicode ranges stripped in EditorScreen:
+// U+200B-U+200F  zero-width space / bidi marks
+// U+202A-U+202E  directional embedding / override
+// U+2060-U+206F  word joiner + deprecated format chars
+// U+FEFF         BOM / zero-width no-break space
+const PREVIEW_INVISIBLE_RE = /[​-‏‪-‮⁠-⁯﻿]/g;
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Preview'>;
 
@@ -124,10 +134,22 @@ function seededRand(seed: number): number {
 /**
  * Pick one variant URL for a single character occurrence.
  *
- * Uses a strict round-robin approach: each occurrence of the same character
- * gets the next sample in sequence, cycling back to the first after the last.
- * This guarantees perfectly uniform distribution — with 3 samples, every
- * third occurrence cycles back, so no sample ever dominates.
+ * Replicates the server's shuffled-deck selection (synthesizer.py VariantPicker)
+ * so the preview matches the final output as closely as possible.
+ *
+ * How it works:
+ *   - The N variants are conceptually arranged in a "shuffled deck" that repeats
+ *     every N occurrences.  The shuffle order within each deck cycle is derived
+ *     from a seed that depends on the character and the cycle number, so the same
+ *     text always produces the same assignment in the preview.
+ *   - Within a cycle of length N, position p gets variant deck[p].
+ *   - The deck for cycle c is produced by a Fisher-Yates shuffle seeded with
+ *     hash(charCode × 31 + c × 1000003), keeping things deterministic.
+ *
+ * This matches the server contract: every N occurrences each variant appears
+ * exactly once, and no variant repeats on consecutive occurrences (because
+ * consecutive deck cycles avoid starting with the same index that ended the
+ * previous deck, mirroring the server's _last_used guard).
  *
  * `occurrence` is the 0-based count of how many times this character has
  * already appeared in the document before this instance.
@@ -138,13 +160,44 @@ function seededRand(seed: number): number {
 function pickVariantUrl(
   variants: string[] | string | undefined,
   occurrence: number,
+  charCode: number = 0,
 ): string | undefined {
   if (!variants) return undefined;
   const arr = (Array.isArray(variants) ? variants : [variants]).filter(Boolean);
   if (arr.length === 0) return undefined;
   if (arr.length === 1) return arr[0];
-  // Round-robin: occurrence 0 → arr[0], occurrence 1 → arr[1], ...
-  return arr[occurrence % arr.length];
+
+  const n         = arr.length;
+  const cycle     = Math.floor(occurrence / n); // which deck repetition we're in
+  const posInCycle = occurrence % n;            // position within the current deck
+
+  // Build a deterministic shuffled deck for this (char, cycle) pair.
+  // Fisher-Yates with seededRand as the RNG.
+  const deck = Array.from({ length: n }, (_, i) => i);
+  for (let i = n - 1; i > 0; i--) {
+    // Unique seed per (char, cycle, swap-position) so each step is independent
+    const swapSeed = (charCode * 31 + cycle * 1_000_003 + i * 7) >>> 0;
+    const j = Math.floor(seededRand(swapSeed) * (i + 1));
+    [deck[i], deck[j]] = [deck[j], deck[i]];
+  }
+
+  // Mirror the server's _last_used guard: if the first card of this deck equals
+  // the last card of the previous deck, swap it with the last card of this deck.
+  if (cycle > 0 && n > 1) {
+    // Compute the last index of the previous deck
+    const prevDeck = Array.from({ length: n }, (_, i) => i);
+    for (let i = n - 1; i > 0; i--) {
+      const swapSeed = (charCode * 31 + (cycle - 1) * 1_000_003 + i * 7) >>> 0;
+      const j = Math.floor(seededRand(swapSeed) * (i + 1));
+      [prevDeck[i], prevDeck[j]] = [prevDeck[j], prevDeck[i]];
+    }
+    const lastOfPrev = prevDeck[n - 1];
+    if (deck[0] === lastOfPrev) {
+      [deck[0], deck[n - 1]] = [deck[n - 1], deck[0]];
+    }
+  }
+
+  return arr[deck[posInCycle]];
 }
 
 // ── Per-character typography ──────────────────────────────────────────────────
@@ -157,148 +210,112 @@ function pickVariantUrl(
 //                 ascenderRatio = 1.0   → bottom sits exactly on the baseline
 //                 ascenderRatio < 1.0   → glyph hangs below the baseline (descender)
 //                 ascenderRatio > 1.0   → glyph floats above the baseline
-const CAP = 1.40;  // cap-height / x-height ratio (uppercase, digits)
-
+// CHAR_HEIGHT_RATIO — MUST stay in sync with _CHAR_HEIGHT_RATIO in synthesizer.py.
+// Controls glyph height as a fraction of the base x-height so line-breaking in
+// the preview produces the same wrapping as the server-rendered final output.
 const CHAR_HEIGHT_RATIO: Record<string, number> = {
-  // ── Hebrew — values MUST match _CHAR_HEIGHT_RATIO in backend/modules/synthesizer.py
-  //    exactly so that line-breaking in the preview produces the same wrapping as
-  //    the server-rendered final output.
-  'א': 0.92,  // alef
-  'ב': 0.92,  // bet
-  'ג': 0.82,  // gimel
-  'ד': 0.82,  // dalet
-  'ה': 0.90,  // he
-  'ו': 0.68,  // vav
-  'ז': 0.78,  // zayin
-  'ח': 0.92,  // het
-  'ט': 0.92,  // tet
-  'י': 0.22,  // yod — tiny mark, 22 % of x-height
-  'כ': 0.90,  // kaf
-  'מ': 0.92,  // mem
-  'נ': 0.82,  // nun
-  'ס': 0.92,  // samekh
-  'ע': 0.90,  // ayin
-  'פ': 0.90,  // pe
-  'צ': 0.85,  // tsadi
-  'ר': 0.75,  // resh
-  'ש': 0.92,  // shin
-  'ת': 0.92,  // tav
-  'ם': 0.95,  // final mem (closed)
-  // Ascender — rises above x-height, bottom on baseline
+  // ── Hebrew: standard x-height (entirely above baseline) ──────────────
+  'א': 0.92, 'ב': 0.92, 'ג': 0.82, 'ד': 0.82, 'ה': 0.90,
+  'ו': 0.68, 'ז': 0.78, 'ח': 0.92, 'ט': 0.92, 'כ': 0.90,
+  'מ': 0.92, 'נ': 0.82, 'ס': 0.92, 'ע': 0.90, 'פ': 0.90,
+  'צ': 0.85, 'ר': 0.75, 'ש': 0.92, 'ת': 0.92, 'ם': 0.95,
+  // ── Hebrew: yod — small mark, sits in upper portion of line ──────────
+  'י': 0.35,
+  // ── Hebrew: ascender ─────────────────────────────────────────────────
   'ל': 1.35,
-  // Descenders — body at x-height, stem drops below baseline
-  'ן': 1.80, 'ך': 1.56, 'ק': 1.19,
-  'ף': 1.38, 'ץ': 1.31,   // final pe / final tsadi are DESCENDERS in Hebrew
+  // ── Hebrew: descenders (top at x-height, stem below baseline) ─────────
+  'ק': 1.19, 'ך': 1.56, 'ן': 1.80, 'ף': 1.38, 'ץ': 1.31,
 
-  // ── Latin uppercase — cap-height ──────────────────────────────────────
-  'A': CAP, 'B': CAP, 'C': CAP, 'D': CAP, 'E': CAP, 'F': CAP,
-  'G': CAP, 'H': CAP, 'I': CAP, 'J': CAP, 'K': CAP, 'L': CAP,
-  'M': CAP, 'N': CAP, 'O': CAP, 'P': CAP, 'Q': CAP, 'R': CAP,
-  'S': CAP, 'T': CAP, 'U': CAP, 'V': CAP, 'W': CAP, 'X': CAP,
-  'Y': CAP, 'Z': CAP,
+  // ── Latin uppercase (cap-height, on baseline) ─────────────────────────
+  'A': 1.10, 'B': 1.10, 'C': 1.10, 'D': 1.10, 'E': 1.10,
+  'F': 1.10, 'G': 1.10, 'H': 1.10, 'I': 1.10, 'J': 1.10,
+  'K': 1.10, 'L': 1.10, 'M': 1.10, 'N': 1.10, 'O': 1.10,
+  'P': 1.10, 'Q': 1.10, 'R': 1.10, 'S': 1.10, 'T': 1.10,
+  'U': 1.10, 'V': 1.10, 'W': 1.10, 'X': 1.10, 'Y': 1.10, 'Z': 1.10,
 
-  // ── Latin lowercase ascenders ─────────────────────────────────────────
-  'b': CAP, 'd': CAP, 'h': CAP, 'k': CAP, 'l': CAP,
-  'f': 1.15, 't': 1.20,
-  // Latin descenders — body at x-height, tail below baseline
-  'g': 1.30, 'j': 1.30, 'p': 1.28, 'q': 1.28, 'y': 1.28,
-  'i': 0.75,
+  // ── Latin lowercase: x-height group ──────────────────────────────────
+  'a': 0.92, 'c': 0.92, 'e': 0.92, 'i': 0.92, 'm': 0.92, 'n': 0.92,
+  'o': 0.92, 'r': 0.80, 's': 0.88, 'u': 0.92, 'v': 0.92,
+  'w': 0.92, 'x': 0.88, 'z': 0.88,
+  // ── Latin lowercase: ascenders ────────────────────────────────────────
+  'b': 1.25, 'd': 1.25, 'h': 1.22, 'k': 1.22, 'l': 1.22,
+  'f': 1.20, 't': 1.05,
+  // ── Latin lowercase: descenders ──────────────────────────────────────
+  'g': 1.38, 'j': 1.38, 'p': 1.25, 'q': 1.25, 'y': 1.30,
 
-  // ── Digits — cap-height ───────────────────────────────────────────────
-  '0': CAP, '1': CAP, '2': CAP, '3': CAP, '4': CAP,
-  '5': CAP, '6': CAP, '7': CAP, '8': CAP, '9': CAP,
+  // ── Digits (x-height, on baseline) ───────────────────────────────────
+  '0': 0.95, '1': 0.95, '2': 0.95, '3': 0.95, '4': 0.95,
+  '5': 0.95, '6': 0.95, '7': 0.95, '8': 0.95, '9': 0.95,
 
   // ── Punctuation ───────────────────────────────────────────────────────
-  '.': 0.15,              // period — tiny dot on baseline
-  '…': 0.15,              // ellipsis — same as period
-  ',': 0.30,              // comma — small body + tail below baseline
-  ':': 0.90,              // colon — two dots spanning x-height
-  ';': 1.05,              // semicolon — dot + descending tail
-  "'": 0.30, '"': 0.30,   // apostrophe / quote — small, near cap-line
-  '׳': 0.30, '״': 0.30,   // Hebrew geresh / gershayim — near cap-line
-  '!': CAP, '?': CAP,     // full height, on baseline
-  '–': 0.12, '—': 0.12,   // en-dash / em-dash — thin, mid-line
+  '.': 0.15, '…': 0.15,
+  ',': 0.28,
+  ':': 0.80, ';': 0.85,
+  '!': 1.00, '?': 1.00,
+  "'": 0.22, '"': 0.22, '׳': 0.22, '״': 0.22,
+  '-': 0.12, '–': 0.12, '—': 0.12,
+  '(': 1.10, ')': 1.10, '[': 1.10, ']': 1.10, '{': 1.10, '}': 1.10,
 
-  // ── Brackets — span above cap-line to below baseline ──────────────────
-  '(': 1.50, ')': 1.50,
-  '[': 1.50, ']': 1.50,
-  '{': 1.50, '}': 1.50,
-
-  // ── Math operators ────────────────────────────────────────────────────
-  '+': 0.70, '-': 0.12, '×': 0.70, '÷': 0.80,
-  '=': 0.45, '≠': 0.70,
-  '<': 0.80, '>': 0.80, '≤': 0.95, '≥': 0.95,
-  '±': 0.95, '%': CAP, '√': CAP,
+  // ── Math symbols ─────────────────────────────────────────────────────
+  '+': 0.55, '−': 0.12, '×': 0.55, '÷': 0.55,
+  '=': 0.45, '≠': 0.55,
+  '<': 0.65, '>': 0.65, '≤': 0.75, '≥': 0.75,
+  '±': 0.85, '%': 0.95, '√': 1.20,
+  '^': 0.45, 'π': 0.90,
 
   // ── Currency ──────────────────────────────────────────────────────────
-  '₪': 1.30, '$': 1.50, '€': CAP, '£': CAP, '¢': 1.05,
+  '₪': 1.05, '$': 1.20, '€': 1.00, '£': 1.00, '¢': 0.85,
 
   // ── Arrows ────────────────────────────────────────────────────────────
-  '←': 0.70, '→': 0.70, '↑': 1.20, '↓': 1.20,
+  '←': 0.55, '→': 0.55, '↑': 1.00, '↓': 1.00,
 
   // ── Special symbols ───────────────────────────────────────────────────
-  '@': CAP, '#': CAP, '&': CAP,
-  '*': 0.55, '/': CAP, '\\': CAP, '|': CAP,
-  '~': 0.40, '^': 0.55, '_': 0.10,
+  '@': 1.05, '#': 1.00, '&': 1.00,
+  '*': 0.45, '/': 1.10, '\\': 1.10, '|': 1.10,
+  '~': 0.35, '_': 0.10,
 };
 
-// Fraction of glyph height that sits ABOVE the baseline (1.0 = all above).
+// CHAR_ASCENDER_RATIO — fraction of glyph height that sits ABOVE the baseline.
 // glyphTop = baselineY - gh * ascRatio
+// asc=1.0 → bottom on baseline; asc<1.0 → descender; asc>1.0 → floats above baseline.
+// MUST stay in sync with _CHAR_ASCENDER_RATIO in synthesizer.py.
 const CHAR_ASCENDER_RATIO: Record<string, number> = {
-  // ── Hebrew descenders — top aligns with x-height, tail below ──────────
-  // Formula: ascender = 1 / CHAR_HEIGHT_RATIO  (top pins to x-height top)
-  // Values MUST stay in sync with _CHAR_HEIGHT_RATIO in synthesizer.py.
-  'ן': 1 / 1.80, 'ך': 1 / 1.56, 'ק': 1 / 1.19,
-  'ף': 1 / 1.38, 'ץ': 1 / 1.31,
-  // ── Hebrew yod — tiny mark in the upper part of the line ─────────────
-  // Same formula as descenders: top aligns with x-height top.
-  // 1/0.30 ≈ 3.33 → top of yod = top of regular-height letters.
-  'י': 1 / 0.22,
+  // ── Hebrew: yod — upper portion of line, not pinned to very top ──────
+  'י': 2.3,
+  // ── Hebrew: descenders — top at x-height top, stem below baseline ─────
+  'ק': 0.840, 'ך': 0.641, 'ן': 0.556, 'ף': 0.725, 'ץ': 0.763,
 
-  // ── Latin descenders ──────────────────────────────────────────────────
-  'g': 0.65, 'j': 0.62, 'p': 0.65, 'q': 0.65, 'y': 0.65,
+  // ── Latin descenders — bowl top aligns with x-height top ─────────────
+  'g': 0.725, 'j': 0.725, 'p': 0.800, 'q': 0.800, 'y': 0.769,
 
-  // ── Bottom punctuation ────────────────────────────────────────────────
-  '.': 1.0,               // period sits on the baseline
-  '…': 1.0,               // ellipsis on the baseline
-  ',': 0.50,              // comma — body above, tail hangs below baseline
-  ':': 1.0,               // colon — sits on baseline
-  ';': 1 / 1.05,          // semicolon — tail dips below baseline
-  '_': 0.0,               // underscore — entirely below baseline
+  // ── Punctuation ───────────────────────────────────────────────────────
+  '.': 1.0, '…': 1.0,
+  ',': 0.82,   // dot near baseline + short tail below
+  ':': 1.0, ';': 0.94,
+  '!': 1.0, '?': 1.0,
+  // Quotes float near top of x-height (asc = 80 / (80 × 0.22) ≈ 4.54)
+  "'": 4.54, '"': 4.54, '׳': 4.54, '״': 4.54,
+  // Dashes centred in x-height zone
+  '-': 4.69, '–': 4.69, '—': 4.69,
+  // Brackets foot on baseline
+  '(': 1.0, ')': 1.0, '[': 1.0, ']': 1.0, '{': 1.0, '}': 1.0,
+  '_': 0.0,   // entirely below baseline
 
-  // ── Top-aligned punctuation (near cap-line): cap / heightRatio ────────
-  "'": CAP / 0.30, '"': CAP / 0.30,
-  '׳': CAP / 0.30, '״': CAP / 0.30,
-  '*': CAP / 0.55, '^': CAP / 0.55,
+  // ── Math symbols — centred operators (asc = 40/h + 0.5) ──────────────
+  '+': 1.41, '−': 4.69, '×': 1.41, '÷': 1.41,
+  '=': 1.61, '≠': 1.41,
+  '<': 1.27, '>': 1.27,
+  '≤': 1.17, '≥': 1.17,
+  '±': 1.09,
+  '%': 1.0, '√': 1.0,
+  '^': 2.22, '*': 2.22,   // superscripts pinned to top of x-height
+  '~': 1.93,
 
-  // ── Brackets — top at cap-line, bottom dips below baseline ────────────
-  '(': CAP / 1.50, ')': CAP / 1.50,
-  '[': CAP / 1.50, ']': CAP / 1.50,
-  '{': CAP / 1.50, '}': CAP / 1.50,
-  '$': CAP / 1.50, '¢': 0.95,
-
-  // ── Mid-line dashes — centered between baseline and x-height ──────────
-  '–': 0.5 + 0.5 / 0.12, '—': 0.5 + 0.5 / 0.12,
-
-  // ── Math operators — centered at mid x-height: 0.5 + 0.5/heightRatio ──
-  '+': 0.5 + 0.5 / 0.70,
-  '-': 0.5 + 0.5 / 0.12,
-  '×': 0.5 + 0.5 / 0.70,
-  '÷': 0.5 + 0.5 / 0.80,
-  '=': 0.5 + 0.5 / 0.45,
-  '≠': 0.5 + 0.5 / 0.70,
-  '<': 0.5 + 0.5 / 0.80,
-  '>': 0.5 + 0.5 / 0.80,
-  '≤': 0.5 + 0.5 / 0.95,
-  '≥': 0.5 + 0.5 / 0.95,
-  '±': 0.5 + 0.5 / 0.95,
-  '~': 0.5 + 0.5 / 0.40,
-
-  // ── Horizontal arrows — centered; vertical arrows — slightly above ────
-  '←': 0.5 + 0.5 / 0.70,
-  '→': 0.5 + 0.5 / 0.70,
-  '↑': 0.5 + 0.5 / 1.20,
-  '↓': 0.5 + 0.5 / 1.20,
+  // ── Currency / arrows / special — foot on baseline ───────────────────
+  '₪': 1.0, '$': 1.0, '€': 1.0, '£': 1.0, '¢': 1.0,
+  '←': 1.41, '→': 1.41, '↑': 1.0, '↓': 1.0,
+  '@': 1.0, '#': 1.0, '&': 1.0,
+  '/': 1.0, '\\': 1.0, '|': 1.0,
 };
 
 // Baseline sits 62% from the top of each line row (matches backend _BASELINE_Y_RATIO)
@@ -321,6 +338,9 @@ function wordWidth(word: string, charH: number, lsp: number, dims: GlyphDims): n
     + Math.max(0, chars.length - 1) * lsp;
 }
 
+// Sentinel used to represent an explicit newline (Enter key) in the word list.
+const NEWLINE_SENTINEL = '\n';
+
 function breakLines(
   words: string[], canvasInnerW: number,
   charH: number, lsp: number, wsp: number, dims: GlyphDims,
@@ -329,6 +349,13 @@ function breakLines(
   let line: string[] = [];
   let lineW = 0;
   for (const word of words) {
+    // Explicit newline — flush current line and start a new (possibly empty) one.
+    if (word === NEWLINE_SENTINEL) {
+      lines.push(line);
+      line = [];
+      lineW = 0;
+      continue;
+    }
     const ww  = wordWidth(word, charH, lsp, dims);
     const gap = line.length > 0 ? wsp : 0;
     if (line.length > 0 && lineW + gap + ww > canvasInnerW) {
@@ -505,7 +532,7 @@ const HandwritingCanvas = React.memo(function HandwritingCanvas({
             // has appeared so far on the page and advance the counter.
             const occurrence = charOccurrences[ch] ?? 0;
             charOccurrences[ch] = occurrence + 1;
-            const url  = pickVariantUrl(glyphMap[ch], occurrence);
+            const url  = pickVariantUrl(glyphMap[ch], occurrence, ch.codePointAt(0) ?? 0);
             cells.push(
               <View
                 key={`${li}_${wi}_${ci}`}
@@ -520,28 +547,48 @@ const HandwritingCanvas = React.memo(function HandwritingCanvas({
                 }}
               >
                 {url ? (
-                  <Image
-                    source={{ uri: absUrl(url) }}
-                    style={{ width: cw, height: gh, tintColor: inkHex }}
-                    resizeMode="contain"
-                  />
+                  <>
+                    {/*
+                      Two-layer rendering to match the server's binary-alpha compositing.
+                      When React Native downsamples a glyph from ~160 px stored height to
+                      ~14 px display height it introduces sub-pixel semi-transparency along
+                      stroke edges, making strokes look thinner than the server output.
+                      The server binarises the alpha channel (0 or 255, no intermediate
+                      values) before compositing, which produces full-opacity strokes.
+                      We replicate this with a gently blurred base layer that fills in the
+                      sub-pixel gaps, topped by a sharp layer that keeps edges crisp.
+                      blurRadius = gh * 0.03 ≈ 0.4 px at default size — enough to fill
+                      bilinear-interpolated fringe pixels without making glyphs look fuzzy.
+                    */}
+                    <Image
+                      source={{ uri: absUrl(url) }}
+                      style={{ position: 'absolute', width: cw, height: gh, tintColor: inkHex }}
+                      resizeMode="contain"
+                      blurRadius={Math.max(0.3, gh * 0.03)}
+                    />
+                    <Image
+                      source={{ uri: absUrl(url) }}
+                      style={{ width: cw, height: gh, tintColor: inkHex }}
+                      resizeMode="contain"
+                    />
+                  </>
                 ) : (
-                  /* Character not in glyphMap — show a subtle strikethrough
-                     placeholder instead of computer-font text so the user can
-                     see which glyphs are missing without it looking like output. */
+                  /* Character not in glyphMap — dashed border box + dim letter
+                     so it's visually distinct from real handwriting but still
+                     readable. Matches the upgrade described in HANDSCRIPT_HANDOFF. */
                   <View style={{
                     width: cw, height: gh,
-                    borderWidth: 1,
-                    borderColor: colors.border,
-                    borderRadius: 3,
-                    borderStyle: 'dashed',
                     alignItems: 'center', justifyContent: 'center',
-                    opacity: 0.5,
+                    borderWidth: 1,
+                    borderStyle: 'dashed',
+                    borderColor: INK_COLORS[inkColor],
+                    borderRadius: 2,
+                    opacity: 0.35,
                   }}>
                     <Text style={{
-                      color: colors.inkFaint,
+                      color: INK_COLORS[inkColor],
                       fontFamily: fonts.regular,
-                      fontSize: Math.max(6, gh * 0.45),
+                      fontSize: Math.max(6, gh * 0.55),
                     }}>{ch}</Text>
                   </View>
                 )}
@@ -619,6 +666,63 @@ export default function PreviewScreen({ navigation, route }: Props) {
     inkBlobs:       10,   // subtle blob effect by default
   });
 
+  // Mutable text — all edits allowed; chars not in bank show as computer font
+  const [editableText,    setEditableText]    = useState(text);
+  const [editMode,        setEditMode]        = useState(false);
+  // Mutable glyphMap — grows as the user types chars not in the original text
+  const [liveGlyphMap,    setLiveGlyphMap]    = useState<Record<string, string[]>>(glyphMap);
+
+  const handleEditText = useCallback((newT: string) => {
+    setEditableText(newT.replace(PREVIEW_INVISIBLE_RE, ''));
+  }, []);
+
+  // When editableText changes, fetch glyph URLs for any characters
+  // that are not yet in liveGlyphMap (e.g. newly typed characters).
+  // Debounced 400 ms so rapid typing batches into a single request
+  // instead of firing one /glyphs call per keystroke.
+  useEffect(() => {
+    const handle = setTimeout(() => {
+      const userId = getCurrentUserId();
+      if (!userId) return;
+
+      // Collect unique non-whitespace chars that have no entry in the current map
+      const missing = [...new Set(editableText.split(''))]
+        .filter(ch => ch.trim() && !liveGlyphMap[ch]);
+
+      if (missing.length === 0) return;
+
+      let cancelled = false;
+      (async () => {
+        try {
+          const data = await fetchJSON<{ glyphs: Record<string, string[]> }>(
+            `${BACKEND_URL}/glyphs`,
+            {
+              method: 'POST',
+              body: JSON.stringify({ text: missing.join(''), user_id: userId }),
+            },
+          );
+          if (cancelled) return;
+          // Merge new glyph URLs into the live map
+          const newEntries: Record<string, string[]> = {};
+          for (const [ch, urls] of Object.entries(data.glyphs ?? {})) {
+            const valid = (urls ?? []).filter((u): u is string => typeof u === 'string' && u.length > 0);
+            if (valid.length > 0) newEntries[ch] = valid;
+          }
+          if (Object.keys(newEntries).length > 0) {
+            setLiveGlyphMap(prev => ({ ...prev, ...newEntries }));
+            // Prefetch newly loaded images
+            Object.values(newEntries).flat().forEach(u => Image.prefetch(absUrl(u)).catch(() => null));
+          }
+        } catch {
+          // Silently ignore — missing chars will stay as computer font
+        }
+      })();
+      return () => { cancelled = true; };
+    }, 400);
+    return () => clearTimeout(handle);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editableText]);
+
   const [inkColor, setInkColor] = useState<InkColor>(initInkColor ?? 'black');
   const [pageBg,   setPageBg]   = useState<PageBg>((initBg as PageBg) ?? 'lines');
   const [isLoaded,    setIsLoaded]    = useState(false);
@@ -677,7 +781,7 @@ export default function PreviewScreen({ navigation, route }: Props) {
     // glyphMap maps each char to a LIST of variant URLs. Normalise to arrays
     // (tolerating an older single-string response) and prefetch every variant
     // so switching samples mid-render never shows a loading flash.
-    const entries = Object.entries(glyphMap)
+    const entries = Object.entries(liveGlyphMap)
       .map(([ch, urls]) => [ch, Array.isArray(urls) ? urls : urls ? [urls] : []] as const)
       .filter(([, urls]) => urls.length > 0);
     if (!entries.length) { setIsLoaded(true); return; }
@@ -703,13 +807,32 @@ export default function PreviewScreen({ navigation, route }: Props) {
     }
 
     Promise.all(promises)
-      .then(() => { if (!cancelled) { setGlyphDims(collectedDims); setIsLoaded(true); } })
+      .then(() => {
+        if (!cancelled) {
+          // Merge into existing dims rather than replacing, so dims measured for
+          // previously-loaded glyphs are never discarded when new chars are added.
+          setGlyphDims(prev => ({ ...prev, ...collectedDims }));
+          setIsLoaded(true);
+        }
+      })
       .catch(() => { if (!cancelled) setIsLoaded(true); });
 
     return () => { cancelled = true; };
-  }, [glyphMap]);
+  }, [liveGlyphMap]);
 
-  const words = useMemo(() => text.split(/\s+/).filter(Boolean), [text]);
+  // Split preserving explicit newlines as NEWLINE_SENTINEL tokens so that
+  // Enter-key line breaks in the edit box produce real new lines in the canvas.
+  const words = useMemo(() => {
+    const result: string[] = [];
+    const paragraphs = editableText.split('\n');
+    paragraphs.forEach((para, i) => {
+      const ws = para.split(/[ \t]+/).filter(Boolean);
+      result.push(...ws);
+      // Insert a sentinel for every newline between paragraphs (not after the last).
+      if (i < paragraphs.length - 1) result.push(NEWLINE_SENTINEL);
+    });
+    return result;
+  }, [editableText]);
 
   const allLines = useMemo(() => {
     if (!isLoaded) return [];
@@ -722,7 +845,12 @@ export default function PreviewScreen({ navigation, route }: Props) {
     [allLines, currentPage],
   );
 
-  useEffect(() => { setCurrentPage(0); }, [liveHs, inkColor, pageBg]);
+  // Reset to page 0 on any style/content change.
+  // Also clamp so currentPage never exceeds the new totalPages after text edits.
+  useEffect(() => { setCurrentPage(0); }, [liveHs, inkColor, pageBg, editableText]);
+  useEffect(() => {
+    setCurrentPage(p => Math.min(p, Math.max(0, totalPages - 1)));
+  }, [totalPages]);
   // Keep pendingHsRef in sync whenever hs changes from an external source
   useEffect(() => { pendingHsRef.current = hs; setLiveHs(hs); }, [hs]);
 
@@ -751,15 +879,40 @@ export default function PreviewScreen({ navigation, route }: Props) {
     return () => { if (draftDebounce.current) clearTimeout(draftDebounce.current); };
   }, [hs, inkColor, pageBg]);
 
+  // Use a ref so handleFinish always reads the CURRENT pageBg
+  // without any risk of a stale closure.
+  const pageBgRef = useRef<PageBg>(pageBg);
+  useEffect(() => { pageBgRef.current = pageBg; }, [pageBg]);
+
+  // Guard against double-tap: ref is set synchronously on first press so a
+  // second tap within the same JS frame is ignored — no state update needed.
+  const isFinishingRef = useRef(false);
+
   const handleFinish = useCallback(() => {
-    navigation.navigate('FinalView', {
-      text,
-      background: pageBg,
-      glyphMap,
-      style: hs,
+    if (isFinishingRef.current) return;   // ← drop the second tap
+    isFinishingRef.current = true;
+
+    // Flush any pending throttle so hs is fully up-to-date before navigating.
+    if (throttleRef.current) {
+      clearTimeout(throttleRef.current);
+      throttleRef.current = null;
+      setHs({ ...pendingHsRef.current });
+    }
+    // navigation.push guarantees a fresh FinalView instance every time,
+    // avoiding any risk of React Navigation reusing a screen with stale params.
+    navigation.push('FinalView', {
+      text:       editableText,
+      background: pageBgRef.current,
+      glyphMap:   liveGlyphMap,
+      style:      pendingHsRef.current,
       inkColor,
     });
-  }, [navigation, text, pageBg, glyphMap, hs, inkColor]);
+    // Reset the guard when the screen comes back into focus (user pressed back).
+    const unsub = navigation.addListener('focus', () => {
+      isFinishingRef.current = false;
+      unsub();
+    });
+  }, [navigation, editableText, liveGlyphMap, inkColor]);
 
   // ── RENDER ─────────────────────────────────────────────────────────────────
 
@@ -781,7 +934,7 @@ export default function PreviewScreen({ navigation, route }: Props) {
               ) : (
                 <HandwritingCanvas
                   pageLines={pageLines}
-                  glyphMap={glyphMap}
+                  glyphMap={liveGlyphMap}
                   displayCharH={displayCharH}
                   lsp={lsp}
                   wsp={wsp}
@@ -846,6 +999,39 @@ export default function PreviewScreen({ navigation, route }: Props) {
         {/* ── STYLE PANEL ──────────────────────────────────────────────── */}
         <View style={styles.panel}>
 
+          {/* ── Text edit section (above sliders) ─────────────────────── */}
+          <Pressable
+            style={({ pressed }) => [styles.editToggleBtn, pressed && { opacity: 0.7 }]}
+            onPress={() => { impactLight(); setEditMode(v => !v); }}
+            accessibilityRole="button"
+            accessibilityLabel={editMode ? 'סגור עריכת טקסט' : 'ערוך טקסט'}
+            accessibilityHint="מאפשר מחיקת תווים ורדת שורה — לא ניתן להוסיף תווים חדשים"
+          >
+            <Text style={styles.editToggleIcon}>{editMode ? '✕' : '✏'}</Text>
+            <Text style={styles.editToggleLabel}>{editMode ? 'סגור עריכה' : 'ערוך טקסט'}</Text>
+          </Pressable>
+
+          {editMode && (
+            <View style={styles.editBox}>
+              <Text style={styles.editHint}>תווים שאינם במאגר יוצגו בגופן רגיל</Text>
+              <TextInput
+                style={styles.editInput}
+                value={editableText}
+                onChangeText={handleEditText}
+                multiline
+                maxLength={MAX_TEXT_LEN}
+                textAlign="right"
+                textAlignVertical="top"
+                writingDirection="rtl"
+                autoCorrect={false}
+                autoCapitalize="none"
+                accessibilityLabel="עריכת טקסט — תווים שאינם במאגר יוצגו בגופן רגיל"
+              />
+            </View>
+          )}
+
+          <View style={styles.divider} />
+
           {/* Rows 1-3: all sliders share the same throttled live-canvas logic */}
           {([
             [['גודל', 'charHeight'], ['ריווח אות',  'letterSpacing']],
@@ -864,10 +1050,8 @@ export default function PreviewScreen({ navigation, route }: Props) {
                     minimumValue={0} maximumValue={100} step={1}
                     value={hs[key] as number}
                     onValueChange={v => {
-                      // Update pending value and mark dragging
                       pendingHsRef.current = { ...pendingHsRef.current, [key]: v };
                       if (!isDragging) setIsDragging(true);
-                      // Throttled canvas update — at most once per 80ms
                       if (!throttleRef.current) {
                         throttleRef.current = setTimeout(() => {
                           setLiveHs({ ...pendingHsRef.current });
@@ -876,7 +1060,6 @@ export default function PreviewScreen({ navigation, route }: Props) {
                       }
                     }}
                     onSlidingComplete={v => {
-                      // Flush throttle immediately
                       if (throttleRef.current) {
                         clearTimeout(throttleRef.current);
                         throttleRef.current = null;
@@ -886,8 +1069,6 @@ export default function PreviewScreen({ navigation, route }: Props) {
                       setLiveHs(next);
                       setHs(next);
                       setIsDragging(false);
-                      // No server fetch on slider release — canvas is the live preview.
-                      // Server quality is triggered only by ink/bg changes (see below).
                     }}
                     minimumTrackTintColor={colors.accent}
                     maximumTrackTintColor={colors.border}
@@ -1002,6 +1183,7 @@ function getStyles(colors: ThemeColors) {
     loadingTitle: { fontSize: 17, fontFamily: fonts.bold,    color: colors.inkDark,  writingDirection: 'rtl', textAlign: 'center' },
     loadingSub:   { fontSize: 12, fontFamily: fonts.regular, color: colors.inkLight, writingDirection: 'rtl', textAlign: 'center' },
 
+
     // ── Page navigation ───────────────────────────────────────────────────────
     pageNav: {
       flexDirection:   'row',
@@ -1072,18 +1254,19 @@ function getStyles(colors: ThemeColors) {
       color:            colors.inkDark,
       textAlign:        'right',
       writingDirection: 'rtl',
-      alignSelf:        'flex-end',
+      alignSelf:        'flex-start',  // RTL: flex-start = right side
       marginTop:        4,
       marginBottom:     10,
     },
-    pickerRow: { flexDirection: 'row', gap: 10, justifyContent: 'flex-end' },
+    pickerRow: { flexDirection: 'row', gap: 10, justifyContent: 'flex-start' },  // RTL: flex-start = right
 
     inkBtn: {
+      flex:              1,
       flexDirection:     'row',
       alignItems:        'center',
+      justifyContent:    'center',
       gap:               6,
-      paddingHorizontal: 14,
-      paddingVertical:   9,
+      paddingVertical:   10,
       borderRadius:      radius.sm,
       borderWidth:       1.5,
     },
@@ -1129,6 +1312,52 @@ function getStyles(colors: ThemeColors) {
       fontFamily:       fonts.bold,
       writingDirection: 'rtl',
       letterSpacing:    0.4,
+    },
+
+    // ── Text edit section ─────────────────────────────────────────────────────
+    editToggleBtn: {
+      flexDirection:  'row-reverse',
+      alignItems:     'center',
+      gap:            8,
+      alignSelf:      'flex-start',   // RTL: flex-start = right side
+      paddingVertical: 6,
+    },
+    editToggleIcon:  { fontSize: 14, color: colors.accent },
+    editToggleLabel: {
+      fontSize:         13,
+      fontFamily:       fonts.semiBold,
+      color:            colors.accent,
+      writingDirection: 'rtl',
+    },
+    editBox: {
+      marginTop:       8,
+      marginBottom:    4,
+      borderWidth:     1,
+      borderColor:     colors.border,
+      borderRadius:    radius.sm,
+      backgroundColor: colors.bgInput,
+      overflow:        'hidden' as const,
+    },
+    editHint: {
+      fontSize:          11,
+      fontFamily:        fonts.regular,
+      color:             colors.inkFaint,
+      textAlign:         'right',
+      writingDirection:  'rtl',
+      paddingHorizontal: 10,
+      paddingTop:        6,
+      paddingBottom:     2,
+    },
+    editInput: {
+      fontSize:          15,
+      fontFamily:        fonts.regular,
+      color:             colors.inkDark,
+      paddingHorizontal: 10,
+      paddingVertical:   8,
+      minHeight:         80,
+      maxHeight:         200,
+      textAlign:         'right',
+      writingDirection:  'rtl',
     },
   });
 }
