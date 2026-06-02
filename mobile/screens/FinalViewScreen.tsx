@@ -18,7 +18,7 @@
  *   └─────────────────────────────────────┘
  */
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Image,
@@ -83,7 +83,7 @@ async function fetchBothModes(
   };
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 90_000); // 90s — image generation is heavy
+  const timer = setTimeout(() => controller.abort(), 300_000); // 300s (5min) — large documents need more time
 
   // Debug: log exactly what we're sending so sync issues can be diagnosed from Railway logs
   console.log('[FinalView] fetchBothModes → background=%s inkColor=%s', background, inkColor);
@@ -146,7 +146,9 @@ async function buildPdf(urls: string[]): Promise<string> {
   const base64Pages = await Promise.all(
     urls.map(async url => {
       const localUri = await downloadToCache(url);
-      return FileSystem.readAsStringAsync(localUri, { encoding: FileSystem.EncodingType.Base64 });
+      const b64 = await FileSystem.readAsStringAsync(localUri, { encoding: FileSystem.EncodingType.Base64 });
+      FileSystem.deleteAsync(localUri, { idempotent: true }).catch(() => null); // clean up temp file
+      return b64;
     }),
   );
 
@@ -212,6 +214,7 @@ export default function FinalViewScreen({ navigation, route }: Props) {
   const [pageUrls,   setPageUrls]   = useState<string[]>([]);
   const [isLoading,  setIsLoading]  = useState(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
+  const [retryCount, setRetryCount] = useState(0); // increment to trigger re-fetch
   const [scanMode,   setScanMode]   = useState<'clean' | 'photo'>('clean');
   const [currentPage, setCurrentPage] = useState(0);
 
@@ -219,22 +222,100 @@ export default function FinalViewScreen({ navigation, route }: Props) {
   const [savingShare,   setSavingShare]   = useState(false);
   const [savingPdf,     setSavingPdf]     = useState(false);
 
+  // Cycling loading messages shown while both modes are being prepared
+  const LOADING_MESSAGES = [
+    'מכין את כתב היד שלך...',
+    'מעבד את האותיות...',
+    'מפתח סריקה נקייה...',
+    'מוסיף אפקט צילום...',
+    'כמעט מוכן...',
+  ];
+  const [loadingMsgIdx, setLoadingMsgIdx] = useState(0);
+  const msgIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    if (isLoading) {
+      msgIntervalRef.current = setInterval(() => {
+        setLoadingMsgIdx(i => (i + 1) % LOADING_MESSAGES.length);
+      }, 2200);
+    } else {
+      if (msgIntervalRef.current) {
+        clearInterval(msgIntervalRef.current);
+        msgIntervalRef.current = null;
+      }
+    }
+    return () => {
+      if (msgIntervalRef.current) clearInterval(msgIntervalRef.current);
+    };
+  }, [isLoading]);
+
   const placeholderH = Math.round((W - 2 * FRAME_MH) * A4_RATIO);
 
   // Fetch both clean and photo together — screen shows only after both are ready
   useEffect(() => {
     let cancelled = false;
+    // Reset on retry
+    setIsLoading(true);
+    setFetchError(null);
+
+    // ── UI-level safety timeout ────────────────────────────────────────────────
+    // Guarantees that the loading state resolves regardless of what happens to
+    // the fetch API — catches cases where AbortError is not surfaced by certain
+    // React Native / device combinations.
+    // Set to 310 s (10 s more than the 300 s fetch timeout in fetchBothModes)
+    // so the fetch's own more-specific timeout message appears first in the normal case.
+    const uiTimeoutId = setTimeout(() => {
+      if (!cancelled) {
+        setFetchError('יצירת הכתב היד לוקחת יותר מדי זמן. נסה עם טקסט קצר יותר או בדוק את החיבור לאינטרנט.');
+        setIsLoading(false);
+      }
+    }, 310_000);
+
     (async () => {
       try {
         const userId = getCurrentUserId();
         if (!userId) { setFetchError('יש להתחבר תחילה'); setIsLoading(false); return; }
-        const { cleanUrls: clean, photoUrls: photo } =
-          await fetchBothModes(text, background, gs, inkColor);
+
+        // Retry once on transient network errors — the operation is idempotent.
+        // The server generates fresh files each call so a retry is always safe.
+        let lastFetchErr: unknown;
+        let fetchResult: { cleanUrls: string[]; photoUrls: string[] } | undefined;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            fetchResult = await fetchBothModes(text, background, gs, inkColor);
+            break;
+          } catch (e) {
+            lastFetchErr = e;
+            if (attempt < 1) await new Promise<void>(r => setTimeout(r, 2000));
+          }
+        }
+        if (!fetchResult) throw lastFetchErr;
+        const { cleanUrls: clean, photoUrls: photo } = fetchResult;
         if (cancelled) return;
+
+        // Reveal the screen immediately — don't block on prefetch.
+        // We fire prefetch in the background (fire-and-forget) with a per-URL
+        // timeout so a stalled Firebase CDN connection never hangs the UI.
+        // Previously this was `await Promise.all(prefetch...)` which caused
+        // the screen to stay in the loading state indefinitely when any single
+        // Firebase URL was slow to respond.
         setCleanUrls(clean);
         setPhotoUrls(photo);
         setPageUrls(clean);
-        setIsLoading(false);
+        setIsLoading(false);   // ← reveal the screen NOW, prefetch runs behind
+
+        // Background prefetch: warm the React Native image cache for instant
+        // clean↔photo mode switches. Each call is guarded by a 12 s timeout
+        // so a slow URL never hangs the warm-up indefinitely.
+        const prefetchWithTimeout = (url: string): Promise<void> =>
+          new Promise(resolve => {
+            const t = setTimeout(resolve, 12_000);   // give up after 12 s
+            Image.prefetch(absUrl(url))
+              .then(() => { clearTimeout(t); resolve(); })
+              .catch(() => { clearTimeout(t); resolve(); });
+          });
+        Promise.all([...clean, ...photo].map(prefetchWithTimeout)).catch(() => null);
+
       } catch (e: unknown) {
         if (!cancelled) {
           setFetchError(e instanceof Error ? e.message : 'שגיאה בטעינת הדף');
@@ -242,8 +323,12 @@ export default function FinalViewScreen({ navigation, route }: Props) {
         }
       }
     })();
-    return () => { cancelled = true; };
-  }, []);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(uiTimeoutId);
+    };
+  }, [retryCount]);
 
   const totalPages = pageUrls.length;
 
@@ -265,6 +350,7 @@ export default function FinalViewScreen({ navigation, route }: Props) {
   const handleSaveGallery = useCallback(async () => {
     if (!pageUrls.length) return;
     setSavingGallery(true);
+    const tempUris: string[] = [];
     try {
       const { status } = await MediaLibrary.requestPermissionsAsync(true);
       if (status !== 'granted') {
@@ -276,6 +362,7 @@ export default function FinalViewScreen({ navigation, route }: Props) {
       }
       for (const url of pageUrls) {
         const localUri = await downloadToCache(url);
+        tempUris.push(localUri);
         await MediaLibrary.saveToLibraryAsync(localUri);
       }
       showAlert('נשמר!', pageUrls.length > 1 ? `${pageUrls.length} עמודים נשמרו לגלריה` : 'התמונה נשמרה לגלריה');
@@ -283,6 +370,10 @@ export default function FinalViewScreen({ navigation, route }: Props) {
       showAlert('שגיאה', e instanceof Error ? e.message : 'שמירה נכשלה');
     } finally {
       setSavingGallery(false);
+      // Clean up temp cache files
+      for (const uri of tempUris) {
+        FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => null);
+      }
     }
   }, [pageUrls]);
 
@@ -331,6 +422,37 @@ export default function FinalViewScreen({ navigation, route }: Props) {
 
   // ── RENDER ─────────────────────────────────────────────────────────────────
 
+  // Full-screen loading — shown while BOTH clean and photo modes are being prepared.
+  // Only after both are ready does the user see the results.
+  if (isLoading) {
+    return (
+      <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+        <View style={styles.fullScreenLoader}>
+          {/* Animated ink-drop ring */}
+          <View style={styles.loaderRing}>
+            <ActivityIndicator size="large" color={colors.accent} />
+          </View>
+          <Text style={styles.loaderTitle}>{LOADING_MESSAGES[loadingMsgIdx]}</Text>
+          <Text style={styles.loaderSub}>
+            מכין סריקה נקייה ומראה צילום{'\n'}זה עשוי לקחת כמה שניות
+          </Text>
+          {/* Progress dots */}
+          <View style={styles.loaderDots}>
+            {LOADING_MESSAGES.map((_, i) => (
+              <View
+                key={i}
+                style={[
+                  styles.loaderDot,
+                  i === loadingMsgIdx && styles.loaderDotActive,
+                ]}
+              />
+            ))}
+          </View>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
   return (
     <SafeAreaView style={styles.safe} edges={['bottom']}>
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scroll}>
@@ -338,23 +460,20 @@ export default function FinalViewScreen({ navigation, route }: Props) {
         {/* ── PAGE IMAGE ────────────────────────────────────────────────── */}
         <View style={styles.frameShadow}>
           <View style={styles.frameClip}>
-            {isLoading ? (
-              <View style={[styles.loadingBox, { height: placeholderH }]}>
-                <ActivityIndicator size="large" color={colors.accent} />
-                <Text style={styles.loadingTitle}>מייצר את כתב היד...</Text>
-                <Text style={styles.loadingSub}>זה עשוי לקחת כמה שניות</Text>
-              </View>
-            ) : fetchError ? (
+            {fetchError ? (
               <View style={[styles.loadingBox, { height: placeholderH }]}>
                 <Text style={styles.errorText}>{fetchError}</Text>
-                <Pressable style={styles.retryBtn} onPress={() => navigation.goBack()}>
-                  <Text style={styles.retryBtnText}>חזור לעריכה</Text>
+                <Pressable style={styles.retryBtn} onPress={() => setRetryCount(c => c + 1)}>
+                  <Text style={styles.retryBtnText}>נסה שוב</Text>
+                </Pressable>
+                <Pressable style={[styles.retryBtn, { backgroundColor: 'transparent', borderWidth: 1, borderColor: colors.border }]}
+                  onPress={() => navigation.goBack()}>
+                  <Text style={[styles.retryBtnText, { color: colors.inkMid }]}>חזור לעריכה</Text>
                 </Pressable>
               </View>
             ) : (
               <View style={{ aspectRatio: 210 / 297 }}>
                 <Image
-                  key={absUrl(pageUrls[currentPage] ?? '')}
                   source={{ uri: absUrl(pageUrls[currentPage] ?? '') }}
                   style={{ width: '100%', height: '100%' }}
                   resizeMode="stretch"
@@ -542,6 +661,54 @@ function getStyles(colors: ThemeColors) {
     },
     loadingTitle: { fontSize: 17, fontFamily: fonts.bold,    color: colors.inkDark,  writingDirection: 'rtl', textAlign: 'center' },
     loadingSub:   { fontSize: 12, fontFamily: fonts.regular, color: colors.inkLight, writingDirection: 'rtl', textAlign: 'center' },
+
+    // ── Full-screen loading overlay ──────────────────────────────────────────
+    fullScreenLoader: {
+      flex:            1,
+      alignItems:      'center',
+      justifyContent:  'center',
+      backgroundColor: colors.bgPage,
+      paddingHorizontal: 36,
+      gap:             20,
+    },
+    loaderRing: {
+      width:           80,
+      height:          80,
+      borderRadius:    40,
+      backgroundColor: colors.accentLight,
+      alignItems:      'center',
+      justifyContent:  'center',
+    },
+    loaderTitle: {
+      fontSize:         20,
+      fontFamily:       fonts.bold,
+      color:            colors.inkDark,
+      textAlign:        'center',
+      writingDirection: 'rtl',
+    },
+    loaderSub: {
+      fontSize:         13,
+      fontFamily:       fonts.regular,
+      color:            colors.inkLight,
+      textAlign:        'center',
+      writingDirection: 'rtl',
+      lineHeight:       20,
+    },
+    loaderDots: {
+      flexDirection: 'row',
+      gap:           8,
+      marginTop:     8,
+    },
+    loaderDot: {
+      width:        7,
+      height:       7,
+      borderRadius: 3.5,
+      backgroundColor: colors.border,
+    },
+    loaderDotActive: {
+      backgroundColor: colors.accent,
+      transform:       [{ scale: 1.3 }],
+    },
 
     errorText: {
       fontSize:         14,

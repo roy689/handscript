@@ -38,7 +38,7 @@ function sanitize(input: string): string {
 }
 
 // Match backend's _MAX_TEXT in main.py
-const MAX_TEXT_LEN = 5000;
+const MAX_TEXT_LEN = 25_000;
 // Show a soft warning starting at 90 % of the limit
 const TEXT_WARN_THRESHOLD = Math.floor(MAX_TEXT_LEN * 0.9);
 
@@ -239,7 +239,7 @@ export default function EditorScreen({ navigation }: Props) {
         2,
       );
 
-      await incrementUsage(userId);
+      // Usage is incremented server-side in /convert-both — do NOT increment here too.
       await clearPendingConversion(); // discard any queued item — we just succeeded
       await clearDraft();             // text successfully sent — drop saved draft
 

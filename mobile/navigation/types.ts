@@ -2,6 +2,7 @@ export type RootStackParamList = {
   Onboarding:       undefined;
   Tutorial:         undefined;
   ForgotPassword:   undefined;
+  VerifyEmail:      { email: string; uid: string; idToken: string; refreshToken: string; expiresIn: string };
   MainTabs:         undefined;
   CharacterList:    undefined;
   CharacterConfig:  { character: string };
@@ -24,7 +25,7 @@ export type RootStackParamList = {
   FinalView:        {
     text:        string;
     background:  string;
-    glyphMap:    Record<string, string[]>;
+    glyphMap:    Record<string, string[]>;  // kept for back-compat; FinalView doesn't use it
     style:       { charHeight: number; letterSpacing: number; wordSpacing: number; baselineJitter: number; slant: number; inkBlobs: number };
     inkColor:    'black' | 'blue' | 'red';
   };
@@ -33,5 +34,6 @@ export type RootStackParamList = {
   Paywall:          undefined;
   PrivacyPolicy:    undefined;
   TermsOfService:   undefined;
+  TermsAcceptance:  undefined;
   Contact:          undefined;
 };
