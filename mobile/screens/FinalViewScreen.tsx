@@ -142,14 +142,16 @@ async function downloadToCache(remoteUrl: string): Promise<string> {
 const PDF_PAGE_W = 595;
 const PDF_PAGE_H = 842;
 
-async function buildPdf(urls: string[]): Promise<string> {
+/**
+ * Build a PDF from already-downloaded local file URIs.
+ * Callers must pre-download pages via getLocalUri() so this function
+ * never hits the network — it only reads from the local file system.
+ */
+async function buildPdfFromLocalUris(localUris: string[]): Promise<string> {
   const base64Pages = await Promise.all(
-    urls.map(async url => {
-      const localUri = await downloadToCache(url);
-      const b64 = await FileSystem.readAsStringAsync(localUri, { encoding: FileSystem.EncodingType.Base64 });
-      FileSystem.deleteAsync(localUri, { idempotent: true }).catch(() => null); // clean up temp file
-      return b64;
-    }),
+    localUris.map(uri =>
+      FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 }),
+    ),
   );
 
   const pageDivs = base64Pages
@@ -221,6 +223,23 @@ export default function FinalViewScreen({ navigation, route }: Props) {
   const [savingGallery, setSavingGallery] = useState(false);
   const [savingShare,   setSavingShare]   = useState(false);
   const [savingPdf,     setSavingPdf]     = useState(false);
+
+  // ── #11 Local URI cache — avoids re-downloading pages on every export ─────
+  // Maps remote Firebase URL → already-downloaded local file URI.
+  // Populated lazily on first save/share/PDF action; reused on subsequent ones.
+  const localUriCacheRef = useRef<Record<string, string>>({});
+
+  const getLocalUri = useCallback(async (remoteUrl: string): Promise<string> => {
+    const cached = localUriCacheRef.current[remoteUrl];
+    if (cached) {
+      // Verify the cached file still exists (cache dir can be cleared by the OS)
+      const info = await FileSystem.getInfoAsync(cached);
+      if (info.exists) return cached;
+    }
+    const uri = await downloadToCache(remoteUrl);
+    localUriCacheRef.current[remoteUrl] = uri;
+    return uri;
+  }, []);
 
   // Cycling loading messages shown while both modes are being prepared
   const LOADING_MESSAGES = [
@@ -332,17 +351,16 @@ export default function FinalViewScreen({ navigation, route }: Props) {
 
   const totalPages = pageUrls.length;
 
-  // Toggle between modes — instant, both already pre-fetched
+  // Toggle between modes — instant, both already pre-fetched.
+  // currentPage is preserved so the user stays on the same page they were viewing.
   const handleSwitchMode = useCallback((mode: 'clean' | 'photo') => {
     if (mode === scanMode || isLoading) return;
     if (mode === 'clean') {
       setScanMode('clean');
       setPageUrls(cleanUrls);
-      setCurrentPage(0);
     } else {
       setScanMode('photo');
       setPageUrls(photoUrls);
-      setCurrentPage(0);
     }
   }, [scanMode, isLoading, cleanUrls, photoUrls]);
 
@@ -350,7 +368,6 @@ export default function FinalViewScreen({ navigation, route }: Props) {
   const handleSaveGallery = useCallback(async () => {
     if (!pageUrls.length) return;
     setSavingGallery(true);
-    const tempUris: string[] = [];
     try {
       const { status } = await MediaLibrary.requestPermissionsAsync(true);
       if (status !== 'granted') {
@@ -361,8 +378,7 @@ export default function FinalViewScreen({ navigation, route }: Props) {
         return;
       }
       for (const url of pageUrls) {
-        const localUri = await downloadToCache(url);
-        tempUris.push(localUri);
+        const localUri = await getLocalUri(url);   // cached — no re-download
         await MediaLibrary.saveToLibraryAsync(localUri);
       }
       showAlert('נשמר!', pageUrls.length > 1 ? `${pageUrls.length} עמודים נשמרו לגלריה` : 'התמונה נשמרה לגלריה');
@@ -370,12 +386,8 @@ export default function FinalViewScreen({ navigation, route }: Props) {
       showAlert('שגיאה', e instanceof Error ? e.message : 'שמירה נכשלה');
     } finally {
       setSavingGallery(false);
-      // Clean up temp cache files
-      for (const uri of tempUris) {
-        FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => null);
-      }
     }
-  }, [pageUrls]);
+  }, [pageUrls, getLocalUri]);
 
   // ── Share — uses pageUrls directly
   const handleShare = useCallback(async () => {
@@ -386,10 +398,12 @@ export default function FinalViewScreen({ navigation, route }: Props) {
       if (!isAvailable) { showAlert('שיתוף לא זמין', 'המכשיר אינו תומך בשיתוף'); return; }
 
       if (pageUrls.length === 1) {
-        const localUri = await downloadToCache(pageUrls[0]);
+        const localUri = await getLocalUri(pageUrls[0]);  // cached — no re-download
         await Sharing.shareAsync(localUri, { mimeType: 'image/png', dialogTitle: 'שתף כתב יד' });
       } else {
-        const pdfUri = await buildPdf(pageUrls);
+        // buildPdf uses getLocalUri internally — reuses already-downloaded files
+        const localUris = await Promise.all(pageUrls.map(getLocalUri));
+        const pdfUri = await buildPdfFromLocalUris(localUris);
         await Sharing.shareAsync(pdfUri, { mimeType: 'application/pdf', dialogTitle: 'שתף כתב יד (PDF)' });
       }
     } catch (e: unknown) {
@@ -397,14 +411,15 @@ export default function FinalViewScreen({ navigation, route }: Props) {
     } finally {
       setSavingShare(false);
     }
-  }, [pageUrls]);
+  }, [pageUrls, getLocalUri]);
 
-  // ── Export to PDF — uses pageUrls directly
+  // ── Export to PDF — reuses cached local URIs, no re-download
   const handleExportPdf = useCallback(async () => {
     if (!pageUrls.length) return;
     setSavingPdf(true);
     try {
-      const pdfUri = await buildPdf(pageUrls);
+      const localUris = await Promise.all(pageUrls.map(getLocalUri));
+      const pdfUri = await buildPdfFromLocalUris(localUris);
       const isAvailable = await Sharing.isAvailableAsync();
       if (isAvailable) {
         await Sharing.shareAsync(pdfUri, { mimeType: 'application/pdf', dialogTitle: 'שתף PDF' });
@@ -416,7 +431,7 @@ export default function FinalViewScreen({ navigation, route }: Props) {
     } finally {
       setSavingPdf(false);
     }
-  }, [pageUrls]);
+  }, [pageUrls, getLocalUri]);
 
   const isBusy = savingGallery || savingShare || savingPdf;
 

@@ -1797,14 +1797,30 @@ async def convert_both(body: ConvertBothRequest, uid: str = Depends(require_auth
                 "error": f"Missing characters: {', '.join(result['missing'])}",
             }
 
+        # ── #12 Server-side usage limit ──────────────────────────────────────────
+        # Check BEFORE rendering so we don't burn CPU/GPU on a request that will
+        # be rejected.  The client-side checkCanConvert() is a soft UX guard only
+        # (race condition on multi-device); this is the authoritative gate.
+        _FREE_DAILY_LIMIT = 5
+        if not body.preview:
+            _is_pro_check = firebase_client.check_is_pro_user(body.user_id)
+            if not _is_pro_check:
+                _usage_check = firebase_client.get_usage_count(body.user_id)
+                if _usage_check >= _FREE_DAILY_LIMIT:
+                    raise HTTPException(
+                        status_code=429,
+                        detail=f"הגעת למגבלת {_FREE_DAILY_LIMIT} המרות ליום. שדרג לפרו להמרות ללא הגבלה.",
+                    )
+
         picker = VariantPicker(bank)
         for _ch, _cd in bank.items():
             _n = len(_cd.get("variants", []))
             if _n > 0:
                 logger.info("convert-both: char=%r has %d variant(s)", _ch, _n)
         _MARGIN = 200
-        valid_ink = {"black", "blue", "red"}
-        ink_color = body.ink_color if body.ink_color in valid_ink else "black"
+        # ink_color and background are already validated by Pydantic (pattern
+        # constraint on ConvertBothRequest) — no redundant fallback needed.
+        ink_color = body.ink_color
         style_dict = {
             "char_height":     body.style.char_height,
             "letter_spacing":  body.style.letter_spacing,
@@ -1827,9 +1843,8 @@ async def convert_both(body: ConvertBothRequest, uid: str = Depends(require_auth
             return {"ok": False, "pages": 0, "clean_urls": [], "photo_urls": [],
                     "error": "No content to render"}
 
-        valid_bgs = {"blank", "lines", "grid"}
-        bg_type   = body.background if body.background in valid_bgs else "lines"
-        logger.info("convert-both: background received=%r → bg_type=%r", body.background, bg_type)
+        bg_type    = body.background   # already validated by Pydantic
+        logger.info("convert-both: background=%r", bg_type)
         background = load_background(bg_type)
 
         # Render clean pages once (CPU-bound — run off the event loop)
@@ -1848,38 +1863,56 @@ async def convert_both(body: ConvertBothRequest, uid: str = Depends(require_auth
         clean_urls: list[str] = []
         photo_urls: list[str] = []
 
-        for i, (clean_pg, photo_pg) in enumerate(zip(clean_pages, photo_pages)):
-            page_num = f"{i + 1:02d}"
+        # ── #6 Clean up stale renders before uploading new ones ──────────────────
+        # Fire-and-forget: non-fatal if it fails.  Prevents Storage cost creep
+        # from accumulated page_clean_*/page_photo_* files (2×N per conversion).
+        asyncio.get_event_loop().run_in_executor(
+            None, firebase_client.delete_old_renders, body.user_id
+        )
 
-            # Clean page
-            clean_wm  = embed_watermark(clean_pg, body.user_id)
-            clean_fn  = f"page_clean_{timestamp}_{page_num}.png"
-            clean_tmp = str(Path(tempfile.gettempdir()) / clean_fn)
-            export_page(clean_wm, "png", clean_tmp)
-            with open(clean_tmp, "rb") as fh:
-                clean_bytes = fh.read()
-            clean_url = firebase_client.upload_rendered_page(body.user_id, clean_fn, clean_bytes)
-            if clean_url is None:
-                dest = _STATIC_DIR / "sample_pages" / clean_fn
-                dest.write_bytes(clean_bytes)
-                clean_url = f"{_SERVER_HOST}/static/sample_pages/{clean_fn}"
-            clean_urls.append(clean_url)
-            Path(clean_tmp).unlink(missing_ok=True)
+        # ── #13 Temp-file cleanup on failure ─────────────────────────────────────
+        # Track every temp path created so the finally block can delete them even
+        # if export_page or Firebase upload raises an exception mid-loop.
+        _tmp_paths: list[Path] = []
 
-            # Photo page
-            photo_wm  = embed_watermark(photo_pg, body.user_id)
-            photo_fn  = f"page_photo_{timestamp}_{page_num}.png"
-            photo_tmp = str(Path(tempfile.gettempdir()) / photo_fn)
-            export_page(photo_wm, "png", photo_tmp)
-            with open(photo_tmp, "rb") as fh:
-                photo_bytes = fh.read()
-            photo_url = firebase_client.upload_rendered_page(body.user_id, photo_fn, photo_bytes)
-            if photo_url is None:
-                dest = _STATIC_DIR / "sample_pages" / photo_fn
-                dest.write_bytes(photo_bytes)
-                photo_url = f"{_SERVER_HOST}/static/sample_pages/{photo_fn}"
-            photo_urls.append(photo_url)
-            Path(photo_tmp).unlink(missing_ok=True)
+        try:
+            for i, (clean_pg, photo_pg) in enumerate(zip(clean_pages, photo_pages)):
+                page_num = f"{i + 1:02d}"
+
+                # Clean page
+                clean_wm  = embed_watermark(clean_pg, body.user_id)
+                clean_fn  = f"page_clean_{timestamp}_{page_num}.png"
+                clean_tmp = Path(tempfile.gettempdir()) / clean_fn
+                _tmp_paths.append(clean_tmp)
+                export_page(clean_wm, "png", str(clean_tmp))
+                with open(clean_tmp, "rb") as fh:
+                    clean_bytes = fh.read()
+                clean_url = firebase_client.upload_rendered_page(body.user_id, clean_fn, clean_bytes)
+                if clean_url is None:
+                    dest = _STATIC_DIR / "sample_pages" / clean_fn
+                    dest.write_bytes(clean_bytes)
+                    clean_url = f"{_SERVER_HOST}/static/sample_pages/{clean_fn}"
+                clean_urls.append(clean_url)
+
+                # Photo page
+                photo_wm  = embed_watermark(photo_pg, body.user_id)
+                photo_fn  = f"page_photo_{timestamp}_{page_num}.png"
+                photo_tmp = Path(tempfile.gettempdir()) / photo_fn
+                _tmp_paths.append(photo_tmp)
+                export_page(photo_wm, "png", str(photo_tmp))
+                with open(photo_tmp, "rb") as fh:
+                    photo_bytes = fh.read()
+                photo_url = firebase_client.upload_rendered_page(body.user_id, photo_fn, photo_bytes)
+                if photo_url is None:
+                    dest = _STATIC_DIR / "sample_pages" / photo_fn
+                    dest.write_bytes(photo_bytes)
+                    photo_url = f"{_SERVER_HOST}/static/sample_pages/{photo_fn}"
+                photo_urls.append(photo_url)
+
+        finally:
+            # Always delete temp files — even on partial failure mid-loop.
+            for _p in _tmp_paths:
+                _p.unlink(missing_ok=True)
 
         if not body.preview:
             firebase_client.increment_usage(body.user_id)

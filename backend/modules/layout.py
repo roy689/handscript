@@ -358,6 +358,12 @@ def render_full_page(
         ``load_background``.  The same template is reused for every page.
     margin : int
         Left and right margin in pixels.  Also used as the bottom margin.
+    scan_mode : str
+        **Deprecated** — kept for backward compatibility only.  The ``convert_both``
+        endpoint always passes ``'clean'`` and applies ``apply_photo_effect``
+        externally on the returned pages.  Do NOT pass ``'photo'`` here; doing so
+        would apply the photo effect inside this function AND again in the caller,
+        producing a double-processed result.
 
     Returns
     -------
@@ -377,6 +383,13 @@ def render_full_page(
     text_canvas: np.ndarray | None = None
     y_cursor = _TOP_MARGIN
 
+    if scan_mode == 'photo':
+        logger.warning(
+            "render_full_page called with scan_mode='photo' — this path is deprecated. "
+            "Call apply_photo_effect() on the returned pages instead to avoid "
+            "accidental double photo-effect application."
+        )
+
     def _flush_page(canvas: np.ndarray) -> np.ndarray:
         """Composite text canvas onto background, then draw the red margin line."""
         page = composite_text_on_background(canvas, background.copy())
@@ -387,10 +400,7 @@ def render_full_page(
         pil_page = Image.fromarray(page, "RGBA")
         draw     = ImageDraw.Draw(pil_page)
         draw.line([(page_w - margin, 0), (page_w - margin, page_h)], fill=_MARGIN_COLOUR, width=8)
-        result = np.array(pil_page, dtype=np.uint8)
-        if scan_mode == 'photo':
-            result = apply_photo_effect(result)
-        return result
+        return np.array(pil_page, dtype=np.uint8)
 
     for line_idx, line_img in enumerate(lines):
         lh = line_img.shape[0]   # always _LINE_HEIGHT (120 px) from synthesiser

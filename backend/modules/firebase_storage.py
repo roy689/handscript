@@ -258,6 +258,39 @@ def upload_rendered_page_bytes(user_id: str, filename: str, image_bytes: bytes) 
     return upload_rendered_page(user_id, filename, image_bytes)
 
 
+def delete_old_renders(user_id: str, max_age_seconds: int = 3600) -> int:
+    """
+    Delete rendered page files in ``renders/{user_id}/`` that are older than
+    *max_age_seconds* (default: 1 hour).
+
+    Called fire-and-forget from convert_both before uploading new renders so
+    that Storage costs don't accumulate indefinitely.  Each conversion produces
+    2 × N files (clean + photo for each page); without cleanup these pile up
+    forever.
+
+    Returns the number of blobs deleted (0 on any error — failure is non-fatal).
+    """
+    try:
+        bucket  = _bucket()
+        prefix  = f"renders/{user_id}/"
+        cutoff  = datetime.now(timezone.utc).timestamp() - max_age_seconds
+        deleted = 0
+        for blob in bucket.list_blobs(prefix=prefix):
+            try:
+                # blob.time_created is a timezone-aware datetime from the GCS API
+                if blob.time_created and blob.time_created.timestamp() < cutoff:
+                    blob.delete()
+                    deleted += 1
+            except Exception as exc:
+                logger.debug("delete_old_renders: could not delete %s: %s", blob.name, exc)
+        if deleted:
+            logger.info("delete_old_renders: removed %d stale render(s) for user %s", deleted, user_id)
+        return deleted
+    except Exception as exc:
+        logger.warning("delete_old_renders: listing failed for user %s: %s", user_id, exc)
+        return 0
+
+
 def delete_character_variant(user_id: str, char: str, index: int) -> bool:
     db = _db()
     try:
@@ -327,7 +360,23 @@ def delete_character(user_id: str, char: str) -> bool:
 
 
 def delete_user_data(user_id: str) -> bool:
+    """
+    Permanently delete ALL data for a user:
+      - Firestore: character_banks/{user_id}/chars/* + parent doc
+      - Firestore: usage/{user_id}
+      - Firestore: subscriptions/{user_id}
+      - Storage:   banks/{user_id}/**  (all character image blobs)
+      - Storage:   renders/{user_id}/** (all render output blobs)
+
+    Two-pass approach for Storage: first delete specific paths recorded in
+    Firestore (fast, precise), then sweep the entire prefix (catches any
+    orphaned blobs not referenced in Firestore).
+    """
     db = _db()
+    bucket = _bucket()
+    all_ok = True
+
+    # ── 1. Character bank: Firestore docs + individually tracked Storage blobs ──
     try:
         chars_ref = (
             db.collection("character_banks")
@@ -339,19 +388,59 @@ def delete_user_data(user_id: str) -> bool:
                 bname = v.get("storage_path", "")
                 if bname:
                     try:
-                        _bucket().blob(bname).delete()
+                        bucket.blob(bname).delete()
                     except Exception:
                         pass
             doc.reference.delete()
-        for blob in _bucket().list_blobs(prefix=f"renders/{user_id}/"):
+
+        # Delete the parent document itself (it may carry metadata fields)
+        db.collection("character_banks").document(user_id).delete()
+    except Exception as exc:
+        logger.error("delete_user_data: character_banks cleanup failed for %s: %s", user_id, exc)
+        all_ok = False
+
+    # ── 2. Storage sweep: remove ANY remaining blobs under banks/{user_id}/ ─────
+    # This catches orphaned blobs that were uploaded but not recorded in Firestore.
+    try:
+        for blob in bucket.list_blobs(prefix=f"banks/{user_id}/"):
             try:
                 blob.delete()
             except Exception:
                 pass
-        return True
     except Exception as exc:
-        logger.error("delete_user_data failed: %s", exc)
-        return False
+        logger.error("delete_user_data: banks storage sweep failed for %s: %s", user_id, exc)
+        all_ok = False
+
+    # ── 3. Rendered pages ────────────────────────────────────────────────────────
+    try:
+        for blob in bucket.list_blobs(prefix=f"renders/{user_id}/"):
+            try:
+                blob.delete()
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.error("delete_user_data: renders cleanup failed for %s: %s", user_id, exc)
+        all_ok = False
+
+    # ── 4. Usage counters ────────────────────────────────────────────────────────
+    try:
+        usage_ref = db.collection("usage").document(user_id)
+        for day_doc in usage_ref.collection("days").stream():
+            day_doc.reference.delete()
+        usage_ref.delete()
+    except Exception as exc:
+        logger.error("delete_user_data: usage cleanup failed for %s: %s", user_id, exc)
+        # Non-critical — don't fail the whole operation
+
+    # ── 5. Subscription record ───────────────────────────────────────────────────
+    try:
+        db.collection("subscriptions").document(user_id).delete()
+    except Exception as exc:
+        logger.error("delete_user_data: subscriptions cleanup failed for %s: %s", user_id, exc)
+        # Non-critical — don't fail the whole operation
+
+    logger.info("delete_user_data: completed for user_id=%s (all_ok=%s)", user_id, all_ok)
+    return all_ok
 
 
 def clear_character_bank(user_id: str) -> bool:
