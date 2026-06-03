@@ -100,8 +100,8 @@ async function fetchBothModes(
         ink_color: inkColor,
         style: {
           char_height:     Math.round(40 + style.charHeight * 0.9),
-          letter_spacing:  style.letterSpacing * 0.30 - 10,  // slider 0→-10px, 100→+20px
-          word_spacing:    Math.round(15 + style.wordSpacing * 0.85),
+          letter_spacing:  style.letterSpacing * 0.30,            // 0–30 px (ge=0 in StyleParams)
+          word_spacing:    Math.round(15 + style.wordSpacing * 0.85), // 15–100 px
           baseline_jitter: style.baselineJitter * 0.25,
           slant:           style.slant * 0.4,
           ink_blobs:       style.inkBlobs * 0.003,
@@ -128,6 +128,58 @@ async function fetchBothModes(
   } finally {
     clearTimeout(timer);
   }
+}
+
+interface FinalizeResult {
+  ok: boolean;
+  expired: boolean;
+  cleanUrls: string[];
+  photoUrls: string[];
+}
+
+/**
+ * Promote an already-rendered preview to a permanent deliverable.
+ *
+ * Sends the temporary static page URLs back to the server, which copies the
+ * EXACT same bytes to Firebase Storage (no re-render → pixel-identical to what
+ * the user approved) and counts the conversion against the daily limit.
+ *
+ * Returns ok=false, expired=true when the source files are gone (container
+ * restart / cleanup) so the caller can fall back to a full re-render.
+ */
+async function finalizeRender(
+  cleanUrls: string[],
+  photoUrls: string[],
+): Promise<FinalizeResult> {
+  const token  = await getAuthToken();
+  const userId = getCurrentUserId();
+  if (!userId) throw new Error('משתמש לא מחובר');
+
+  const res = await fetch(`${BACKEND_URL}/finalize`, {
+    method:  'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ user_id: userId, clean_urls: cleanUrls, photo_urls: photoUrls }),
+  });
+
+  if (res.status === 429) {
+    const body = await res.json().catch(() => ({})) as { detail?: string };
+    throw new Error(body.detail ?? 'הגעת למגבלת ההמרות היומית');
+  }
+  if (!res.ok) throw new Error(`שגיאת שרת (${res.status})`);
+
+  const data = await res.json() as {
+    ok: boolean; expired?: boolean;
+    clean_urls?: string[]; photo_urls?: string[];
+  };
+  return {
+    ok:        !!data.ok,
+    expired:   !!data.expired,
+    cleanUrls: data.clean_urls ?? [],
+    photoUrls: data.photo_urls ?? [],
+  };
 }
 
 async function downloadToCache(remoteUrl: string): Promise<string> {
@@ -228,6 +280,22 @@ export default function FinalViewScreen({ navigation, route }: Props) {
   const [savingGallery, setSavingGallery] = useState(false);
   const [savingShare,   setSavingShare]   = useState(false);
   const [savingPdf,     setSavingPdf]     = useState(false);
+  const [imageLoading,  setImageLoading]  = useState(true);
+
+  // When the preview source files have expired server-side, we force a full
+  // re-render (the slow path below) to obtain a persistent, usage-counted file.
+  const [needsFullRender, setNeedsFullRender] = useState(false);
+
+  // ── Finalize tracking ─────────────────────────────────────────────────────
+  // In the fast path the screen shows the temporary preview render immediately,
+  // then promotes those exact bytes to permanent Firebase URLs in the
+  // background. Export actions await this so they always persist a permanent
+  // file. Refs hold the freshest URL set so a handler created before the swap
+  // still reads the permanent URLs after awaiting.
+  const finalizePromiseRef = useRef<Promise<void> | null>(null);
+  const cleanUrlsRef = useRef<string[]>(cleanUrls);
+  const photoUrlsRef = useRef<string[]>(photoUrls);
+  const scanModeRef  = useRef<'clean' | 'photo'>('clean');
 
   // ── #11 Local URI cache — avoids re-downloading pages on every export ─────
   // Maps remote Firebase URL → already-downloaded local file URI.
@@ -283,10 +351,57 @@ export default function FinalViewScreen({ navigation, route }: Props) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Keep refs in sync with the freshest URL set + mode for the export handlers.
+  useEffect(() => { cleanUrlsRef.current = cleanUrls; }, [cleanUrls]);
+  useEffect(() => { photoUrlsRef.current = photoUrls; }, [photoUrls]);
+  useEffect(() => { scanModeRef.current  = scanMode;  }, [scanMode]);
+
+  // ── Background finalize (fast path only) ──────────────────────────────────
+  // Promote the temporary preview render to permanent Firebase URLs without
+  // re-rendering. Runs once on mount. The displayed image does not change
+  // (identical bytes); only the underlying URLs are swapped to permanent ones.
+  useEffect(() => {
+    if (!hasPreviewUrls) return;   // slow path already persists + counts usage
+
+    let cancelled = false;
+    const run = (async () => {
+      try {
+        const result = await finalizeRender(previewUrls!.clean, previewUrls!.photo);
+        if (cancelled) return;
+
+        if (result.ok && result.cleanUrls.length && result.photoUrls.length) {
+          // Warm the cache for the permanent URLs, then swap so there's no flash.
+          await Promise.all(
+            [...result.cleanUrls, ...result.photoUrls]
+              .map(u => Image.prefetch(absUrl(u)).catch(() => null)),
+          );
+          if (cancelled) return;
+          setCleanUrls(result.cleanUrls);
+          setPhotoUrls(result.photoUrls);
+          setPageUrls(scanModeRef.current === 'photo' ? result.photoUrls : result.cleanUrls);
+        } else if (result.expired) {
+          // Source files gone (container restart / cleanup) — re-render a fresh,
+          // persistent document via the slow path below.
+          if (!cancelled) setNeedsFullRender(true);
+        }
+      } catch {
+        // Network/limit error — keep showing the temporary render. The static
+        // files are still valid right now, so save/share continues to work.
+      }
+    })();
+    finalizePromiseRef.current = run;
+
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Fetch both clean and photo together — screen shows only after both are ready.
   // Skipped entirely when previewUrls were passed from PreviewScreen (fast path).
   useEffect(() => {
-    if (hasPreviewUrls) return;   // already have exact render from preview — skip fetch
+    // Skip while we still trust the preview render. Runs when there were no
+    // preview URLs at all, OR when finalize reported them expired and we must
+    // produce a fresh persistent document.
+    if (hasPreviewUrls && !needsFullRender) return;
 
     let cancelled = false;
     // Reset on retry
@@ -363,7 +478,7 @@ export default function FinalViewScreen({ navigation, route }: Props) {
       cancelled = true;
       clearTimeout(uiTimeoutId);
     };
-  }, [retryCount]);
+  }, [retryCount, needsFullRender]);
 
   const totalPages = pageUrls.length;
 
@@ -380,7 +495,17 @@ export default function FinalViewScreen({ navigation, route }: Props) {
     }
   }, [scanMode, isLoading, cleanUrls, photoUrls]);
 
-  // ── Save to gallery — uses pageUrls directly (what is shown = what is saved)
+  // Resolve the URL set to export. Awaits the background finalize so the file
+  // we persist is the permanent Firebase copy, then reads the freshest URLs
+  // for the currently selected mode from refs (handler may have been created
+  // before the swap). Falls back to the live pageUrls if finalize never ran.
+  const getExportUrls = useCallback(async (): Promise<string[]> => {
+    try { await finalizePromiseRef.current; } catch { /* keep temporary URLs */ }
+    const urls = scanModeRef.current === 'photo' ? photoUrlsRef.current : cleanUrlsRef.current;
+    return urls.length ? urls : pageUrls;
+  }, [pageUrls]);
+
+  // ── Save to gallery — what is shown = what is saved (permanent after finalize)
   const handleSaveGallery = useCallback(async () => {
     if (!pageUrls.length) return;
     setSavingGallery(true);
@@ -393,19 +518,20 @@ export default function FinalViewScreen({ navigation, route }: Props) {
         ]);
         return;
       }
-      for (const url of pageUrls) {
+      const urls = await getExportUrls();
+      for (const url of urls) {
         const localUri = await getLocalUri(url);   // cached — no re-download
         await MediaLibrary.saveToLibraryAsync(localUri);
       }
-      showAlert('נשמר!', pageUrls.length > 1 ? `${pageUrls.length} עמודים נשמרו לגלריה` : 'התמונה נשמרה לגלריה');
+      showAlert('נשמר!', urls.length > 1 ? `${urls.length} עמודים נשמרו לגלריה` : 'התמונה נשמרה לגלריה');
     } catch (e: unknown) {
       showAlert('שגיאה', e instanceof Error ? e.message : 'שמירה נכשלה');
     } finally {
       setSavingGallery(false);
     }
-  }, [pageUrls, getLocalUri]);
+  }, [pageUrls, getLocalUri, getExportUrls]);
 
-  // ── Share — uses pageUrls directly
+  // ── Share — persists permanent file after finalize
   const handleShare = useCallback(async () => {
     if (!pageUrls.length) return;
     setSavingShare(true);
@@ -413,12 +539,13 @@ export default function FinalViewScreen({ navigation, route }: Props) {
       const isAvailable = await Sharing.isAvailableAsync();
       if (!isAvailable) { showAlert('שיתוף לא זמין', 'המכשיר אינו תומך בשיתוף'); return; }
 
-      if (pageUrls.length === 1) {
-        const localUri = await getLocalUri(pageUrls[0]);  // cached — no re-download
+      const urls = await getExportUrls();
+      if (urls.length === 1) {
+        const localUri = await getLocalUri(urls[0]);  // cached — no re-download
         await Sharing.shareAsync(localUri, { mimeType: 'image/png', dialogTitle: 'שתף כתב יד' });
       } else {
         // buildPdf uses getLocalUri internally — reuses already-downloaded files
-        const localUris = await Promise.all(pageUrls.map(getLocalUri));
+        const localUris = await Promise.all(urls.map(getLocalUri));
         const pdfUri = await buildPdfFromLocalUris(localUris);
         await Sharing.shareAsync(pdfUri, { mimeType: 'application/pdf', dialogTitle: 'שתף כתב יד (PDF)' });
       }
@@ -427,14 +554,15 @@ export default function FinalViewScreen({ navigation, route }: Props) {
     } finally {
       setSavingShare(false);
     }
-  }, [pageUrls, getLocalUri]);
+  }, [pageUrls, getLocalUri, getExportUrls]);
 
   // ── Export to PDF — reuses cached local URIs, no re-download
   const handleExportPdf = useCallback(async () => {
     if (!pageUrls.length) return;
     setSavingPdf(true);
     try {
-      const localUris = await Promise.all(pageUrls.map(getLocalUri));
+      const urls = await getExportUrls();
+      const localUris = await Promise.all(urls.map(getLocalUri));
       const pdfUri = await buildPdfFromLocalUris(localUris);
       const isAvailable = await Sharing.isAvailableAsync();
       if (isAvailable) {
@@ -447,7 +575,10 @@ export default function FinalViewScreen({ navigation, route }: Props) {
     } finally {
       setSavingPdf(false);
     }
-  }, [pageUrls, getLocalUri]);
+  }, [pageUrls, getLocalUri, getExportUrls]);
+
+  // Reset imageLoading whenever the visible page changes (page nav or mode switch)
+  useEffect(() => { setImageLoading(true); }, [currentPage, scanMode]);
 
   const isBusy = savingGallery || savingShare || savingPdf;
 
@@ -508,7 +639,14 @@ export default function FinalViewScreen({ navigation, route }: Props) {
                   source={{ uri: absUrl(pageUrls[currentPage] ?? '') }}
                   style={{ width: '100%', height: '100%' }}
                   resizeMode="stretch"
+                  onLoadStart={() => setImageLoading(true)}
+                  onLoadEnd={() => setImageLoading(false)}
                 />
+                {imageLoading && (
+                  <View style={styles.imageLoadingOverlay}>
+                    <ActivityIndicator size="large" color={colors.accent} />
+                  </View>
+                )}
               </View>
             )}
           </View>
@@ -825,6 +963,13 @@ function getStyles(colors: ThemeColors) {
 
     btnPressed:  { opacity: 0.75, transform: [{ scale: 0.97 }] },
     btnDisabled: { opacity: 0.45 },
+
+    imageLoadingOverlay: {
+      ...StyleSheet.absoluteFillObject,
+      backgroundColor: colors.bgPage,
+      alignItems:      'center',
+      justifyContent:  'center',
+    },
 
     modeToggleRow: {
       flexDirection:   'row',

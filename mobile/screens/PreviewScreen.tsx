@@ -38,7 +38,9 @@ import { getCurrentUserId }            from '../src/services/auth';
 const DRAFT_KEY = 'preview_draft';
 
 // Shared sanitize utility — same invisible Unicode ranges as EditorScreen.
-import { sanitizeText as sanitizeInvisible } from '../src/utils/sanitize';
+// Strip the same invisible Unicode ranges as EditorScreen's INVISIBLE_RE
+const PREVIEW_INVISIBLE_RE = /[​-‏‪-‮⁠-⁯﻿]/g;
+const sanitizeInvisible = (s: string) => s.replace(PREVIEW_INVISIBLE_RE, '');
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Preview'>;
 
@@ -51,8 +53,8 @@ type PageBg    = 'lines' | 'grid' | 'blank';
 // All slider values are 0-100 (display units). Conversion to backend px happens in FinalViewScreen.
 interface HandwritingStyle {
   charHeight:     number;  // 0-100 → char_height  40-130 backend px
-  letterSpacing:  number;  // 0-100 → letter_spacing -10…+20 backend px  (slider*0.30-10)
-  wordSpacing:    number;  // 0-100 → word_spacing  15-100 backend px
+  letterSpacing:  number;  // 0-100 → letter_spacing 0–30 backend px  (slider*0.30)
+  wordSpacing:    number;  // 0-100 → word_spacing   15–100 backend px  (15+slider*0.85)
   baselineJitter: number;  // 0-100 → 0-25 % of char height
   slant:          number;  // 0-100 → 0-40 px line-tilt
   inkBlobs:       number;  // 0-100 → 0-0.30 blob probability
@@ -84,7 +86,7 @@ const PAGE_LINES = 16;
 // Slider (0-100) → backend px conversion factors (used in FinalViewScreen too)
 // charHeight   : backend = 40 + slider * 0.9   (range 40–130 px)
 // letterSpacing: backend = slider * 0.30 - 10   (range -10–+20 px)
-// wordSpacing  : backend = 15 + slider * 0.85  (range 15–100 px)
+// wordSpacing  : backend = slider * 0.85        (range   0–85 px)
 // baselineJitter: backend = slider * 0.25      (range  0–25 %)
 // slant        : backend = slider * 0.4        (range  0–40 px line-tilt)
 // inkBlobs     : backend = slider * 0.003      (range  0–0.30)
@@ -662,12 +664,15 @@ export default function PreviewScreen({ navigation, route }: Props) {
   const marginLineX  = Math.round(notebookW * SRV_SIDE_MARGIN / SRV_PAGE_W);
   const canvasInnerW = notebookW - 2 * NOTEBOOK_HPAD;
 
-  // Convert initStyle (backend px units) → 0-100 slider values
+  // Convert initStyle (backend px units) → 0-100 slider values.
+  // Inverse of FinalViewScreen formulas:
+  //   letterSpacing: backend = slider*0.30-10  → slider = (backend+10)/0.30
+  //   wordSpacing:   backend = slider*0.85     → slider = backend/0.85
   const clamp = (v: number) => Math.round(Math.max(0, Math.min(100, v)));
   const [hs, setHs] = useState<HandwritingStyle>({
     charHeight:     clamp((initStyle.charHeight - 40) / 0.9),        // 85→50
-    letterSpacing:  clamp(initStyle.letterSpacing / 0.30),           // 4→13
-    wordSpacing:    clamp((initStyle.wordSpacing - 15) / 0.85),      // 35→24
+    letterSpacing:  clamp((initStyle.letterSpacing + 10) / 0.30),    // 4→47 (natural)
+    wordSpacing:    clamp(initStyle.wordSpacing / 0.85),              // 35→41 (natural)
     baselineJitter: clamp(initStyle.baselineJitter / 0.25),          // 3→12
     slant:          15,   // slight natural lean by default
     inkBlobs:       10,   // subtle blob effect by default
@@ -748,9 +753,24 @@ export default function PreviewScreen({ navigation, route }: Props) {
   const throttleRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
   const draftDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // ── Server background render state ────────────────────────────────────────
+  const [serverPreviewUrls, setServerPreviewUrls] = useState<{ clean: string[]; photo: string[] } | null>(null);
+  const [isServerRendering, setIsServerRendering] = useState(false);
+  // Bumped by handleFinish to force a render when the user taps Finish while
+  // idle with no current render (e.g. a previous render failed) — keeps the
+  // transition on the fast path instead of a full re-render on FinalView.
+  const [renderNonce, setRenderNonce] = useState(0);
+  const serverRenderAbortRef    = useRef<AbortController | null>(null);
+  const serverRenderDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Last-resort timer: if a forced render never produces URLs, navigate anyway.
+  const finishSafetyTimerRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   useEffect(() => () => {
-    if (throttleRef.current)   { clearTimeout(throttleRef.current);   throttleRef.current = null; }
-    if (draftDebounce.current) { clearTimeout(draftDebounce.current); draftDebounce.current = null; }
+    if (throttleRef.current)          { clearTimeout(throttleRef.current);          throttleRef.current = null; }
+    if (draftDebounce.current)        { clearTimeout(draftDebounce.current);        draftDebounce.current = null; }
+    if (serverRenderDebounceRef.current) { clearTimeout(serverRenderDebounceRef.current); }
+    if (finishSafetyTimerRef.current) { clearTimeout(finishSafetyTimerRef.current); }
+    serverRenderAbortRef.current?.abort();
   }, []);
 
   // ── Unified pixel scale ─────────────────────────────────────────────────
@@ -785,19 +805,16 @@ export default function PreviewScreen({ navigation, route }: Props) {
   // canvas, causing the preview to break lines earlier than the server.
   const displayCharH = Math.max(4, Math.round(charHBackend * pixelScale));
 
-  // All spacing values are scaled by the same pixelScale for consistency.
+  // ── Spacing — both scaled by pixelScale to stay proportional to the server render ──
+  // Letter spacing:  backend_px = slider * 0.30  (range 0–30 px, matches StyleParams ge=0)
+  // When slider=0 the server falls back to avg_glyph_w*0.15; we mirror with lspFallback.
+  const lspExplicit = Math.round(liveHs.letterSpacing * 0.30 * pixelScale);
+  const lspFallback = Math.round(displayCharH * FALLBACK_RATIO * 0.15);
+  const lsp         = lspExplicit > 0 ? lspExplicit : lspFallback;
   //
-  // Letter spacing formula: backend_px = slider * 0.30 - 10
-  //   slider=0   → -10 px (letters overlap slightly — very tight)
-  //   slider=33  →   0 px (letters just touching)
-  //   slider=50  →  +5 px (comfortable default)
-  //   slider=100 → +20 px (loose)
-  //
-  // Negative lsp is intentional: x-cursor advances by (charWidth + lsp), so a negative
-  // lsp shrinks the advance, making consecutive characters overlap. wordWidth() already
-  // handles negative lsp correctly (multiplies gap count × lsp, reducing total width).
-  const lsp = Math.round((liveHs.letterSpacing * 0.30 - 10) * pixelScale);
-  const wsp     = Math.max(1, Math.round((15 + liveHs.wordSpacing * 0.85) * pixelScale));
+  // Word spacing:    backend_px = slider * 0.85          (range   0 …  +85 px)
+  //   slider=0  →  0 px (words touching)  |  slider=100 → +85 px
+  const wsp = Math.max(0, Math.round(liveHs.wordSpacing * 0.85 * pixelScale));
   const jitter  = Math.max(0, charHBackend * liveHs.baselineJitter * 0.0025 * pixelScale);
   // slantPx: line tilt per line in preview pixels.
   // Server sends slant = slider * 0.4 (server px), scaled by pixelScale → preview px.
@@ -881,15 +898,19 @@ export default function PreviewScreen({ navigation, route }: Props) {
     return breakLines(words, canvasInnerW, displayCharH, lsp, wsp, glyphDims);
   }, [isLoaded, words, canvasInnerW, displayCharH, lsp, wsp, glyphDims]);
 
-  const totalPages = Math.max(1, Math.ceil(allLines.length / PAGE_LINES));
+  // When server preview is available, use its page count as ground truth.
+  // The server is authoritative — canvas line-breaking is an approximation.
+  const totalPages = serverPreviewUrls
+    ? serverPreviewUrls.clean.length
+    : Math.max(1, Math.ceil(allLines.length / PAGE_LINES));
   const pageLines  = useMemo(
     () => allLines.slice(currentPage * PAGE_LINES, (currentPage + 1) * PAGE_LINES),
     [allLines, currentPage],
   );
 
-  // Reset to page 0 on any style/content change.
-  // Also clamp so currentPage never exceeds the new totalPages after text edits.
-  useEffect(() => { setCurrentPage(0); }, [liveHs, inkColor, pageBg, editableText]);
+  // Reset to page 0 on any style/content change, or when serverPreviewUrls arrive
+  // (server page count may differ from canvas estimate — avoid out-of-bounds index).
+  useEffect(() => { setCurrentPage(0); }, [liveHs, inkColor, pageBg, editableText, serverPreviewUrls]);
   useEffect(() => {
     setCurrentPage(p => Math.min(p, Math.max(0, totalPages - 1)));
   }, [totalPages]);
@@ -989,14 +1010,14 @@ export default function PreviewScreen({ navigation, route }: Props) {
       } finally {
         if (!controller.signal.aborted) setIsServerRendering(false);
       }
-    }, 1200);
+    }, 600);
 
     return () => {
       if (serverRenderDebounceRef.current) clearTimeout(serverRenderDebounceRef.current);
       serverRenderAbortRef.current?.abort();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hs, editableText, inkColor, pageBg]);
+  }, [hs, editableText, inkColor, pageBg, renderNonce]);
 
   // Guard against double-tap: ref is set synchronously on first press so a
   // second tap within the same JS frame is ignored — no state update needed.
@@ -1005,8 +1026,14 @@ export default function PreviewScreen({ navigation, route }: Props) {
   // The auto-navigate effect below watches this and navigates as soon as URLs arrive.
   const pendingFinishRef = useRef(false);
 
+  // Mirror serverPreviewUrls into a ref so the finish safety timer reads the
+  // latest value rather than the (possibly null) value captured at tap time.
+  const serverPreviewUrlsRef = useRef(serverPreviewUrls);
+  useEffect(() => { serverPreviewUrlsRef.current = serverPreviewUrls; }, [serverPreviewUrls]);
+
   // Helper shared by handleFinish and the auto-navigate effect below.
   const doNavigateToFinalView = useCallback((urls: { clean: string[]; photo: string[] } | null) => {
+    if (finishSafetyTimerRef.current) { clearTimeout(finishSafetyTimerRef.current); finishSafetyTimerRef.current = null; }
     isFinishingRef.current = true;
     navigation.push('FinalView', {
       text:        editableText,
@@ -1041,16 +1068,30 @@ export default function PreviewScreen({ navigation, route }: Props) {
       setHs({ ...pendingHsRef.current });
     }
 
-    if (isServerRendering) {
-      // Server render is in flight — register intent and let the auto-navigate
-      // effect above handle navigation as soon as the URLs arrive.
-      // The Finish button UI switches to a "ממתין..." state via pendingFinishRef.
-      pendingFinishRef.current = true;
+    // Fast path: an exact server render matching the current settings is ready.
+    if (serverPreviewUrls) {
+      doNavigateToFinalView(serverPreviewUrls);
       return;
     }
 
-    // Server render is idle — navigate immediately with whatever we have.
-    doNavigateToFinalView(serverPreviewUrls);
+    // No exact render yet. Wait for one instead of navigating with null (which
+    // would force a slow full re-render on FinalView). The auto-navigate effect
+    // fires the moment URLs arrive. The button shows a "ממתין..." state.
+    pendingFinishRef.current = true;
+
+    // If nothing is currently rendering (e.g. a previous render failed), force
+    // one immediately so the wait is bounded.
+    if (!isServerRendering) setRenderNonce(n => n + 1);
+
+    // Safety net: never hang. If no render completes within 12s (repeated
+    // failure / offline), navigate with whatever we have. Guarded by
+    // isFinishingRef so it can't double-navigate after the auto-navigate effect.
+    if (finishSafetyTimerRef.current) clearTimeout(finishSafetyTimerRef.current);
+    finishSafetyTimerRef.current = setTimeout(() => {
+      if (pendingFinishRef.current && !isFinishingRef.current) {
+        doNavigateToFinalView(serverPreviewUrlsRef.current);
+      }
+    }, 12000);
   }, [navigation, editableText, liveGlyphMap, inkColor, isServerRendering, serverPreviewUrls, doNavigateToFinalView]);
 
   // ── RENDER ─────────────────────────────────────────────────────────────────
