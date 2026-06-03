@@ -100,7 +100,7 @@ async function fetchBothModes(
         ink_color: inkColor,
         style: {
           char_height:     Math.round(40 + style.charHeight * 0.9),
-          letter_spacing:  style.letterSpacing * 0.30,
+          letter_spacing:  style.letterSpacing * 0.30 - 10,  // slider 0→-10px, 100→+20px
           word_spacing:    Math.round(15 + style.wordSpacing * 0.85),
           baseline_jitter: style.baselineJitter * 0.25,
           slant:           style.slant * 0.4,
@@ -206,16 +206,20 @@ async function buildPdfFromLocalUris(localUris: string[]): Promise<string> {
 // ── Screen ────────────────────────────────────────────────────────────────────
 
 export default function FinalViewScreen({ navigation, route }: Props) {
-  const { text, background, glyphMap: _glyphMap, style: gs, inkColor } = route.params;
+  const { text, background, glyphMap: _glyphMap, style: gs, inkColor, previewUrls } = route.params;
   const { width: W } = useWindowDimensions();
   const { colors } = useTheme();
   const styles = useMemo(() => getStyles(colors), [colors]);
 
+  // If PreviewScreen already rendered this document, use those URLs directly.
+  // This guarantees preview = final output with zero additional server latency.
+  const hasPreviewUrls = !!previewUrls?.clean?.length && !!previewUrls?.photo?.length;
+
   // Both modes fetched together on mount — switching is always instant
-  const [cleanUrls,  setCleanUrls]  = useState<string[]>([]);
-  const [photoUrls,  setPhotoUrls]  = useState<string[]>([]);
-  const [pageUrls,   setPageUrls]   = useState<string[]>([]);
-  const [isLoading,  setIsLoading]  = useState(true);
+  const [cleanUrls,  setCleanUrls]  = useState<string[]>(hasPreviewUrls ? previewUrls!.clean : []);
+  const [photoUrls,  setPhotoUrls]  = useState<string[]>(hasPreviewUrls ? previewUrls!.photo : []);
+  const [pageUrls,   setPageUrls]   = useState<string[]>(hasPreviewUrls ? previewUrls!.clean : []);
+  const [isLoading,  setIsLoading]  = useState(!hasPreviewUrls);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [retryCount, setRetryCount] = useState(0); // increment to trigger re-fetch
   const [scanMode,   setScanMode]   = useState<'clean' | 'photo'>('clean');
@@ -271,8 +275,19 @@ export default function FinalViewScreen({ navigation, route }: Props) {
 
   const placeholderH = Math.round((W - 2 * FRAME_MH) * A4_RATIO);
 
-  // Fetch both clean and photo together — screen shows only after both are ready
+  // When previewUrls were passed, warm the image cache so clean↔photo switching is instant.
   useEffect(() => {
+    if (!hasPreviewUrls) return;
+    const allUrls = [...previewUrls!.clean, ...previewUrls!.photo];
+    allUrls.forEach(url => Image.prefetch(absUrl(url)).catch(() => null));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Fetch both clean and photo together — screen shows only after both are ready.
+  // Skipped entirely when previewUrls were passed from PreviewScreen (fast path).
+  useEffect(() => {
+    if (hasPreviewUrls) return;   // already have exact render from preview — skip fetch
+
     let cancelled = false;
     // Reset on retry
     setIsLoading(true);

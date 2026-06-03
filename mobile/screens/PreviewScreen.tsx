@@ -32,7 +32,7 @@ import { fonts, radius }               from '../src/theme';
 import { useTheme, type ThemeColors }  from '../src/contexts/ThemeContext';
 import { BACKEND_URL, MAX_TEXT_LEN }   from '../src/config';
 import { impactLight }                 from '../src/utils/haptics';
-import { fetchJSON }                   from '../src/utils/api';
+import { fetchJSON, getAuthToken }      from '../src/utils/api';
 import { getCurrentUserId }            from '../src/services/auth';
 
 const DRAFT_KEY = 'preview_draft';
@@ -51,7 +51,7 @@ type PageBg    = 'lines' | 'grid' | 'blank';
 // All slider values are 0-100 (display units). Conversion to backend px happens in FinalViewScreen.
 interface HandwritingStyle {
   charHeight:     number;  // 0-100 → char_height  40-130 backend px
-  letterSpacing:  number;  // 0-100 → letter_spacing 0-30 backend px
+  letterSpacing:  number;  // 0-100 → letter_spacing -10…+20 backend px  (slider*0.30-10)
   wordSpacing:    number;  // 0-100 → word_spacing  15-100 backend px
   baselineJitter: number;  // 0-100 → 0-25 % of char height
   slant:          number;  // 0-100 → 0-40 px line-tilt
@@ -83,7 +83,7 @@ const PAGE_LINES = 16;
 
 // Slider (0-100) → backend px conversion factors (used in FinalViewScreen too)
 // charHeight   : backend = 40 + slider * 0.9   (range 40–130 px)
-// letterSpacing: backend = slider * 0.30        (range  0–30 px)
+// letterSpacing: backend = slider * 0.30 - 10   (range -10–+20 px)
 // wordSpacing  : backend = 15 + slider * 0.85  (range 15–100 px)
 // baselineJitter: backend = slider * 0.25      (range  0–25 %)
 // slant        : backend = slider * 0.4        (range  0–40 px line-tilt)
@@ -749,7 +749,7 @@ export default function PreviewScreen({ navigation, route }: Props) {
   const draftDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => () => {
-    if (throttleRef.current) { clearTimeout(throttleRef.current); throttleRef.current = null; }
+    if (throttleRef.current)   { clearTimeout(throttleRef.current);   throttleRef.current = null; }
     if (draftDebounce.current) { clearTimeout(draftDebounce.current); draftDebounce.current = null; }
   }, []);
 
@@ -786,12 +786,17 @@ export default function PreviewScreen({ navigation, route }: Props) {
   const displayCharH = Math.max(4, Math.round(charHBackend * pixelScale));
 
   // All spacing values are scaled by the same pixelScale for consistency.
-  // Letter spacing: when slider=0 the server falls back to avg_glyph_w*0.15 ≈ 15% of
-  // char width. We mirror that by falling back to displayCharH * 0.15 * FALLBACK_RATIO
-  // so the client never uses lsp=0 when the server would use a non-zero gap.
-  const lspExplicit = Math.round(liveHs.letterSpacing * 0.30 * pixelScale);
-  const lspFallback = Math.round(displayCharH * FALLBACK_RATIO * 0.15);
-  const lsp         = lspExplicit > 0 ? lspExplicit : lspFallback;
+  //
+  // Letter spacing formula: backend_px = slider * 0.30 - 10
+  //   slider=0   → -10 px (letters overlap slightly — very tight)
+  //   slider=33  →   0 px (letters just touching)
+  //   slider=50  →  +5 px (comfortable default)
+  //   slider=100 → +20 px (loose)
+  //
+  // Negative lsp is intentional: x-cursor advances by (charWidth + lsp), so a negative
+  // lsp shrinks the advance, making consecutive characters overlap. wordWidth() already
+  // handles negative lsp correctly (multiplies gap count × lsp, reducing total width).
+  const lsp = Math.round((liveHs.letterSpacing * 0.30 - 10) * pixelScale);
   const wsp     = Math.max(1, Math.round((15 + liveHs.wordSpacing * 0.85) * pixelScale));
   const jitter  = Math.max(0, charHBackend * liveHs.baselineJitter * 0.0025 * pixelScale);
   // slantPx: line tilt per line in preview pixels.
@@ -921,35 +926,132 @@ export default function PreviewScreen({ navigation, route }: Props) {
   const pageBgRef = useRef<PageBg>(pageBg);
   useEffect(() => { pageBgRef.current = pageBg; }, [pageBg]);
 
+  // ── Background server render (debounced 1200ms) ────────────────────────────
+  // Triggered by any committed style change (hs, not liveHs), text, ink, or bg.
+  // Calls /convert-both with preview=true (no usage increment) and stores the
+  // result in serverPreviewUrls. The render area then shows this exact image
+  // so the user sees the REAL final output, not just the canvas approximation.
+  // During slider drag (isDragging) the canvas stays visible for instant feedback.
+  useEffect(() => {
+    // Stale the current server preview immediately so the canvas reappears
+    // while we wait for the new render.
+    setServerPreviewUrls(null);
+
+    if (serverRenderDebounceRef.current) clearTimeout(serverRenderDebounceRef.current);
+
+    serverRenderDebounceRef.current = setTimeout(async () => {
+      // Cancel any previous in-flight request
+      serverRenderAbortRef.current?.abort();
+      const controller = new AbortController();
+      serverRenderAbortRef.current = controller;
+
+      const userId = getCurrentUserId();
+      if (!userId) return;
+
+      const token = await getAuthToken();
+      if (controller.signal.aborted) return;
+
+      setIsServerRendering(true);
+      try {
+        const res = await fetch(`${BACKEND_URL}/convert-both`, {
+          method:  'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          signal: controller.signal,
+          body: JSON.stringify({
+            text:       editableText,
+            user_id:    userId,
+            background: pageBgRef.current,
+            ink_color:  inkColor,
+            preview:    true,
+            style: {
+              char_height:     Math.round(40 + hs.charHeight * 0.9),
+              letter_spacing:  hs.letterSpacing * 0.30,
+              word_spacing:    Math.round(15 + hs.wordSpacing * 0.85),
+              baseline_jitter: hs.baselineJitter * 0.25,
+              slant:           hs.slant * 0.4,
+              ink_blobs:       hs.inkBlobs * 0.003,
+            },
+          }),
+        });
+        if (!res.ok || controller.signal.aborted) return;
+        const data = await res.json() as {
+          ok: boolean; clean_urls?: string[]; photo_urls?: string[];
+        };
+        if (controller.signal.aborted) return;
+        if (data.ok && data.clean_urls?.length && data.photo_urls?.length) {
+          setServerPreviewUrls({ clean: data.clean_urls, photo: data.photo_urls });
+        }
+      } catch {
+        // AbortError or network error — canvas stays visible, no error shown
+      } finally {
+        if (!controller.signal.aborted) setIsServerRendering(false);
+      }
+    }, 1200);
+
+    return () => {
+      if (serverRenderDebounceRef.current) clearTimeout(serverRenderDebounceRef.current);
+      serverRenderAbortRef.current?.abort();
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hs, editableText, inkColor, pageBg]);
+
   // Guard against double-tap: ref is set synchronously on first press so a
   // second tap within the same JS frame is ignored — no state update needed.
   const isFinishingRef = useRef(false);
+  // Set when user taps Finish while a server render is in progress.
+  // The auto-navigate effect below watches this and navigates as soon as URLs arrive.
+  const pendingFinishRef = useRef(false);
+
+  // Helper shared by handleFinish and the auto-navigate effect below.
+  const doNavigateToFinalView = useCallback((urls: { clean: string[]; photo: string[] } | null) => {
+    isFinishingRef.current = true;
+    navigation.push('FinalView', {
+      text:        editableText,
+      background:  pageBgRef.current,
+      glyphMap:    liveGlyphMap,
+      style:       pendingHsRef.current,
+      inkColor,
+      previewUrls: urls ?? undefined,
+    });
+    const unsub = navigation.addListener('focus', () => {
+      isFinishingRef.current = false;
+      pendingFinishRef.current = false;
+      unsub();
+    });
+  }, [navigation, editableText, liveGlyphMap, inkColor]);
+
+  // Auto-navigate when the in-progress server render completes and the user
+  // already tapped "Finish" while waiting.
+  useEffect(() => {
+    if (!pendingFinishRef.current || !serverPreviewUrls) return;
+    doNavigateToFinalView(serverPreviewUrls);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverPreviewUrls]);
 
   const handleFinish = useCallback(() => {
-    if (isFinishingRef.current) return;   // ← drop the second tap
-    isFinishingRef.current = true;
+    if (isFinishingRef.current || pendingFinishRef.current) return;   // drop duplicate taps
 
-    // Flush any pending throttle so hs is fully up-to-date before navigating.
+    // Flush any pending throttle so hs is fully up-to-date.
     if (throttleRef.current) {
       clearTimeout(throttleRef.current);
       throttleRef.current = null;
       setHs({ ...pendingHsRef.current });
     }
-    // navigation.push guarantees a fresh FinalView instance every time,
-    // avoiding any risk of React Navigation reusing a screen with stale params.
-    navigation.push('FinalView', {
-      text:       editableText,
-      background: pageBgRef.current,
-      glyphMap:   liveGlyphMap,
-      style:      pendingHsRef.current,
-      inkColor,
-    });
-    // Reset the guard when the screen comes back into focus (user pressed back).
-    const unsub = navigation.addListener('focus', () => {
-      isFinishingRef.current = false;
-      unsub();
-    });
-  }, [navigation, editableText, liveGlyphMap, inkColor]);
+
+    if (isServerRendering) {
+      // Server render is in flight — register intent and let the auto-navigate
+      // effect above handle navigation as soon as the URLs arrive.
+      // The Finish button UI switches to a "ממתין..." state via pendingFinishRef.
+      pendingFinishRef.current = true;
+      return;
+    }
+
+    // Server render is idle — navigate immediately with whatever we have.
+    doNavigateToFinalView(serverPreviewUrls);
+  }, [navigation, editableText, liveGlyphMap, inkColor, isServerRendering, serverPreviewUrls, doNavigateToFinalView]);
 
   // ── RENDER ─────────────────────────────────────────────────────────────────
 
@@ -960,34 +1062,57 @@ export default function PreviewScreen({ navigation, route }: Props) {
         {/* ── NOTEBOOK PAGE ─────────────────────────────────────────────── */}
         <View style={styles.frameShadow}>
           <View style={styles.frameClip}>
-            <NotebookPage pageW={notebookW} pageH={pageH} lineH={lineH} bgLineH={bgLineH}
-              topM={topM} marginLineX={marginLineX} pageBg={pageBg}>
-              {!isLoaded ? (
-                <View style={[styles.loadingBox, { height: pageH }]}>
-                  <ActivityIndicator size="large" color={colors.accent} />
-                  <Text style={styles.loadingTitle}>מכין את כתב היד...</Text>
-                  <Text style={styles.loadingSub}>טוען תמונות לתצוגה</Text>
-                </View>
-              ) : (
-                <HandwritingCanvas
-                  pageLines={pageLines}
-                  glyphMap={liveGlyphMap}
-                  displayCharH={displayCharH}
-                  lsp={lsp}
-                  wsp={wsp}
-                  jitter={jitter}
-                  slantPx={slantPx}
-                  blobProb={blobProb}
-                  canvasInnerW={canvasInnerW}
-                  lineH={lineH}
-                  topM={topM}
-                  dims={glyphDims}
-                  inkColor={inkColor}
-                />
-              )}
-            </NotebookPage>
+            {/* Server image: exact final output — shown when not dragging a slider */}
+            {serverPreviewUrls && !isDragging ? (
+              <Image
+                source={{ uri: absUrl(serverPreviewUrls.clean[currentPage] ?? '') }}
+                style={{ width: notebookW, height: pageH }}
+                resizeMode="stretch"
+              />
+            ) : (
+              /* Canvas: live approximate preview — always shown while dragging */
+              <NotebookPage pageW={notebookW} pageH={pageH} lineH={lineH} bgLineH={bgLineH}
+                topM={topM} marginLineX={marginLineX} pageBg={pageBg}>
+                {!isLoaded ? (
+                  <View style={[styles.loadingBox, { height: pageH }]}>
+                    <ActivityIndicator size="large" color={colors.accent} />
+                    <Text style={styles.loadingTitle}>מכין את כתב היד...</Text>
+                    <Text style={styles.loadingSub}>טוען תמונות לתצוגה</Text>
+                  </View>
+                ) : (
+                  <HandwritingCanvas
+                    pageLines={pageLines}
+                    glyphMap={liveGlyphMap}
+                    displayCharH={displayCharH}
+                    lsp={lsp}
+                    wsp={wsp}
+                    jitter={jitter}
+                    slantPx={slantPx}
+                    blobProb={blobProb}
+                    canvasInnerW={canvasInnerW}
+                    lineH={lineH}
+                    topM={topM}
+                    dims={glyphDims}
+                    inkColor={inkColor}
+                  />
+                )}
+              </NotebookPage>
+            )}
           </View>
         </View>
+
+        {/* ── SERVER RENDER STATUS BADGE ─────────────────────────────────── */}
+        {isServerRendering && !isDragging && (
+          <View style={styles.renderingBadge}>
+            <ActivityIndicator size="small" color={colors.accent} />
+            <Text style={styles.renderingBadgeText}>מעבד תצוגה מדויקת...</Text>
+          </View>
+        )}
+        {serverPreviewUrls && !isDragging && !isServerRendering && (
+          <View style={styles.exactBadge}>
+            <Text style={styles.exactBadgeText}>✓ תצוגה מדויקת</Text>
+          </View>
+        )}
 
         {/* ── PREFETCH INDICATOR — visible only while edit-mode glyphs load ─── */}
         {isPrefetching && (
@@ -1183,15 +1308,26 @@ export default function PreviewScreen({ navigation, route }: Props) {
         {/* ── FINISH BUTTON ─────────────────────────────────────────────── */}
         <View style={styles.finishBar}>
           <Pressable
-            style={({ pressed }) => [styles.finishBtn, pressed && styles.finishBtnPressed]}
+            style={({ pressed }) => [
+              styles.finishBtn,
+              pressed && !isServerRendering && styles.finishBtnPressed,
+              isServerRendering && styles.finishBtnWaiting,
+            ]}
             onPress={() => { impactLight(); handleFinish(); }}
             disabled={!isLoaded}
             accessibilityRole="button"
-            accessibilityLabel="סיום עריכה"
+            accessibilityLabel={isServerRendering ? 'ממתין לתצוגה מדויקת...' : 'סיום עריכה'}
             accessibilityHint="עובר למסך התוצאה הסופית עם אפשרויות שמירה ושיתוף"
-            accessibilityState={{ disabled: !isLoaded }}
+            accessibilityState={{ disabled: !isLoaded, busy: isServerRendering }}
           >
-            <Text style={styles.finishBtnText}>סיום עריכה</Text>
+            {isServerRendering ? (
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                <ActivityIndicator size="small" color="#FFFFFF" />
+                <Text style={styles.finishBtnText}>ממתין לתצוגה מדויקת...</Text>
+              </View>
+            ) : (
+              <Text style={styles.finishBtnText}>סיום עריכה</Text>
+            )}
           </Pressable>
         </View>
 
@@ -1227,6 +1363,31 @@ function getStyles(colors: ThemeColors) {
     loadingBox:   { alignItems: 'center', justifyContent: 'center', gap: 14 },
     loadingTitle: { fontSize: 17, fontFamily: fonts.bold,    color: colors.inkDark,  writingDirection: 'rtl', textAlign: 'center' },
     loadingSub:   { fontSize: 12, fontFamily: fonts.regular, color: colors.inkLight, writingDirection: 'rtl', textAlign: 'center' },
+
+    // ── Server render status badges ──────────────────────────────────────────
+    renderingBadge: {
+      flexDirection:   'row',
+      alignItems:      'center',
+      justifyContent:  'center',
+      gap:             6,
+      paddingVertical: 5,
+    },
+    renderingBadgeText: {
+      fontSize:         11,
+      fontFamily:       fonts.regular,
+      color:            colors.inkLight,
+      writingDirection: 'rtl' as const,
+    },
+    exactBadge: {
+      alignItems:      'center',
+      paddingVertical: 5,
+    },
+    exactBadgeText: {
+      fontSize:         11,
+      fontFamily:       fonts.semiBold,
+      color:            colors.accent,
+      writingDirection: 'rtl' as const,
+    },
 
     // ── Edit-mode prefetch indicator ─────────────────────────────────────────
     prefetchStrip: {
@@ -1360,6 +1521,10 @@ function getStyles(colors: ThemeColors) {
       shadowOpacity:   0.30,
       shadowRadius:    8,
       elevation:       5,
+    },
+    finishBtnWaiting: {
+      opacity: 0.80,
+      shadowOpacity: 0.15,
     },
     finishBtnPressed: {
       transform:     [{ scale: 0.97 }],

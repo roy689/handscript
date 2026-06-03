@@ -1128,8 +1128,11 @@ def compose_line(
     # Spacing — values come from style dict (already resolved above).
     # ------------------------------------------------------------------
     target_char_h  = target_char_h_global
-    letter_sp_base = float(_st.get("letter_spacing", None) or 0)   # explicit px override
-    word_sp_base   = float(_st.get("word_spacing",   None) or 0)   # explicit px override
+    # Use None-sentinel to distinguish "not supplied" from "explicitly 0 / negative".
+    # The old `or 0` coerced None AND 0 to 0, then the fallback fired even for explicit 0.
+    _raw_lsp = _st.get("letter_spacing")
+    letter_sp_base = float(_raw_lsp) if _raw_lsp is not None else None
+    word_sp_base   = float(_st.get("word_spacing", None) or 0)   # explicit px override
     jitter_pct     = float(_st.get("baseline_jitter", 2.0))        # σ % of char height
 
     glyph_widths_px = [
@@ -1139,9 +1142,19 @@ def compose_line(
     real_widths = [w for w in glyph_widths_px if w > 0]
     avg_glyph_w = (sum(real_widths) / len(real_widths)) if real_widths else target_char_h
 
-    # Letter spacing: explicit override or 15 % of avg glyph width
-    _LSP       = letter_sp_base if letter_sp_base > 0 else avg_glyph_w * 0.15
-    _LSP_SIGMA = _LSP * 0.35
+    # Letter spacing:
+    #   • None (no style key) → natural fallback of 15 % of avg glyph width
+    #   • Any explicit value (including 0 or negative) → use as-is
+    #   Negative values are intentional: the client sends slider*0.30-10, so slider=0
+    #   gives -10 px (letters tight/overlapping).  We clamp at -25 % of avg width to
+    #   prevent complete character overlap at extreme settings.
+    if letter_sp_base is None:
+        _LSP = avg_glyph_w * 0.15          # natural spacing when no style given
+    else:
+        _LSP = max(-avg_glyph_w * 0.25, letter_sp_base)
+
+    # Sigma always positive; reduced for tight/negative values to avoid wild swings.
+    _LSP_SIGMA = abs(_LSP) * 0.20
 
     # Word spacing (within-line spaces): explicit style override or 100 % of avg glyph width.
     # Previously this ignored style.word_spacing — now it matches compose_paragraph behaviour.
@@ -1157,8 +1170,11 @@ def compose_line(
         for i in visual_indices
     ]
 
+    # Spacing may be negative (overlap). Clamp minimum to -25 % of avg glyph width
+    # so characters never fully disappear behind each other.
+    _CLAMP_NEG = int(-avg_glyph_w * 0.25)
     spacings = [
-        max(0, int(random.gauss(_LSP, _LSP_SIGMA)))
+        max(_CLAMP_NEG, int(random.gauss(_LSP, _LSP_SIGMA)))
         for _ in visual_indices
     ]
 
