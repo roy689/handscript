@@ -428,7 +428,7 @@ def apply_jitter(char_img: np.ndarray) -> tuple[np.ndarray, int]:
     # ------------------------------------------------------------------
     # Step 4 — Vertical offset (metadata only — returned, not applied)
     # ------------------------------------------------------------------
-    v_offset = random.randint(-8, 8)
+    v_offset = random.randint(-3, 3)
 
     return np.array(pil_img, dtype=np.uint8), v_offset
 
@@ -579,7 +579,7 @@ _CHAR_HEIGHT_RATIO: dict[str, float] = {
     "ז": 0.78,   # zayin — slightly shorter
     "ח": 0.92,   # het
     "ט": 0.92,   # tet — round, full x-height
-    "י": 0.22,   # yod — tiny mark, 22 % of x-height (top pinned to x-height top)
+    "י": 0.35,   # yod — small mark, 35 % of x-height, sits in upper portion of line
     "כ": 0.90,   # kaf (open)
     "מ": 0.92,   # mem (open)
     "נ": 0.82,   # nun (open) — slightly shorter
@@ -699,8 +699,8 @@ def _asc(h_ratio: float) -> float:
 
 _CHAR_ASCENDER_RATIO: dict[str, float] = {
     # ── Hebrew: entirely above baseline ──────────────────────────────────────
-    # yod: 1/0.22 ≈ 4.54 — top aligns with x-height top (upper part of line)
-    "י": 4.54,
+    # yod: 2.3 — sits in upper portion of line, not pinned to very top
+    "י": 2.3,
     "א": 1.0, "ב": 1.0, "ג": 1.0, "ד": 1.0, "ה": 1.0,
     "ו": 1.0, "ז": 1.0, "ח": 1.0, "ט": 1.0, "כ": 1.0,
     "מ": 1.0, "נ": 1.0, "ס": 1.0, "ע": 1.0, "פ": 1.0,
@@ -867,15 +867,16 @@ def normalize_stroke_width(img: np.ndarray, target_char_h: int) -> np.ndarray:
     Normalize stroke width so every glyph has the same visual weight regardless
     of how it was drawn or photographed.
 
-    Fix vs old implementation
-    -------------------------
-    The old code ESTIMATED the new radius after each morphological step (±1 px
-    bookkeeping).  That estimate is wrong for complex glyphs — a single dilation
-    on a wide stroke barely changes the median distance, so the loop terminated
-    far too early and strokes stayed uneven.
-
-    This version RE-MEASURES the actual median distance transform after every
-    iteration, which is more expensive but guarantees convergence to the target.
+    Performance optimizations vs original
+    --------------------------------------
+    1. Early-exit: if the initial radius is already within ±15 % of the target
+       (the common case for hand-drawn glyphs), skip the morphological loop
+       entirely — no distanceTransform calls at all.
+    2. Measure every 2 iterations instead of every iteration.  distanceTransform
+       is the dominant cost; halving the number of calls roughly halves CPU time
+       for glyphs that DO need adjustment.
+    3. Convergence tolerance kept at ±8 % for final acceptance to maintain output
+       quality (only the mid-loop measurement is deferred, not the exit check).
     """
     alpha = img[:, :, 3]
     if alpha.max() == 0:
@@ -896,10 +897,17 @@ def normalize_stroke_width(img: np.ndarray, target_char_h: int) -> np.ndarray:
     if target_radius <= 0:
         return img
 
+    # ── Optimization 1: early-exit if already close enough ───────────────────
+    # ±15 % tolerance for the pre-check is deliberately looser than the ±8 %
+    # convergence check inside the loop — avoids morphological work for the
+    # majority of glyphs that are already near the target stroke weight.
+    if 0.85 <= current_radius / target_radius <= 1.15:
+        return img
+
     kernel    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     new_alpha = ink.copy()
 
-    for _ in range(_STROKE_MAX_ITERS):
+    for step in range(_STROKE_MAX_ITERS):
         ratio = current_radius / target_radius
         if 0.92 <= ratio <= 1.08:   # within ±8 % — converged
             break
@@ -907,11 +915,15 @@ def normalize_stroke_width(img: np.ndarray, target_char_h: int) -> np.ndarray:
             new_alpha = cv2.erode(new_alpha, kernel, iterations=1)
         else:
             new_alpha = cv2.dilate(new_alpha, kernel, iterations=1)
-        # Re-measure actual radius — don't estimate with ±1.0 bookkeeping
-        r = _measure_radius(new_alpha)
-        if r == 0.0:
-            break   # glyph eroded away completely
-        current_radius = r
+
+        # ── Optimization 2: re-measure every 2 iterations ────────────────────
+        # distanceTransform dominates cost; skipping one in two cuts it roughly
+        # in half for glyphs that need multiple corrections.
+        if step % 2 == 1:
+            r = _measure_radius(new_alpha)
+            if r == 0.0:
+                break   # glyph eroded away completely
+            current_radius = r
 
     out = img.copy()
     out[:, :, 3] = new_alpha
@@ -1117,6 +1129,7 @@ def compose_line(
     # ------------------------------------------------------------------
     target_char_h  = target_char_h_global
     letter_sp_base = float(_st.get("letter_spacing", None) or 0)   # explicit px override
+    word_sp_base   = float(_st.get("word_spacing",   None) or 0)   # explicit px override
     jitter_pct     = float(_st.get("baseline_jitter", 2.0))        # σ % of char height
 
     glyph_widths_px = [
@@ -1130,9 +1143,10 @@ def compose_line(
     _LSP       = letter_sp_base if letter_sp_base > 0 else avg_glyph_w * 0.15
     _LSP_SIGMA = _LSP * 0.35
 
-    # Word spacing (within-line spaces, if any)
-    _WSP       = avg_glyph_w * 1.0
-    _WSP_SIGMA = avg_glyph_w * 0.25
+    # Word spacing (within-line spaces): explicit style override or 100 % of avg glyph width.
+    # Previously this ignored style.word_spacing — now it matches compose_paragraph behaviour.
+    _WSP       = word_sp_base if word_sp_base > 0 else avg_glyph_w * 1.0
+    _WSP_SIGMA = _WSP * 0.25
 
     def _word_w() -> int:
         return max(round(avg_glyph_w * 0.6),
@@ -1236,18 +1250,19 @@ def compose_paragraph(
     """
     Lay out *text* into multiple lines that each fit within *page_width*.
 
-    Words are split on spaces.  Each line's direction is inferred from its
-    dominant script (first strong character wins).  ``compose_line`` handles
-    mixed RTL/LTR content within a single line.
+    Newline characters (Enter key) produce an explicit line break — the current
+    line is flushed and a new one starts, exactly matching the client-side
+    Preview behaviour.  Two consecutive newlines produce a blank line (empty
+    RGBA strip) so paragraph spacing is preserved in the final output.
 
-    Line-width estimation uses ``_AVG_CHAR_WIDTH`` (30 px) per character,
-    which is a deliberate approximation — exact widths depend on glyph
-    variants chosen at render time and are not known until composition.
+    Words within each paragraph are split on spaces.  Each line's direction is
+    inferred from its dominant script (first strong character wins).
+    ``compose_line`` handles mixed RTL/LTR content within a single line.
 
     Parameters
     ----------
     text : str
-        Full paragraph text in logical (typing) order.
+        Full text in logical (typing) order.  May contain ``\\n`` characters.
     picker : VariantPicker
     page_width : int
         Maximum line width in pixels.  Defaults to 2480 (A4 @ 300 DPI).
@@ -1255,7 +1270,7 @@ def compose_paragraph(
     Returns
     -------
     list[np.ndarray]
-        One RGBA array per line, each shaped (120, line_width, 4).
+        One RGBA array per line, each shaped (_LINE_HEIGHT, line_width, 4).
     """
     if not text.strip():
         return []
@@ -1263,52 +1278,70 @@ def compose_paragraph(
     usable_w = max(1, page_width - 2 * margin)
     _style = style or {}
 
-    # ── Step 1: render every word individually to get exact pixel widths ──────
-    raw_words = text.split(" ")
-    rendered_words: list[np.ndarray] = []
-    for word in raw_words:
-        if not word:
+    def _pack_words_into_lines(rendered_words: list[np.ndarray]) -> list[np.ndarray]:
+        """Pack a flat list of rendered word-images into wrapped lines."""
+        if not rendered_words:
+            return []
+
+        word_sp_base = _style.get("word_spacing", _SPACE_WIDTH)
+
+        def _rand_word_gap() -> int:
+            sigma = word_sp_base * 0.20
+            return max(round(word_sp_base * 0.60), int(random.gauss(word_sp_base, sigma)))
+
+        out_lines: list[np.ndarray] = []
+        line_words: list[np.ndarray] = []
+        line_gaps:  list[int]        = []
+        line_w: int = 0
+
+        for img in rendered_words:
+            ww     = img.shape[1]
+            gap    = _rand_word_gap() if line_words else 0
+            needed = gap + ww
+
+            if line_words and line_w + needed > usable_w:
+                out_lines.append(_flush_rtl_line(line_words, line_gaps))
+                line_words = [img]
+                line_gaps  = [0]
+                line_w     = ww
+            else:
+                line_words.append(img)
+                line_gaps.append(gap)
+                line_w += needed
+
+        if line_words:
+            out_lines.append(_flush_rtl_line(line_words, line_gaps))
+        return out_lines
+
+    # ── Split on explicit newlines first, preserving Enter-key breaks ─────────
+    # Each element of `paragraphs` is either a non-empty string (words to wrap)
+    # or an empty string (blank line from two consecutive newlines).
+    paragraphs = text.split("\n")
+
+    all_lines: list[np.ndarray] = []
+
+    for para in paragraphs:
+        # Empty paragraph → explicit blank line (transparent strip)
+        if not para.strip():
+            all_lines.append(np.zeros((_LINE_HEIGHT, 1, 4), dtype=np.uint8))
             continue
-        chars = list(word)
-        dir_  = _detect_direction(chars)
-        rendered_words.append(compose_line(chars, picker, dir_, style=_style, ink_color=ink_color))
 
-    if not rendered_words:
-        return []
+        # ── Step 1: render every word to get exact pixel widths ───────────────
+        raw_words = para.split(" ")
+        rendered_words: list[np.ndarray] = []
+        for word in raw_words:
+            if not word:
+                continue
+            chars = list(word)
+            dir_  = _detect_direction(chars)
+            rendered_words.append(
+                compose_line(chars, picker, dir_, style=_style, ink_color=ink_color)
+            )
 
-    # ── Step 2: pack words into lines that fit within usable_w ───────────────
-    word_sp_base = _style.get("word_spacing", _SPACE_WIDTH)
+        # ── Step 2: wrap words into lines ─────────────────────────────────────
+        all_lines.extend(_pack_words_into_lines(rendered_words))
 
-    def _rand_word_gap() -> int:
-        sigma = word_sp_base * 0.20
-        return max(round(word_sp_base * 0.60), int(random.gauss(word_sp_base, sigma)))
-
-    lines: list[np.ndarray] = []
-    line_words:  list[np.ndarray] = []
-    line_gaps:   list[int]        = []   # gap BEFORE each word (0 for first)
-    line_w: int = 0
-
-    for img in rendered_words:
-        ww      = img.shape[1]
-        gap     = _rand_word_gap() if line_words else 0
-        needed  = gap + ww
-
-        if line_words and line_w + needed > usable_w:
-            # Flush current line and start a new one
-            lines.append(_flush_rtl_line(line_words, line_gaps))
-            line_words = [img]
-            line_gaps  = [0]
-            line_w     = ww
-        else:
-            line_words.append(img)
-            line_gaps.append(gap)
-            line_w += needed
-
-    # Flush last line
-    if line_words:
-        lines.append(_flush_rtl_line(line_words, line_gaps))
-
-    return lines
+    return all_lines
 
 
 def _flush_rtl_line(

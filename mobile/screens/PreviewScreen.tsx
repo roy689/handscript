@@ -37,12 +37,8 @@ import { getCurrentUserId }            from '../src/services/auth';
 
 const DRAFT_KEY = 'preview_draft';
 
-// Matches the same invisible Unicode ranges stripped in EditorScreen:
-// U+200B-U+200F  zero-width space / bidi marks
-// U+202A-U+202E  directional embedding / override
-// U+2060-U+206F  word joiner + deprecated format chars
-// U+FEFF         BOM / zero-width no-break space
-const PREVIEW_INVISIBLE_RE = /[​-‏‪-‮⁠-⁯﻿]/g;
+// Shared sanitize utility — same invisible Unicode ranges as EditorScreen.
+import { sanitizeText as sanitizeInvisible } from '../src/utils/sanitize';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Preview'>;
 
@@ -73,6 +69,7 @@ const SRV_PAGE_W      = 2480;
 const SRV_PAGE_H      = 3508;
 const SRV_TOP_MARGIN  = 200;   // top margin — text AND background lines start here
 const SRV_LINE_H      = 184;   // line pitch = _LINE_HEIGHT(180) + _LINE_GAP(4) in layout.py
+const SRV_LINES_SPACING = 180; // background ruled-line interval in layout.py (_LINES_SPACING)
 const SRV_SIDE_MARGIN = 200;   // left/right margin for text
 // Usable text width on server: SRV_PAGE_W - 2×SRV_SIDE_MARGIN = 2080 px
 const SRV_USABLE_W    = SRV_PAGE_W - 2 * SRV_SIDE_MARGIN;   // 2080
@@ -372,27 +369,31 @@ function breakLines(
 
 /**
  * Renders a realistic notebook page background with:
- *  - Horizontal ruled lines  (every lineH px, starting from topM)
+ *  - Horizontal ruled lines  (every bgLineH px, starting from topM)
  *  - Vertical grid lines     (same pitch as ruled lines → square cells)
  *  - Red margin line         (at marginLineX from right edge)
  * All measurements are derived from A4 proportions matching the server.
+ *
+ * bgLineH (= SRV_LINES_SPACING scaled, 180 server px) is intentionally
+ * different from lineH (= SRV_LINE_H scaled, 184 server px).  Text advances
+ * every 184 server px, so it gradually drifts below ruled lines — exactly as
+ * in the final server-rendered output.
  */
 function NotebookPage({
-  pageW, pageH, lineH, topM, marginLineX, pageBg, children,
+  pageW, pageH, lineH, bgLineH, topM, marginLineX, pageBg, children,
 }: {
   pageW: number; pageH: number;
-  lineH: number; topM: number; marginLineX: number;
+  lineH: number; bgLineH: number; topM: number; marginLineX: number;
   pageBg: PageBg; children: React.ReactNode;
 }) {
-  // Background lines start at topM (= _TOP_MARGIN scaled), matching the server's
-  // layout.py which now also starts ruled lines at _TOP_MARGIN (not _LINES_SPACING).
+  // Background lines use bgLineH (180-based) so spacing matches layout.py.
   const hLines: number[] = [];
-  for (let y = topM; y < pageH; y += lineH) hLines.push(y);
+  for (let y = topM; y < pageH; y += bgLineH) hLines.push(y);
 
   // Vertical grid lines: same pitch as horizontal for square cells.
   const vLines: number[] = [];
   if (pageBg === 'grid') {
-    for (let x = lineH; x < pageW; x += lineH) vLines.push(x);
+    for (let x = bgLineH; x < pageW; x += bgLineH) vLines.push(x);
   }
 
   return (
@@ -506,10 +507,11 @@ const HandwritingCanvas = React.memo(function HandwritingCanvas({
         const tiltVar   = 0.6 + 0.8 * ((lineSeed & 0xFFFF) / 65535);
         const lineTilt  = slantPx > 0 ? tiltDir * slantPx * tiltVar : 0;
 
-        // Baseline Y fixed at the bottom of the row so the glyph bottom always
-        // sits on the lower ruled line. Growth happens only upward (glyphTop moves
-        // toward and past the upper ruled line as displayCharH increases).
-        const baselineY = lineH;
+        // Baseline at 62% from top of row — matches server's
+        // `baseline_y = round(_LINE_HEIGHT * _BASELINE_Y_RATIO)` (= round(180*0.62) = 112).
+        // Normal letters (asc=1.0) have bottom on baseline, upper 38% is descender space.
+        // Quotes/dashes (asc>1) float near the top; descenders (asc<1) hang below.
+        const baselineY = Math.round(lineH * BASELINE_Y_RATIO);
 
         line.forEach((word, wi) => {
           word.split('').forEach((ch, ci) => {
@@ -532,7 +534,7 @@ const HandwritingCanvas = React.memo(function HandwritingCanvas({
             // has appeared so far on the page and advance the counter.
             const occurrence = charOccurrences[ch] ?? 0;
             charOccurrences[ch] = occurrence + 1;
-            const url  = pickVariantUrl(glyphMap[ch], occurrence, ch.codePointAt(0) ?? 0);
+            const url  = pickVariantUrl(glyphMap[ch], occurrence);
             cells.push(
               <View
                 key={`${li}_${wi}_${ci}`}
@@ -650,7 +652,12 @@ export default function PreviewScreen({ navigation, route }: Props) {
   // ── Page geometry (A4-proportioned, matches server) ───────────────────────
   const notebookW    = W - 2 * PAGE_MARGIN_H;
   const pageH        = Math.round(notebookW * A4_RATIO);
-  const lineH        = Math.round(pageH * SRV_LINE_H / SRV_PAGE_H);
+  // lineH  = text-line advance pitch (180 content + 4 gap = 184 server px).
+  // bgLineH = background ruled-line interval (180 server px, no gap).
+  // Keeping them separate means text gradually drifts below ruled lines as
+  // it does in the server render — exactly matching the final output.
+  const lineH        = Math.round(pageH * SRV_LINE_H       / SRV_PAGE_H);
+  const bgLineH      = Math.round(pageH * SRV_LINES_SPACING / SRV_PAGE_H);
   const topM         = Math.round(pageH * SRV_TOP_MARGIN / SRV_PAGE_H);
   const marginLineX  = Math.round(notebookW * SRV_SIDE_MARGIN / SRV_PAGE_W);
   const canvasInnerW = notebookW - 2 * NOTEBOOK_HPAD;
@@ -673,7 +680,7 @@ export default function PreviewScreen({ navigation, route }: Props) {
   const [liveGlyphMap,    setLiveGlyphMap]    = useState<Record<string, string[]>>(glyphMap);
 
   const handleEditText = useCallback((newT: string) => {
-    setEditableText(newT.replace(PREVIEW_INVISIBLE_RE, ''));
+    setEditableText(sanitizeInvisible(newT));
   }, []);
 
   // When editableText changes, fetch glyph URLs for any characters
@@ -725,7 +732,11 @@ export default function PreviewScreen({ navigation, route }: Props) {
 
   const [inkColor, setInkColor] = useState<InkColor>(initInkColor ?? 'black');
   const [pageBg,   setPageBg]   = useState<PageBg>((initBg as PageBg) ?? 'lines');
-  const [isLoaded,    setIsLoaded]    = useState(false);
+  const [isLoaded,      setIsLoaded]      = useState(false);
+  // isPrefetching: true only while new dims are loading for chars added in edit mode.
+  // Unlike isLoaded=false, it does NOT hide the canvas — it shows a small indicator
+  // so the user sees the canvas with FALLBACK_RATIO while new dims are measured.
+  const [isPrefetching, setIsPrefetching] = useState(false);
   const [glyphDims,   setGlyphDims]   = useState<GlyphDims>({});
   const [currentPage, setCurrentPage] = useState(0);
 
@@ -761,14 +772,26 @@ export default function PreviewScreen({ navigation, route }: Props) {
   const charHBackend = 40 + liveHs.charHeight * 0.9;   // 40-130 server px
 
   // Display char height for the preview canvas.
-  // Bottom of glyph is always anchored to the bottom ruled line.
-  // Only the top grows upward as the slider increases:
-  //   slider = 0   → 0.50 × lineH  (top sits at the middle of the line)
-  //   slider = 100 → 1.10 × lineH  (top slightly overflows the upper ruled line)
-  const displayCharH = Math.max(4, Math.round(lineH * (0.50 + 0.60 * liveHs.charHeight / 100)));
+  //
+  // SYNC RULE: displayCharH must equal charHBackend * pixelScale so that
+  //   displayCharH / canvasInnerW  ≡  charHBackend / SRV_USABLE_W
+  //
+  // This identity guarantees that word widths and letter spacings have the
+  // same ratio to the usable canvas width as they do on the server, which
+  // in turn ensures that line-breaking in breakLines() produces exactly the
+  // same wraps as compose_paragraph() on the server.
+  //
+  // Previous formula (lineH-based) made glyphs ~58% larger relative to the
+  // canvas, causing the preview to break lines earlier than the server.
+  const displayCharH = Math.max(4, Math.round(charHBackend * pixelScale));
 
   // All spacing values are scaled by the same pixelScale for consistency.
-  const lsp     = Math.max(0, Math.round(liveHs.letterSpacing * 0.30 * pixelScale));
+  // Letter spacing: when slider=0 the server falls back to avg_glyph_w*0.15 ≈ 15% of
+  // char width. We mirror that by falling back to displayCharH * 0.15 * FALLBACK_RATIO
+  // so the client never uses lsp=0 when the server would use a non-zero gap.
+  const lspExplicit = Math.round(liveHs.letterSpacing * 0.30 * pixelScale);
+  const lspFallback = Math.round(displayCharH * FALLBACK_RATIO * 0.15);
+  const lsp         = lspExplicit > 0 ? lspExplicit : lspFallback;
   const wsp     = Math.max(1, Math.round((15 + liveHs.wordSpacing * 0.85) * pixelScale));
   const jitter  = Math.max(0, charHBackend * liveHs.baselineJitter * 0.0025 * pixelScale);
   // slantPx: line tilt per line in preview pixels.
@@ -778,24 +801,35 @@ export default function PreviewScreen({ navigation, route }: Props) {
   // ── Prefetch glyph images ──────────────────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
-    // glyphMap maps each char to a LIST of variant URLs. Normalise to arrays
-    // (tolerating an older single-string response) and prefetch every variant
-    // so switching samples mid-render never shows a loading flash.
-    const entries = Object.entries(liveGlyphMap)
+
+    // Normalise to arrays (tolerating an older single-string response).
+    const allEntries = Object.entries(liveGlyphMap)
       .map(([ch, urls]) => [ch, Array.isArray(urls) ? urls : urls ? [urls] : []] as const)
       .filter(([, urls]) => urls.length > 0);
-    if (!entries.length) { setIsLoaded(true); return; }
+
+    if (!allEntries.length) { setIsLoaded(true); return; }
+
+    // On initial load (isLoaded=false): process every char, show full spinner.
+    // On subsequent loads from edit mode (isLoaded=true): only process NEW chars
+    // that have no measured dims yet, and show a small isPrefetching indicator
+    // so the canvas stays visible instead of flashing back to a spinner.
+    const isInitialLoad = !isLoaded;
+    const entriesToProcess = isInitialLoad
+      ? allEntries
+      : allEntries.filter(([ch]) => !glyphDims[ch]);
+
+    if (!isInitialLoad && entriesToProcess.length === 0) return; // nothing new to load
+
+    if (!isInitialLoad) setIsPrefetching(true);
 
     const collectedDims: GlyphDims = {};
     const promises: Promise<unknown>[] = [];
-    for (const [ch, urls] of entries) {
-      // Prefetch all variants of this character.
+
+    for (const [ch, urls] of entriesToProcess) {
       for (const u of urls) {
         promises.push(Image.prefetch(absUrl(u)).catch(() => null));
       }
-      // Measure dimensions from the first variant only — all variants of the
-      // same character are roughly the same size, and layout just needs one
-      // representative measurement.
+      // Measure dimensions from the first variant only.
       promises.push(
         new Promise<void>(resolve => {
           Image.getSize(absUrl(urls[0]),
@@ -809,15 +843,18 @@ export default function PreviewScreen({ navigation, route }: Props) {
     Promise.all(promises)
       .then(() => {
         if (!cancelled) {
-          // Merge into existing dims rather than replacing, so dims measured for
-          // previously-loaded glyphs are never discarded when new chars are added.
+          // Merge — never discard dims for previously loaded chars.
           setGlyphDims(prev => ({ ...prev, ...collectedDims }));
           setIsLoaded(true);
+          setIsPrefetching(false);
         }
       })
-      .catch(() => { if (!cancelled) setIsLoaded(true); });
+      .catch(() => {
+        if (!cancelled) { setIsLoaded(true); setIsPrefetching(false); }
+      });
 
     return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [liveGlyphMap]);
 
   // Split preserving explicit newlines as NEWLINE_SENTINEL tokens so that
@@ -923,7 +960,7 @@ export default function PreviewScreen({ navigation, route }: Props) {
         {/* ── NOTEBOOK PAGE ─────────────────────────────────────────────── */}
         <View style={styles.frameShadow}>
           <View style={styles.frameClip}>
-            <NotebookPage pageW={notebookW} pageH={pageH} lineH={lineH}
+            <NotebookPage pageW={notebookW} pageH={pageH} lineH={lineH} bgLineH={bgLineH}
               topM={topM} marginLineX={marginLineX} pageBg={pageBg}>
               {!isLoaded ? (
                 <View style={[styles.loadingBox, { height: pageH }]}>
@@ -951,6 +988,14 @@ export default function PreviewScreen({ navigation, route }: Props) {
             </NotebookPage>
           </View>
         </View>
+
+        {/* ── PREFETCH INDICATOR — visible only while edit-mode glyphs load ─── */}
+        {isPrefetching && (
+          <View style={styles.prefetchStrip}>
+            <ActivityIndicator size="small" color={colors.accent} />
+            <Text style={styles.prefetchText}>מעדכן תווים חדשים...</Text>
+          </View>
+        )}
 
         {/* ── PAGE NAVIGATION ───────────────────────────────────────────── */}
         {totalPages > 1 && (
@@ -1183,6 +1228,20 @@ function getStyles(colors: ThemeColors) {
     loadingTitle: { fontSize: 17, fontFamily: fonts.bold,    color: colors.inkDark,  writingDirection: 'rtl', textAlign: 'center' },
     loadingSub:   { fontSize: 12, fontFamily: fonts.regular, color: colors.inkLight, writingDirection: 'rtl', textAlign: 'center' },
 
+    // ── Edit-mode prefetch indicator ─────────────────────────────────────────
+    prefetchStrip: {
+      flexDirection:   'row',
+      alignItems:      'center',
+      justifyContent:  'center',
+      gap:             8,
+      paddingVertical: 6,
+    },
+    prefetchText: {
+      fontSize:         12,
+      fontFamily:       fonts.regular,
+      color:            colors.inkLight,
+      writingDirection: 'rtl',
+    },
 
     // ── Page navigation ───────────────────────────────────────────────────────
     pageNav: {

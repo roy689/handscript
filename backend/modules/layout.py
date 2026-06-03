@@ -30,12 +30,23 @@ _GRID_COLOUR   = (205, 205, 205, 255)   # RGBA
 # Margin line colour: classic red notebook margin
 _MARGIN_COLOUR = (220, 130, 130, 255)   # RGBA  (muted red, not harsh)
 
-# Module-level cache for generated backgrounds (at most 3 × size combos = ~90 MB).
+# Module-level cache for generated backgrounds.
+# Capped at 12 entries (3 bg_types × 4 realistic sizes) — evicts oldest on overflow.
+# In practice only 1 size (A4 @ 300DPI) is ever used, so the cache stays tiny.
 _BG_CACHE: Dict[Tuple, np.ndarray] = {}
+_BG_CACHE_MAX = 12
 
 # Module-level cache for static lighting maps (vignette, gradient, hotspot, crease).
 # Keyed by (h, w) — deterministic for a given page size, so we compute once.
+# Capped at 8 entries — far more than needed in practice (usually just 1 size).
 _LIGHTING_CACHE: Dict[Tuple, dict] = {}
+_LIGHTING_CACHE_MAX = 8
+
+
+def _evict(cache: dict, max_size: int) -> None:
+    """Remove oldest entries when cache exceeds max_size (insertion-order eviction)."""
+    while len(cache) > max_size:
+        cache.pop(next(iter(cache)))
 
 
 # ---------------------------------------------------------------------------
@@ -73,6 +84,7 @@ def load_background(
     if bg_type == "blank":
         result = np.array(img, dtype=np.uint8)
         _BG_CACHE[cache_key] = result
+        _evict(_BG_CACHE, _BG_CACHE_MAX)
         return result.copy()
 
     draw = ImageDraw.Draw(img)
@@ -109,6 +121,7 @@ def load_background(
 
     result = np.array(img, dtype=np.uint8)
     _BG_CACHE[cache_key] = result
+    _evict(_BG_CACHE, _BG_CACHE_MAX)
     return result.copy()
 
 
@@ -217,6 +230,7 @@ def _get_lighting_maps(h: int, w: int) -> dict:
 
     maps = {"combined": combined}
     _LIGHTING_CACHE[key] = maps
+    _evict(_LIGHTING_CACHE, _LIGHTING_CACHE_MAX)
     return maps
 
 
@@ -496,9 +510,15 @@ def embed_watermark(image: np.ndarray, user_id: str) -> np.ndarray:
         return image
 
     try:
-        # Build 8-byte payload
+        # Build 8-byte payload:
+        #   Bytes 0-3: first 4 bytes of SHA-256(user_id) — user fingerprint
+        #   Bytes 4-7: Unix timestamp (seconds since epoch, full 32-bit value)
+        #              Previously was `int(time.time()) % 9999` which cycled every
+        #              ~2.77 hours — useless for forensic dating.  The full timestamp
+        #              fits in a uint32 until year 2106 and allows pinpointing when
+        #              a page was rendered to the nearest second.
         uid_bytes = hashlib.sha256(user_id.encode()).digest()[:4]
-        ts_int    = int(time.time()) % 9999
+        ts_int    = int(time.time()) & 0xFFFFFFFF   # full uint32 Unix timestamp
         payload   = uid_bytes + struct.pack(">I", ts_int)  # 4 + 4 = 8 bytes
 
         # Strip alpha, work on BGR (OpenCV convention expected by imwatermark)

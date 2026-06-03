@@ -186,7 +186,8 @@ async function buildPdfFromLocalUris(localUris: string[]): Promise<string> {
     width: ${PDF_PAGE_W}pt;
     height: ${PDF_PAGE_H}pt;
     display: block;
-    object-fit: fill;
+    object-fit: contain;
+    background: #ffffff;
   }
 </style>
 </head>

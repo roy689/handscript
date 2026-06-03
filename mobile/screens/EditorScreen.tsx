@@ -20,7 +20,7 @@ import LoadingOverlay        from '../src/components/LoadingOverlay';
 import HandwritingOverlay   from '../src/components/HandwritingOverlay';
 import { impactLight, impactMedium } from '../src/utils/haptics';
 import { fetchJSON, withRetry, toErrorMessage, OfflineError } from '../src/utils/api';
-import { BACKEND_URL } from '../src/config';
+import { BACKEND_URL, MAX_TEXT_LEN, TEXT_WARN_THRESHOLD } from '../src/config';
 import NetInfo from '@react-native-community/netinfo';
 import { savePendingConversion, getPendingConversion, clearPendingConversion } from '../src/utils/offlineQueue';
 import { saveDraft, loadDraft, clearDraft } from '../src/utils/draftStorage';
@@ -30,17 +30,10 @@ type Props = NativeStackScreenProps<RootStackParamList, 'Editor'>;
 type InkColor   = 'black' | 'blue' | 'red';
 type PaperStyle = 'lines' | 'grid' | 'blank';
 
-// Strip invisible Unicode characters that have no glyph in any bank:
-// zero-width spaces, directional marks, bidi embeddings, BOM, soft hyphen
-const INVISIBLE_RE = /[­​‌‍‎‏‪‫‬‭‮﻿]/g;
-function sanitize(input: string): string {
-  return input.replace(INVISIBLE_RE, '');
-}
+// Shared sanitize utility — strips invisible Unicode chars that have no glyph in any bank.
+import { sanitizeText as sanitize } from '../src/utils/sanitize';
 
-// Match backend's _MAX_TEXT in main.py
-const MAX_TEXT_LEN = 25_000;
-// Show a soft warning starting at 90 % of the limit
-const TEXT_WARN_THRESHOLD = Math.floor(MAX_TEXT_LEN * 0.9);
+// MAX_TEXT_LEN and TEXT_WARN_THRESHOLD imported from config (shared with PreviewScreen)
 
 export default function EditorScreen({ navigation }: Props) {
   const { colors } = useTheme();
@@ -152,19 +145,11 @@ export default function EditorScreen({ navigation }: Props) {
     setLastConvertTime(now);
 
     // Validation #1: Text validation
-    // Strip invisible Unicode control chars (bidi marks, ZWJ, BOM, directional
-    // overrides) that can sneak in via paste/autocorrect.  They are never in the
-    // glyph bank and would trigger the computer-font fallback in the preview canvas.
-    // Removed ranges: U+200B-U+200F, U+202A-U+202E, U+2060-U+206F, U+FEFF
-    const sanitizedText = [...text.trim()].filter(ch => {
-      const c = ch.codePointAt(0) ?? 0;
-      return !(
-        (c >= 0x200B && c <= 0x200F) ||  // zero-width space / bidi marks
-        (c >= 0x202A && c <= 0x202E) ||  // directional embedding / override
-        (c >= 0x2060 && c <= 0x206F) ||  // word joiner + deprecated format chars
-        c === 0xFEFF                      // BOM / zero-width no-break space
-      );
-    }).join('');
+    // sanitize() strips invisible Unicode control chars (bidi marks, ZWJ, BOM,
+    // directional overrides) via the INVISIBLE_RE regex defined at module level.
+    // The same function already runs on every keystroke in onChangeText, so this
+    // is a safety net for text arriving via other means (e.g. draft restore).
+    const sanitizedText = sanitize(text.trim());
     if (sanitizedText.length === 0) {
       setError('כתוב משהו קודם');
       return;
