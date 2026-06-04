@@ -1207,11 +1207,12 @@ def compose_line(
                         resample = Image.BILINEAR if fast_mode else Image.LANCZOS
                         pil_raw = pil_raw.resize((new_w, target_h), resample)
                         raw     = np.array(pil_raw, dtype=np.uint8)
-                    # Normalize stroke width — skip in fast_mode (preview):
-                    # distance transform on each glyph costs ~3-5 ms; at 200+
-                    # chars/page that's ~600-1000 ms.  Imperceptible at preview size.
-                    if not fast_mode:
-                        raw = normalize_stroke_width(raw, target_char_h_global)
+                    # Normalize stroke width ALWAYS (even in fast_mode/preview) so
+                    # every glyph has the same visual weight in the live exact
+                    # preview, during editing, and in the final document alike.
+                    # A small early-exit inside the function keeps the common case
+                    # cheap, so glyphs already near the target are barely touched.
+                    raw = normalize_stroke_width(raw, target_char_h_global)
                     logger.debug("compose_line: char=%r  raw=%dx%d → scaled=%dx%d (h_ratio=%.2f)",
                                  ch, raw_h, raw_w, raw.shape[0], raw.shape[1], h_ratio)
                     jittered, v_off = apply_jitter(raw, fast_mode=fast_mode)
