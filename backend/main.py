@@ -1324,6 +1324,7 @@ def _process_samples_sync(
     """
     import base64 as _b64
     from modules.extractor import _load_upright
+    from modules.synthesizer import normalize_stroke_width, _CHAR_HEIGHT_RATIO
 
     rgba_images: list[np.ndarray] = []
 
@@ -1345,6 +1346,21 @@ def _process_samples_sync(
 
             rgba, svg_text = result
             crop_h, crop_w = rgba.shape[:2]
+
+            # ── Normalize stroke width at save time ──────────────────────────────
+            # Store every glyph with the same stroke-to-height ratio so its visual
+            # weight is uniform wherever it's shown — the on-device editing canvas,
+            # the live exact preview, and the final document alike. We normalize
+            # relative to the glyph's BASE x-height (crop_h / char-height-ratio) so
+            # tall letters and descenders get the same proportional weight as
+            # x-height letters, matching the server's render-time normalization.
+            try:
+                _h_ratio     = _CHAR_HEIGHT_RATIO.get(char, 1.0) or 1.0
+                _norm_target = max(1, round(crop_h / _h_ratio))
+                rgba         = normalize_stroke_width(rgba, _norm_target)
+            except Exception as exc:
+                logger.warning("sample %d: stroke normalization skipped: %s", idx, exc)
+
             logger.info(
                 "sample %d: extracted %dx%d  ink_px=%d  vectorised=%s",
                 idx, crop_w, crop_h, int((rgba[:, :, 3] > 0).sum()),
