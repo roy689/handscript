@@ -100,7 +100,7 @@ async function fetchBothModes(
         ink_color: inkColor,
         style: {
           char_height:     Math.round(40 + style.charHeight * 0.9),
-          letter_spacing:  style.letterSpacing * 0.30,            // 0–30 px (ge=0 in StyleParams)
+          letter_spacing:  style.letterSpacing * 0.30 - 8,       // -8..22 px (negative = overlap at min)
           word_spacing:    Math.round(style.wordSpacing * 0.85),  // 0–85 px (0 = words touch)
           baseline_jitter: style.baselineJitter * 0.25,
           slant:           style.slant * 0.4,

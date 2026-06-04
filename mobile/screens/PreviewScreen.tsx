@@ -671,7 +671,7 @@ export default function PreviewScreen({ navigation, route }: Props) {
   const clamp = (v: number) => Math.round(Math.max(0, Math.min(100, v)));
   const [hs, setHs] = useState<HandwritingStyle>({
     charHeight:     clamp((initStyle.charHeight - 40) / 0.9),        // 85→50
-    letterSpacing:  clamp((initStyle.letterSpacing + 10) / 0.30),    // 4→47 (natural)
+    letterSpacing:  clamp((initStyle.letterSpacing + 8) / 0.30),     // maps backend px → slider
     wordSpacing:    clamp(initStyle.wordSpacing / 0.85),              // 35→41 (natural)
     baselineJitter: clamp(initStyle.baselineJitter / 0.25),          // 3→12
     slant:          15,   // slight natural lean by default
@@ -810,9 +810,9 @@ export default function PreviewScreen({ navigation, route }: Props) {
   const displayCharH = Math.max(4, Math.round(charHBackend * pixelScale));
 
   // ── Spacing — both scaled by pixelScale to stay proportional to the server render ──
-  // Letter spacing: backend_px = slider * 0.30, scaled to preview px.
-  // slider=0 → 0 (letters touch), matching the server's ink-to-ink spacing.
-  const lsp = Math.round(liveHs.letterSpacing * 0.30 * pixelScale);
+  // Letter spacing: backend_px = slider * 0.30 - 8, scaled to preview px.
+  // slider=0 → -8 px (letters overlap, tighter than touching), matching the server.
+  const lsp = Math.round((liveHs.letterSpacing * 0.30 - 8) * pixelScale);
   //
   // Word spacing:    backend_px = slider * 0.85          (range   0 …  +85 px)
   //   slider=0  →  0 px (words touching)  |  slider=100 → +85 px
@@ -992,7 +992,7 @@ export default function PreviewScreen({ navigation, route }: Props) {
             preview:    true,
             style: {
               char_height:     Math.round(40 + hs.charHeight * 0.9),
-              letter_spacing:  hs.letterSpacing * 0.30,
+              letter_spacing:  hs.letterSpacing * 0.30 - 8,
               word_spacing:    Math.round(hs.wordSpacing * 0.85),
               baseline_jitter: hs.baselineJitter * 0.25,
               slant:           hs.slant * 0.4,
