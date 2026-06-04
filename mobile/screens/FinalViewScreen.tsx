@@ -577,8 +577,9 @@ export default function FinalViewScreen({ navigation, route }: Props) {
     }
   }, [pageUrls, getLocalUri, getExportUrls]);
 
-  // Reset imageLoading whenever the visible page changes (page nav or mode switch)
-  useEffect(() => { setImageLoading(true); }, [currentPage, scanMode]);
+  // Reset imageLoading only when the page changes. Mode switches are instant
+  // because both the clean and photo layers are already mounted and decoded.
+  useEffect(() => { setImageLoading(true); }, [currentPage]);
 
   const isBusy = savingGallery || savingShare || savingPdf;
 
@@ -635,12 +636,22 @@ export default function FinalViewScreen({ navigation, route }: Props) {
               </View>
             ) : (
               <View style={{ aspectRatio: 210 / 297 }}>
+                {/* Both layers are mounted and decoded up front. Switching modes
+                    only toggles opacity, so מראה צילום appears instantly with no
+                    load delay. */}
                 <Image
-                  source={{ uri: absUrl(pageUrls[currentPage] ?? '') }}
-                  style={{ width: '100%', height: '100%' }}
+                  source={{ uri: absUrl(cleanUrls[currentPage] ?? '') }}
+                  style={[StyleSheet.absoluteFill, { opacity: scanMode === 'clean' ? 1 : 0 }]}
                   resizeMode="stretch"
-                  onLoadStart={() => setImageLoading(true)}
-                  onLoadEnd={() => setImageLoading(false)}
+                  onLoadStart={() => { if (scanMode === 'clean') setImageLoading(true); }}
+                  onLoadEnd={() => { if (scanMode === 'clean') setImageLoading(false); }}
+                />
+                <Image
+                  source={{ uri: absUrl(photoUrls[currentPage] ?? '') }}
+                  style={[StyleSheet.absoluteFill, { opacity: scanMode === 'photo' ? 1 : 0 }]}
+                  resizeMode="stretch"
+                  onLoadStart={() => { if (scanMode === 'photo') setImageLoading(true); }}
+                  onLoadEnd={() => { if (scanMode === 'photo') setImageLoading(false); }}
                 />
                 {imageLoading && (
                   <View style={styles.imageLoadingOverlay}>
