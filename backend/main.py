@@ -518,7 +518,7 @@ class ValidateRequest(BaseModel):
 class StyleParams(BaseModel):
     char_height:      int   = Field(85,   ge=40,  le=130)
     letter_spacing:   float = Field(4.0,  ge=0.0, le=30.0)
-    word_spacing:     int   = Field(35,   ge=15,  le=100)
+    word_spacing:     int   = Field(35,   ge=0,   le=100)
     baseline_jitter:  float = Field(7.5,  ge=0.0, le=25.0)
     slant:            float = Field(2.25, ge=0.0, le=40.0)
     ink_blobs:        float = Field(0.03, ge=0.0, le=0.30)

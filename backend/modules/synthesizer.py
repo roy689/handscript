@@ -1106,6 +1106,29 @@ def _add_ink_blob(
         )
 
 
+def _hcrop_to_ink(img: np.ndarray) -> np.ndarray:
+    """
+    Crop an RGBA glyph horizontally to its inked columns (alpha > 0).
+
+    Glyph images carry variable transparent side-margins (from storage, the
+    rotate-expand in apply_jitter, and resampling). Measuring inter-character
+    and inter-word spacing from the image bounding box therefore yields gaps
+    that vary per glyph and never reach zero — the spacing slider appears to
+    "lose control" of some letters/words, and they can't be made to touch.
+
+    Cropping to the actual ink makes every gap an ink-to-ink distance: spacing
+    becomes uniform and fully slider-controlled, and a spacing of 0 makes
+    neighbours truly touch. Rows are preserved so vertical placement is
+    unaffected.
+    """
+    if img.ndim != 3 or img.shape[1] == 0:
+        return img
+    cols = np.where(img[:, :, 3].any(axis=0))[0]
+    if cols.size == 0:
+        return img   # fully transparent (shouldn't happen for real ink)
+    return img[:, cols[0]:cols[-1] + 1, :]
+
+
 def compose_line(
     chars: list[str],
     picker: VariantPicker,
@@ -1194,6 +1217,10 @@ def compose_line(
                     jittered, v_off = apply_jitter(raw, fast_mode=fast_mode)
                     inked           = apply_ink_simulation(jittered)
                     inked           = _recolor_glyph(inked, ink_color)
+                    # Tight horizontal crop so spacing is measured ink-to-ink,
+                    # making it uniform, fully slider-controlled, and able to
+                    # reach zero (touching) at the minimum.
+                    inked           = _hcrop_to_ink(inked)
                     glyphs.append((inked, v_off))
                 except Exception as exc:
                     logger.error("compose_line: failed to render char %r: %s — skipping", ch, exc)

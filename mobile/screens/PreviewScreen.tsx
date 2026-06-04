@@ -810,11 +810,9 @@ export default function PreviewScreen({ navigation, route }: Props) {
   const displayCharH = Math.max(4, Math.round(charHBackend * pixelScale));
 
   // ── Spacing — both scaled by pixelScale to stay proportional to the server render ──
-  // Letter spacing:  backend_px = slider * 0.30  (range 0–30 px, matches StyleParams ge=0)
-  // When slider=0 the server falls back to avg_glyph_w*0.15; we mirror with lspFallback.
-  const lspExplicit = Math.round(liveHs.letterSpacing * 0.30 * pixelScale);
-  const lspFallback = Math.round(displayCharH * FALLBACK_RATIO * 0.15);
-  const lsp         = lspExplicit > 0 ? lspExplicit : lspFallback;
+  // Letter spacing: backend_px = slider * 0.30, scaled to preview px.
+  // slider=0 → 0 (letters touch), matching the server's ink-to-ink spacing.
+  const lsp = Math.round(liveHs.letterSpacing * 0.30 * pixelScale);
   //
   // Word spacing:    backend_px = slider * 0.85          (range   0 …  +85 px)
   //   slider=0  →  0 px (words touching)  |  slider=100 → +85 px
@@ -995,7 +993,7 @@ export default function PreviewScreen({ navigation, route }: Props) {
             style: {
               char_height:     Math.round(40 + hs.charHeight * 0.9),
               letter_spacing:  hs.letterSpacing * 0.30,
-              word_spacing:    Math.round(15 + hs.wordSpacing * 0.85),
+              word_spacing:    Math.round(hs.wordSpacing * 0.85),
               baseline_jitter: hs.baselineJitter * 0.25,
               slant:           hs.slant * 0.4,
               ink_blobs:       hs.inkBlobs * 0.003,
