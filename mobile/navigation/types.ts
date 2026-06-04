@@ -28,6 +28,10 @@ export type RootStackParamList = {
     glyphMap:    Record<string, string[]>;  // kept for back-compat; FinalView doesn't use it
     style:       { charHeight: number; letterSpacing: number; wordSpacing: number; baselineJitter: number; slant: number; inkBlobs: number };
     inkColor:    'black' | 'blue' | 'red';
+    // Pre-rendered URLs from PreviewScreen's background server render.
+    // When present, FinalView uses these directly and skips the /convert-both call,
+    // guaranteeing that what the user saw in preview is exactly what they get.
+    previewUrls?: { clean: string[]; photo: string[] };
   };
   Profile:          undefined;
   Settings:         undefined;

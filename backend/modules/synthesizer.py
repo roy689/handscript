@@ -3,7 +3,9 @@
 import logging
 import math
 import random
+import threading
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -13,6 +15,39 @@ import requests
 from PIL import Image, ImageDraw, ImageEnhance
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Module-level glyph image cache
+# ---------------------------------------------------------------------------
+# Caches decoded RGBA numpy arrays keyed by Firebase Storage URL.
+# Lives for the lifetime of the Railway worker process (until restart or
+# max-requests=1000 recycle).  This eliminates repeated Firebase Storage
+# downloads across requests: the first render is slow, every subsequent
+# render for the same user is fast.
+#
+# Memory budget: 500 images × ~200 KB each ≈ 100 MB — well within Railway's
+# 512 MB worker limit.  The LRU eviction keeps it bounded.
+_GLYPH_IMAGE_CACHE: OrderedDict = OrderedDict()
+_GLYPH_IMAGE_CACHE_MAX = 500
+_GLYPH_CACHE_LOCK = threading.Lock()
+
+
+def _glyph_cache_get(url: str) -> "np.ndarray | None":
+    with _GLYPH_CACHE_LOCK:
+        if url in _GLYPH_IMAGE_CACHE:
+            _GLYPH_IMAGE_CACHE.move_to_end(url)
+            return _GLYPH_IMAGE_CACHE[url]
+    return None
+
+
+def _glyph_cache_put(url: str, img: np.ndarray) -> None:
+    with _GLYPH_CACHE_LOCK:
+        if url in _GLYPH_IMAGE_CACHE:
+            _GLYPH_IMAGE_CACHE.move_to_end(url)
+        else:
+            if len(_GLYPH_IMAGE_CACHE) >= _GLYPH_IMAGE_CACHE_MAX:
+                _GLYPH_IMAGE_CACHE.popitem(last=False)   # evict oldest
+            _GLYPH_IMAGE_CACHE[url] = img
 
 
 # ---------------------------------------------------------------------------
@@ -232,13 +267,30 @@ class VariantPicker:
     # ------------------------------------------------------------------
 
     def _get_image(self, char: str, idx: int) -> "np.ndarray | None":
-        """Return the image for variant *idx* of *char*, with full error isolation."""
+        """Return the image for variant *idx* of *char*, with full error isolation.
+
+        Lookup order:
+        1. Instance LRU cache  (hot path — same VariantPicker within one request)
+        2. Module-level cache  (warm path — image downloaded by a previous request)
+        3. Fresh download      (cold path — first time this URL is seen)
+        """
         key = (char, idx)
         if key not in self._cache:
             if len(self._cache) >= self._MAX_CACHE:
                 self._cache.popitem(last=False)
             try:
                 variant = self._bank[char]["variants"][idx]
+
+                # Check module-level cache before downloading (avoids network I/O
+                # on all requests after the first per worker process).
+                url = variant.get("url") if isinstance(variant, dict) else None
+                if url:
+                    cached = _glyph_cache_get(url)
+                    if cached is not None:
+                        self._cache[key] = cached
+                        self._cache.move_to_end(key)
+                        return self._cache[key]
+
                 img = self._load_variant(variant)
                 self._cache[key] = img
             except Exception as exc:
@@ -351,14 +403,61 @@ class VariantPicker:
         if img.ndim == 3 and img.shape[2] == 4:
             img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA)
 
-        return VariantPicker._ensure_rgba(img)
+        result = VariantPicker._ensure_rgba(img)
+        # Store in module-level cache so future requests skip the download.
+        _glyph_cache_put(url, result)
+        return result
+
+
+def prefetch_bank_images(bank: dict, max_workers: int = 12) -> None:
+    """
+    Download all variant images in *bank* into the module-level cache in parallel.
+
+    Call this once before ``compose_paragraph`` so the synthesis loop never
+    blocks on a network request.  Any download failure is silently ignored —
+    the synthesiser will retry (and log) on first use.
+
+    Parameters
+    ----------
+    bank : dict
+        Character bank as returned by ``firebase_client.load_character_bank``.
+    max_workers : int
+        Thread-pool size.  12 concurrent connections is well within Railway's
+        limits and saturates typical Firebase Storage bandwidth.
+    """
+    urls: list[str] = []
+    for char_data in bank.values():
+        for variant in char_data.get("variants") or []:
+            if isinstance(variant, dict):
+                url = variant.get("url")
+                if url and _glyph_cache_get(url) is None:
+                    urls.append(url)
+
+    if not urls:
+        return   # everything already cached
+
+    logger.info("prefetch_bank_images: downloading %d uncached glyph(s) in parallel", len(urls))
+
+    def _fetch_one(url: str) -> None:
+        try:
+            VariantPicker._download(url)   # stores result in _GLYPH_IMAGE_CACHE
+        except Exception as exc:
+            logger.debug("prefetch failed for %s: %s", url, exc)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_fetch_one, url): url for url in urls}
+        for fut in as_completed(futures):
+            try:
+                fut.result()
+            except Exception:
+                pass   # _fetch_one already logs; swallow here too
 
 
 # ---------------------------------------------------------------------------
 # Jitter and ink simulation
 # ---------------------------------------------------------------------------
 
-def apply_jitter(char_img: np.ndarray) -> tuple[np.ndarray, int]:
+def apply_jitter(char_img: np.ndarray, fast_mode: bool = False) -> tuple[np.ndarray, int]:
     """
     Apply small random geometric perturbations to a character image so that
     repeated glyphs look hand-drawn rather than stamped.
@@ -366,7 +465,7 @@ def apply_jitter(char_img: np.ndarray) -> tuple[np.ndarray, int]:
     Transformations (applied in order)
     -----------------------------------
     1. Rotation  : uniform(-2.0, +2.0) degrees, expand=True so no corner clipping
-    2. Scale     : uniform(0.97, 1.03) — resize with LANCZOS
+    2. Scale     : uniform(0.97, 1.03) — LANCZOS (quality) or BILINEAR (fast_mode)
     3. H-padding : randint(-1, +2) transparent pixels appended to the right edge
                    (negative clamped to 0 — "do not clip" rule)
     4. V-offset  : randint(-3, +3) — NOT applied to the image; returned as int
@@ -377,6 +476,9 @@ def apply_jitter(char_img: np.ndarray) -> tuple[np.ndarray, int]:
     ----------
     char_img : np.ndarray
         RGBA source image (H × W × 4, uint8).
+    fast_mode : bool
+        When True uses BILINEAR resampling instead of BICUBIC/LANCZOS.
+        Imperceptibly different at preview resolution; ~2× faster.
 
     Returns
     -------
@@ -397,10 +499,11 @@ def apply_jitter(char_img: np.ndarray) -> tuple[np.ndarray, int]:
     # PIL.Image.rotate with expand=True enlarges the canvas so no corner
     # of the glyph is clipped.  The new background pixels are (0,0,0,0)
     # (transparent) because we are in RGBA mode.
+    resample = Image.BILINEAR if fast_mode else Image.BICUBIC
     angle = random.uniform(-2.0, 2.0)
     pil_img = pil_img.rotate(
         angle,
-        resample=Image.BICUBIC,
+        resample=resample,
         expand=True,
         fillcolor=(0, 0, 0, 0),
     )
@@ -411,7 +514,7 @@ def apply_jitter(char_img: np.ndarray) -> tuple[np.ndarray, int]:
     scale  = random.uniform(0.97, 1.03)
     new_w  = max(1, round(pil_img.width  * scale))
     new_h  = max(1, round(pil_img.height * scale))
-    pil_img = pil_img.resize((new_w, new_h), Image.LANCZOS)
+    pil_img = pil_img.resize((new_w, new_h), Image.BILINEAR if fast_mode else Image.LANCZOS)
 
     # ------------------------------------------------------------------
     # Step 3 — Horizontal spacing jitter (right-side transparent padding)
@@ -1009,6 +1112,7 @@ def compose_line(
     direction: str = "rtl",
     style: "dict | None" = None,
     ink_color: str = "black",
+    fast_mode: bool = False,
 ) -> np.ndarray:
     """
     Render a single line of text as an RGBA numpy array.
@@ -1075,13 +1179,19 @@ def compose_line(
                         scale   = target_h / raw_h
                         new_w   = max(1, round(raw_w * scale))
                         pil_raw = Image.fromarray(raw, "RGBA")
-                        pil_raw = pil_raw.resize((new_w, target_h), Image.LANCZOS)
+                        # fast_mode: BILINEAR is ~2× faster than LANCZOS;
+                        # imperceptible difference at preview display sizes.
+                        resample = Image.BILINEAR if fast_mode else Image.LANCZOS
+                        pil_raw = pil_raw.resize((new_w, target_h), resample)
                         raw     = np.array(pil_raw, dtype=np.uint8)
-                    # Normalize stroke width so all glyphs have consistent weight
-                    raw = normalize_stroke_width(raw, target_char_h_global)
+                    # Normalize stroke width — skip in fast_mode (preview):
+                    # distance transform on each glyph costs ~3-5 ms; at 200+
+                    # chars/page that's ~600-1000 ms.  Imperceptible at preview size.
+                    if not fast_mode:
+                        raw = normalize_stroke_width(raw, target_char_h_global)
                     logger.debug("compose_line: char=%r  raw=%dx%d → scaled=%dx%d (h_ratio=%.2f)",
                                  ch, raw_h, raw_w, raw.shape[0], raw.shape[1], h_ratio)
-                    jittered, v_off = apply_jitter(raw)
+                    jittered, v_off = apply_jitter(raw, fast_mode=fast_mode)
                     inked           = apply_ink_simulation(jittered)
                     inked           = _recolor_glyph(inked, ink_color)
                     glyphs.append((inked, v_off))
@@ -1262,6 +1372,7 @@ def compose_paragraph(
     margin: int = 200,
     style: "dict | None" = None,
     ink_color: str = "black",
+    fast_mode: bool = False,
 ) -> list[np.ndarray]:
     """
     Lay out *text* into multiple lines that each fit within *page_width*.
@@ -1299,11 +1410,16 @@ def compose_paragraph(
         if not rendered_words:
             return []
 
-        word_sp_base = _style.get("word_spacing", _SPACE_WIDTH)
+        # Use None-sentinel so explicit 0 (slider at min) is honoured.
+        # Fallback to _SPACE_WIDTH only when the style key is absent entirely.
+        _raw_wsp_para = _style.get("word_spacing")
+        word_sp_base = float(_raw_wsp_para) if _raw_wsp_para is not None else float(_SPACE_WIDTH)
 
         def _rand_word_gap() -> int:
-            sigma = word_sp_base * 0.20
-            return max(round(word_sp_base * 0.60), int(random.gauss(word_sp_base, sigma)))
+            # Reduced sigma (15 % vs old 20 %) + no 60 % floor — makes spacing
+            # consistent across the line and lets slider=0 produce near-zero gaps.
+            sigma = word_sp_base * 0.15
+            return max(0, int(random.gauss(word_sp_base, sigma)))
 
         out_lines: list[np.ndarray] = []
         line_words: list[np.ndarray] = []
@@ -1351,7 +1467,7 @@ def compose_paragraph(
             chars = list(word)
             dir_  = _detect_direction(chars)
             rendered_words.append(
-                compose_line(chars, picker, dir_, style=_style, ink_color=ink_color)
+                compose_line(chars, picker, dir_, style=_style, ink_color=ink_color, fast_mode=fast_mode)
             )
 
         # ── Step 2: wrap words into lines ─────────────────────────────────────

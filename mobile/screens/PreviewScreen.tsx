@@ -760,6 +760,10 @@ export default function PreviewScreen({ navigation, route }: Props) {
   // idle with no current render (e.g. a previous render failed) — keeps the
   // transition on the fast path instead of a full re-render on FinalView.
   const [renderNonce, setRenderNonce] = useState(0);
+  // Drives the Finish button's waiting UI from the first tap, even before the
+  // forced render flips isServerRendering — fixes the "nothing happens on the
+  // first tap" feel.
+  const [isFinishing, setIsFinishing] = useState(false);
   const serverRenderAbortRef    = useRef<AbortController | null>(null);
   const serverRenderDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Last-resort timer: if a forced render never produces URLs, navigate anyway.
@@ -1046,6 +1050,7 @@ export default function PreviewScreen({ navigation, route }: Props) {
     const unsub = navigation.addListener('focus', () => {
       isFinishingRef.current = false;
       pendingFinishRef.current = false;
+      setIsFinishing(false);   // reset waiting UI when the user returns to edit
       unsub();
     });
   }, [navigation, editableText, liveGlyphMap, inkColor]);
@@ -1076,8 +1081,9 @@ export default function PreviewScreen({ navigation, route }: Props) {
 
     // No exact render yet. Wait for one instead of navigating with null (which
     // would force a slow full re-render on FinalView). The auto-navigate effect
-    // fires the moment URLs arrive. The button shows a "ממתין..." state.
+    // fires the moment URLs arrive. Show the waiting state immediately.
     pendingFinishRef.current = true;
+    setIsFinishing(true);
 
     // If nothing is currently rendering (e.g. a previous render failed), force
     // one immediately so the wait is bounded.
@@ -1095,6 +1101,10 @@ export default function PreviewScreen({ navigation, route }: Props) {
   }, [navigation, editableText, liveGlyphMap, inkColor, isServerRendering, serverPreviewUrls, doNavigateToFinalView]);
 
   // ── RENDER ─────────────────────────────────────────────────────────────────
+
+  // The Finish button waits while a server render is in flight OR while we've
+  // registered a pending finish that's waiting for the next render.
+  const waitingFinish = isServerRendering || isFinishing;
 
   return (
     <SafeAreaView style={styles.safe} edges={['bottom']}>
@@ -1351,17 +1361,17 @@ export default function PreviewScreen({ navigation, route }: Props) {
           <Pressable
             style={({ pressed }) => [
               styles.finishBtn,
-              pressed && !isServerRendering && styles.finishBtnPressed,
-              isServerRendering && styles.finishBtnWaiting,
+              pressed && !waitingFinish && styles.finishBtnPressed,
+              waitingFinish && styles.finishBtnWaiting,
             ]}
             onPress={() => { impactLight(); handleFinish(); }}
-            disabled={!isLoaded}
+            disabled={!isLoaded || waitingFinish}
             accessibilityRole="button"
-            accessibilityLabel={isServerRendering ? 'ממתין לתצוגה מדויקת...' : 'סיום עריכה'}
+            accessibilityLabel={waitingFinish ? 'ממתין לתצוגה מדויקת...' : 'סיום עריכה'}
             accessibilityHint="עובר למסך התוצאה הסופית עם אפשרויות שמירה ושיתוף"
-            accessibilityState={{ disabled: !isLoaded, busy: isServerRendering }}
+            accessibilityState={{ disabled: !isLoaded || waitingFinish, busy: waitingFinish }}
           >
-            {isServerRendering ? (
+            {waitingFinish ? (
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
                 <ActivityIndicator size="small" color="#FFFFFF" />
                 <Text style={styles.finishBtnText}>ממתין לתצוגה מדויקת...</Text>
