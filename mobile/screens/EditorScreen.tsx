@@ -137,6 +137,7 @@ export default function EditorScreen({ navigation }: Props) {
   const canConvert = text.trim().length > 0 && !loading;
 
   const handleConvert = useCallback(async () => {
+    Keyboard.dismiss();   // close the keyboard immediately on tap
     const now = Date.now();
     if (now - lastConvertTime < MIN_INTERVAL_MS) {
       setError(`אנא חכה ${Math.ceil((MIN_INTERVAL_MS - (now - lastConvertTime)) / 1000)} שניות`);
