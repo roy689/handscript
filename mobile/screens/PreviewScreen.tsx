@@ -951,57 +951,162 @@ export default function PreviewScreen({ navigation, route }: Props) {
   const pageBgRef = useRef<PageBg>(pageBg);
   useEffect(() => { pageBgRef.current = pageBg; }, [pageBg]);
 
-  // ── No continuous server render during editing ─────────────────────────────
-  // Rendering a full-resolution A4 page on every style/text change was the cause
-  // of the multi-minute lag and made editing unusable. Instead, the live canvas
-  // (instant, on-device) is the editing preview, and the server renders the page
-  // exactly ONCE when the user taps "סיום עריכה" — handled by FinalViewScreen,
-  // which shows a loading screen during that single render and persists the
-  // full-quality result. serverPreviewUrls therefore stays null here.
-  void renderNonce; // retained to avoid touching the unused-var lint elsewhere
+  // ── Background server render (debounced) ───────────────────────────────────
+  // Triggered by any committed style change (hs, not liveHs), text, ink, or bg.
+  // Calls /convert-both with preview=true (no usage increment) and stores the
+  // result in serverPreviewUrls. The render area then shows this exact image
+  // so the user sees the REAL final output, not just the canvas approximation —
+  // keeping the edit preview and the final document in sync.
+  // During slider drag (isDragging) the canvas stays visible for instant feedback.
+  useEffect(() => {
+    // Stale the current server preview immediately so the canvas reappears
+    // while we wait for the new render.
+    setServerPreviewUrls(null);
+
+    if (serverRenderDebounceRef.current) clearTimeout(serverRenderDebounceRef.current);
+
+    serverRenderDebounceRef.current = setTimeout(async () => {
+      // Cancel any previous in-flight request
+      serverRenderAbortRef.current?.abort();
+      const controller = new AbortController();
+      serverRenderAbortRef.current = controller;
+
+      const userId = getCurrentUserId();
+      if (!userId) return;
+
+      const token = await getAuthToken();
+      if (controller.signal.aborted) return;
+
+      setIsServerRendering(true);
+      try {
+        const res = await fetch(`${BACKEND_URL}/convert-both`, {
+          method:  'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          signal: controller.signal,
+          body: JSON.stringify({
+            text:       editableText,
+            user_id:    userId,
+            background: pageBgRef.current,
+            ink_color:  inkColor,
+            preview:    true,
+            style: {
+              char_height:     Math.round(40 + hs.charHeight * 0.9),
+              letter_spacing:  hs.letterSpacing * 0.30,
+              word_spacing:    Math.round(15 + hs.wordSpacing * 0.85),
+              baseline_jitter: hs.baselineJitter * 0.25,
+              slant:           hs.slant * 0.4,
+              ink_blobs:       hs.inkBlobs * 0.003,
+            },
+          }),
+        });
+        if (!res.ok || controller.signal.aborted) return;
+        const data = await res.json() as {
+          ok: boolean; clean_urls?: string[]; photo_urls?: string[];
+        };
+        if (controller.signal.aborted) return;
+        if (data.ok && data.clean_urls?.length && data.photo_urls?.length) {
+          setServerPreviewUrls({ clean: data.clean_urls, photo: data.photo_urls });
+        }
+      } catch {
+        // AbortError or network error — canvas stays visible, no error shown
+      } finally {
+        if (!controller.signal.aborted) setIsServerRendering(false);
+      }
+    }, 600);
+
+    return () => {
+      if (serverRenderDebounceRef.current) clearTimeout(serverRenderDebounceRef.current);
+      serverRenderAbortRef.current?.abort();
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hs, editableText, inkColor, pageBg, renderNonce]);
 
   // Guard against double-tap: ref is set synchronously on first press so a
   // second tap within the same JS frame is ignored — no state update needed.
   const isFinishingRef = useRef(false);
+  // Set when user taps Finish while a server render is in progress. The
+  // auto-navigate effect below navigates as soon as the exact URLs arrive.
+  const pendingFinishRef = useRef(false);
+
+  // Mirror serverPreviewUrls into a ref so the finish safety timer reads the
+  // latest value rather than the (possibly null) value captured at tap time.
+  const serverPreviewUrlsRef = useRef(serverPreviewUrls);
+  useEffect(() => { serverPreviewUrlsRef.current = serverPreviewUrls; }, [serverPreviewUrls]);
+
+  // Helper shared by handleFinish and the auto-navigate effect below.
+  const doNavigateToFinalView = useCallback((urls: { clean: string[]; photo: string[] } | null) => {
+    if (finishSafetyTimerRef.current) { clearTimeout(finishSafetyTimerRef.current); finishSafetyTimerRef.current = null; }
+    isFinishingRef.current = true;
+    navigation.push('FinalView', {
+      text:        editableText,
+      background:  pageBgRef.current,
+      glyphMap:    liveGlyphMap,
+      style:       pendingHsRef.current,
+      inkColor,
+      previewUrls: urls ?? undefined,
+    });
+    const unsub = navigation.addListener('focus', () => {
+      isFinishingRef.current = false;
+      pendingFinishRef.current = false;
+      setIsFinishing(false);   // reset waiting UI when the user returns to edit
+      unsub();
+    });
+  }, [navigation, editableText, liveGlyphMap, inkColor]);
+
+  // Auto-navigate when the in-progress server render completes and the user
+  // already tapped "Finish" while waiting.
+  useEffect(() => {
+    if (!pendingFinishRef.current || !serverPreviewUrls) return;
+    doNavigateToFinalView(serverPreviewUrls);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverPreviewUrls]);
 
   const handleFinish = useCallback(() => {
-    if (isFinishingRef.current) return;   // drop duplicate taps
-    isFinishingRef.current = true;
-    setIsFinishing(true);
+    if (isFinishingRef.current || pendingFinishRef.current) return;   // drop duplicate taps
 
-    // Flush any pending throttle so hs is fully up-to-date before we hand the
-    // style off to FinalView.
+    // Flush any pending throttle so hs is fully up-to-date.
     if (throttleRef.current) {
       clearTimeout(throttleRef.current);
       throttleRef.current = null;
       setHs({ ...pendingHsRef.current });
     }
 
-    // Navigate immediately — the transition is instant. FinalView performs the
-    // single full-quality server render behind its own loading screen and
-    // persists the result. No previewUrls are passed, so it always renders the
-    // authoritative final document.
-    navigation.push('FinalView', {
-      text:       editableText,
-      background: pageBgRef.current,
-      glyphMap:   liveGlyphMap,
-      style:      pendingHsRef.current,
-      inkColor,
-    });
+    // Fast path: an exact server render matching the current settings is ready
+    // — use it so the final document equals exactly what the user saw.
+    if (serverPreviewUrls) {
+      doNavigateToFinalView(serverPreviewUrls);
+      return;
+    }
 
-    // Allow finishing again after the user returns to this screen to edit.
-    const unsub = navigation.addListener('focus', () => {
-      isFinishingRef.current = false;
-      setIsFinishing(false);
-      unsub();
-    });
-  }, [navigation, editableText, liveGlyphMap, inkColor]);
+    // No exact render yet. Wait for one instead of navigating with null (which
+    // would force a slow full re-render on FinalView). The auto-navigate effect
+    // fires the moment URLs arrive. Show the waiting state immediately.
+    pendingFinishRef.current = true;
+    setIsFinishing(true);
+
+    // If nothing is currently rendering (e.g. a previous render failed), force
+    // one immediately so the wait is bounded.
+    if (!isServerRendering) setRenderNonce(n => n + 1);
+
+    // Safety net: never hang. If no render completes within 12s (repeated
+    // failure / offline), navigate with whatever we have. Guarded by
+    // isFinishingRef so it can't double-navigate after the auto-navigate effect.
+    if (finishSafetyTimerRef.current) clearTimeout(finishSafetyTimerRef.current);
+    finishSafetyTimerRef.current = setTimeout(() => {
+      if (pendingFinishRef.current && !isFinishingRef.current) {
+        doNavigateToFinalView(serverPreviewUrlsRef.current);
+      }
+    }, 12000);
+  }, [navigation, editableText, liveGlyphMap, inkColor, isServerRendering, serverPreviewUrls, doNavigateToFinalView]);
 
   // ── RENDER ─────────────────────────────────────────────────────────────────
 
-  // The button briefly reflects that a finish is underway (it navigates
-  // instantly, so this is mostly to disable a second tap).
-  const waitingFinish = isFinishing;
+  // The Finish button shows a waiting state while a server render is in flight
+  // OR while a finish is pending the next render.
+  const waitingFinish = isServerRendering || isFinishing;
 
   return (
     <SafeAreaView style={styles.safe} edges={['bottom']}>
