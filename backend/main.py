@@ -281,6 +281,26 @@ def _invalidate_bank_cache(user_id: str) -> None:
     _BANK_CACHE.pop(user_id, None)
 
 
+def _bank_subset_for_text(bank: dict, text: str) -> dict:
+    """
+    Return only the bank entries whose character actually appears in *text*.
+
+    Image prefetching downloads every variant of every returned entry. Limiting
+    the subset to the characters in the text (instead of the whole alphabet)
+    cuts the number of downloads dramatically — the dominant cost of a render,
+    especially on a cold worker where the module-level image cache is empty.
+    """
+    from modules.synthesizer import normalize_char
+    wanted: set[str] = set()
+    for c in text:
+        if c.strip():
+            wanted.add(c)
+            wanted.add(normalize_char(c))
+    if not wanted:
+        return {}
+    return {k: v for k, v in bank.items() if k in wanted or normalize_char(k) in wanted}
+
+
 app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
 
@@ -1667,8 +1687,10 @@ async def convert(body: ConvertRequest, uid: str = Depends(require_auth)):
         bank = firebase_client.load_character_bank(body.user_id)
         logger.info("convert: bank_size=%d text_len=%d", len(bank), len(body.text))
 
-        # Prefetch all variant images in parallel before synthesis.
-        await asyncio.to_thread(prefetch_bank_images, bank)
+        # Prefetch only the variant images for characters in this text, in
+        # parallel before synthesis (the whole-alphabet prefetch was the main
+        # cold-render bottleneck).
+        await asyncio.to_thread(prefetch_bank_images, _bank_subset_for_text(bank, body.text))
 
         # 2. Validate coverage
         result = validate_text(body.text, bank)
@@ -1943,12 +1965,13 @@ async def convert_both(body: ConvertBothRequest, uid: str = Depends(require_auth
         bank = _load_bank_cached(body.user_id) if body.preview else firebase_client.load_character_bank(body.user_id)
         logger.info("convert-both: bank_size=%d text_len=%d preview=%s", len(bank), len(body.text), body.preview)
 
-        # Download all variant images in parallel before synthesis so the
+        # Download only the variant images for characters that appear in this
+        # text (not the whole alphabet) in parallel before synthesis, so the
         # compose_paragraph loop never blocks on a sequential network request.
-        # On the first call this converts ~55 s of sequential downloads into
-        # ~3-5 s of parallel downloads.  On subsequent calls everything hits
-        # the module-level cache and completes in ~0 ms.
-        await asyncio.to_thread(prefetch_bank_images, bank)
+        # Limiting to the text's characters is the biggest single speed-up for
+        # a cold-worker render. On subsequent calls everything hits the
+        # module-level cache and completes in ~0 ms.
+        await asyncio.to_thread(prefetch_bank_images, _bank_subset_for_text(bank, body.text))
 
         result = validate_text(body.text, bank)
         if not result["ok"]:
