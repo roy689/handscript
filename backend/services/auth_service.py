@@ -8,10 +8,13 @@ Firebase REST docs:
   https://firebase.google.com/docs/reference/rest/auth
 """
 
+import asyncio
 import logging
 import os
 
 import httpx
+
+from services import email_service
 
 logger = logging.getLogger(__name__)
 
@@ -200,55 +203,89 @@ async def refresh_id_token(refresh_token: str) -> dict:
     }
 
 
-async def send_password_reset(email: str) -> bool:
+async def _firebase_send_oob(payload: dict) -> bool:
     """
-    Send a password-reset email.
-
-    Returns True if the Firebase request succeeded, False on network/timeout
-    failures.  Never raises — and never reveals whether the email address
-    exists in the system (the caller always returns ok=True to the client).
+    Fallback: ask Firebase to generate AND send the email itself
+    (used only when custom SMTP is not configured). Never raises.
     """
     _check_api_key()
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             r = await client.post(
                 f"{_ID_TOOLKIT}:sendOobCode?key={FIREBASE_WEB_API_KEY}",
-                json={"requestType": "PASSWORD_RESET", "email": email},
+                json=payload,
             )
         if r.status_code != 200:
-            logger.warning("password_reset: Firebase returned %d", r.status_code)
+            logger.warning("sendOobCode: Firebase returned %d: %s", r.status_code, r.text[:200])
             return False
         return True
     except (httpx.HTTPError, httpx.TimeoutException) as exc:
-        logger.warning("password_reset request failed: %s", exc)
+        logger.warning("sendOobCode request failed: %s", exc)
         return False
+
+
+async def send_password_reset(email: str) -> bool:
+    """
+    Send a password-reset email with the custom HandScript HTML template.
+
+    Flow: generate the reset link via the Admin SDK (no email is sent by
+    Firebase), then deliver our own designed email through SMTP. Falls back to
+    Firebase's default delivery when SMTP is not configured.
+
+    Returns True on success, False on failure. Never raises — and never reveals
+    whether the email exists (the caller always returns ok=True to the client).
+    """
+    email = email.strip().lower()
+
+    # No custom SMTP → let Firebase generate and send its default template.
+    if not email_service.is_configured():
+        return await _firebase_send_oob({"requestType": "PASSWORD_RESET", "email": email})
+
+    try:
+        import firebase_admin.auth as fb_auth
+        try:
+            link = await asyncio.to_thread(fb_auth.generate_password_reset_link, email)
+        except fb_auth.UserNotFoundError:
+            # Email not registered — silently succeed to prevent enumeration.
+            logger.info("password_reset: no account for that address — skipping send")
+            return True
+    except Exception as exc:
+        logger.error("password_reset: link generation failed: %s", exc)
+        return False
+
+    return await asyncio.to_thread(email_service.send_password_reset_email, email, link)
 
 
 async def send_email_verification(id_token: str) -> bool:
     """
-    Send an email-verification link to the user identified by id_token.
+    Send an email-verification link with the custom HandScript HTML template.
 
-    Uses Firebase Identity Toolkit sendOobCode with requestType=VERIFY_EMAIL.
-    Returns True on success, False on network / Firebase error.
-    Never raises — a failed send must not abort the signup flow.
+    Flow: resolve the user's email from the id_token via the Admin SDK, generate
+    the verification link (no email is sent by Firebase), then deliver our own
+    designed email through SMTP. Falls back to Firebase's default delivery when
+    SMTP is not configured.
+
+    Returns True on success, False on error. Never raises — a failed send must
+    not abort the signup flow.
     """
-    _check_api_key()
+    # No custom SMTP → let Firebase generate and send its default template.
+    if not email_service.is_configured():
+        return await _firebase_send_oob({"requestType": "VERIFY_EMAIL", "idToken": id_token})
+
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.post(
-                f"{_ID_TOOLKIT}:sendOobCode?key={FIREBASE_WEB_API_KEY}",
-                json={"requestType": "VERIFY_EMAIL", "idToken": id_token},
-            )
-        if r.status_code != 200:
-            logger.warning(
-                "send_email_verification: Firebase returned %d: %s",
-                r.status_code, r.text[:200],
-            )
+        import firebase_admin.auth as fb_auth
+        decoded = await asyncio.to_thread(fb_auth.verify_id_token, id_token)
+        user    = await asyncio.to_thread(fb_auth.get_user, decoded["uid"])
+        email   = (user.email or "").strip().lower()
+        if not email:
+            logger.warning("send_email_verification: user has no email on record")
             return False
-        return True
-    except (httpx.HTTPError, httpx.TimeoutException) as exc:
-        logger.warning("send_email_verification request failed: %s", exc)
+        link = await asyncio.to_thread(fb_auth.generate_email_verification_link, email)
+    except Exception as exc:
+        logger.error("send_email_verification: link generation failed: %s", exc)
         return False
+
+    return await asyncio.to_thread(email_service.send_verification_email, email, link)
 
 
 def check_email_verified(uid: str) -> bool:
