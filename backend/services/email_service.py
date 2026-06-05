@@ -10,26 +10,25 @@ emails, the backend:
      returns the link WITHOUT Firebase sending any email.
   2. Sends our own fully-designed HTML email through SMTP (Gmail).
 
-SMTP configuration is read from environment variables (never hard-coded):
+Delivery uses the Brevo (Sendinblue) transactional email HTTP API over HTTPS
+(port 443) instead of raw SMTP. This is required because Railway blocks outbound
+SMTP ports (25/465/587) — direct SMTP fails with "Network is unreachable".
 
-  SMTP_HOST       e.g. smtp.gmail.com
-  SMTP_PORT       e.g. 587
-  SMTP_USERNAME   the full Gmail address
-  SMTP_PASSWORD   the 16-char Gmail App Password (NOT the account password)
-  SMTP_FROM       the From address (defaults to SMTP_USERNAME)
-  SMTP_FROM_NAME  display name (default "HandScript")
-  SMTP_SECURITY   "starttls" (port 587, default) or "ssl" (port 465)
+Configuration is read from environment variables (never hard-coded):
 
-If SMTP is not fully configured, is_configured() returns False so callers can
-fall back to Firebase's default delivery.
+  BREVO_API_KEY       the Brevo API key (SMTP & API → API Keys)
+  BREVO_SENDER_EMAIL  verified sender address (falls back to SMTP_FROM / SMTP_USERNAME)
+  EMAIL_FROM_NAME     display name (falls back to SMTP_FROM_NAME, default "HandScript")
+
+The sender address must be verified in Brevo (Senders & IP → Senders).
+If not fully configured, is_configured() returns False so callers can fall back
+to Firebase's default delivery.
 """
 
 import logging
 import os
-import smtplib
-import ssl
-from email.message import EmailMessage
-from email.utils import formataddr
+
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -38,65 +37,70 @@ logger = logging.getLogger(__name__)
 # Configuration
 # ---------------------------------------------------------------------------
 
+BREVO_API_URL = "https://api.brevo.com/v3/smtp/email"
+
+
 def _cfg() -> dict:
     return {
-        "host":      os.getenv("SMTP_HOST", "").strip(),
-        "port":      int(os.getenv("SMTP_PORT", "587") or "587"),
-        "username":  os.getenv("SMTP_USERNAME", "").strip(),
-        "password":  os.getenv("SMTP_PASSWORD", ""),
-        "from_addr": (os.getenv("SMTP_FROM", "") or os.getenv("SMTP_USERNAME", "")).strip(),
-        "from_name": os.getenv("SMTP_FROM_NAME", "HandScript").strip(),
-        "security":  os.getenv("SMTP_SECURITY", "starttls").strip().lower(),
+        "api_key":   os.getenv("BREVO_API_KEY", "").strip(),
+        "from_addr": (
+            os.getenv("BREVO_SENDER_EMAIL", "")
+            or os.getenv("SMTP_FROM", "")
+            or os.getenv("SMTP_USERNAME", "")
+        ).strip(),
+        "from_name": (
+            os.getenv("EMAIL_FROM_NAME", "")
+            or os.getenv("SMTP_FROM_NAME", "")
+            or "HandScript"
+        ).strip(),
     }
 
 
 def is_configured() -> bool:
-    """True only when the minimum SMTP settings are present."""
+    """True only when the Brevo API key and a sender address are present."""
     c = _cfg()
-    return bool(c["host"] and c["username"] and c["password"] and c["from_addr"])
+    return bool(c["api_key"] and c["from_addr"])
 
 
 # ---------------------------------------------------------------------------
-# Low-level SMTP send (blocking — call via asyncio.to_thread)
+# Low-level send via Brevo HTTP API (blocking — call via asyncio.to_thread)
 # ---------------------------------------------------------------------------
 
 def send_html(to_addr: str, subject: str, html: str) -> bool:
     """
-    Send a single HTML email. Returns True on success, False on any failure.
-    Never raises — email delivery must not crash the auth flow.
+    Send a single HTML email through the Brevo HTTP API (HTTPS, port 443).
+    Returns True on success, False on any failure. Never raises — email
+    delivery must not crash the auth flow.
     """
     if not is_configured():
-        logger.warning("email_service: SMTP not configured — cannot send")
+        logger.warning("email_service: Brevo not configured — cannot send")
         return False
 
     c = _cfg()
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"]    = formataddr((c["from_name"], c["from_addr"]))
-    msg["To"]      = to_addr
-    # Plain-text fallback for clients that don't render HTML.
-    msg.set_content(
-        "המייל הזה מכיל תוכן HTML. אם אינך רואה אותו, פתח אותו בלקוח דואר שתומך ב-HTML."
-    )
-    msg.add_alternative(html, subtype="html")
+    payload = {
+        "sender": {"name": c["from_name"], "email": c["from_addr"]},
+        "to":     [{"email": to_addr}],
+        "subject": subject,
+        "htmlContent": html,
+    }
+    headers = {
+        "api-key":      c["api_key"],
+        "Content-Type": "application/json",
+        "accept":       "application/json",
+    }
 
     try:
-        if c["security"] == "ssl":
-            context = ssl.create_default_context()
-            with smtplib.SMTP_SSL(c["host"], c["port"], context=context, timeout=15) as s:
-                s.login(c["username"], c["password"])
-                s.send_message(msg)
-        else:  # starttls (default)
-            with smtplib.SMTP(c["host"], c["port"], timeout=15) as s:
-                s.ehlo()
-                s.starttls(context=ssl.create_default_context())
-                s.ehlo()
-                s.login(c["username"], c["password"])
-                s.send_message(msg)
-        logger.info("email_service: sent %r to recipient", subject)
-        return True
-    except (smtplib.SMTPException, OSError) as exc:
-        logger.error("email_service: send failed: %s", exc)
+        r = requests.post(BREVO_API_URL, json=payload, headers=headers, timeout=15)
+        if r.status_code in (200, 201, 202):
+            logger.info("email_service: sent %r via Brevo", subject)
+            return True
+        logger.error(
+            "email_service: Brevo send failed: HTTP %s %s",
+            r.status_code, r.text[:300],
+        )
+        return False
+    except requests.RequestException as exc:
+        logger.error("email_service: Brevo request error: %s", exc)
         return False
 
 
