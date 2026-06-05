@@ -21,9 +21,16 @@ import {
   signInWithGoogle,
   isGoogleSignInAvailable,
 } from '../src/services/auth';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { fonts, radius } from '../src/theme';
 import { useTheme } from '../src/contexts/ThemeContext';
 import { impactLight, impactMedium } from '../src/utils/haptics';
+
+/** Navigate to Tutorial on first use, MainTabs on return visits. */
+async function navigateAfterAuth(navigation: Props['navigation']) {
+  const seen = await AsyncStorage.getItem('@hs_tutorial_seen').catch(() => null);
+  navigation.reset({ index: 0, routes: [{ name: seen ? 'MainTabs' : 'Tutorial' }] });
+}
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Onboarding'>;
 
@@ -88,11 +95,19 @@ export default function OnboardingScreen({ navigation }: Props) {
     setLoading(true);
     try {
       if (mode === 'signup') {
-        await signUpWithEmail(email.trim(), password);
+        const result = await signUpWithEmail(email.trim(), password);
+        // Never navigate to MainTabs on signup — user must verify email first.
+        navigation.navigate('VerifyEmail', {
+          email:        result.email,
+          uid:          result.uid,
+          idToken:      result.idToken,
+          refreshToken: result.refreshToken,
+          expiresIn:    result.expiresIn,
+        });
       } else {
         await signInWithEmail(email.trim(), password);
+        await navigateAfterAuth(navigation);
       }
-      navigation.reset({ index: 0, routes: [{ name: 'MainTabs' }] });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       setError(msg || 'שגיאה בהתחברות. נסה שנית');
@@ -107,7 +122,7 @@ export default function OnboardingScreen({ navigation }: Props) {
     setLoading(true);
     try {
       await signInWithGoogle();
-      navigation.reset({ index: 0, routes: [{ name: 'MainTabs' }] });
+      await navigateAfterAuth(navigation);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       // Quiet cancellation — don't show an error banner for user-initiated cancel

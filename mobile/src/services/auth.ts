@@ -112,20 +112,70 @@ async function _post<T>(path: string, body: object): Promise<T> {
 }
 
 type _AuthResponse = {
+  idToken:       string;
+  refreshToken:  string;
+  expiresIn:     string;
+  uid:           string;
+  email:         string;
+  email_verified?: boolean;
+};
+
+/** Returned by signUpWithEmail — contains all data needed for VerifyEmailScreen. */
+export type SignUpResult = {
+  uid:          string;
+  email:        string;
   idToken:      string;
   refreshToken: string;
   expiresIn:    string;
-  uid:          string;
-  email:        string;
+  emailVerified: boolean;
 };
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-export async function signUpWithEmail(email: string, password: string): Promise<AuthUser> {
+/**
+ * Create a new account and trigger email verification.
+ *
+ * Deliberately does NOT save a session — the user must verify their email
+ * before the app lets them in. Call `completeSignUp` after the user confirms
+ * verification to save the session and get an AuthUser.
+ */
+export async function signUpWithEmail(email: string, password: string): Promise<SignUpResult> {
   const data = await _post<_AuthResponse>('/auth/signup', { email, password });
-  await auth._saveSession(data);
+  return {
+    uid:           data.uid,
+    email:         data.email,
+    idToken:       data.idToken,
+    refreshToken:  data.refreshToken,
+    expiresIn:     data.expiresIn,
+    emailVerified: data.email_verified ?? false,
+  };
+}
+
+/**
+ * Finalise sign-up after the user has verified their email.
+ * Saves the session that signUpWithEmail deliberately withheld.
+ */
+export async function completeSignUp(result: SignUpResult): Promise<AuthUser> {
+  await auth._saveSession(result);
   if (!auth.currentUser) throw new Error('Session initialization failed');
   return auth.currentUser;
+}
+
+/**
+ * Check (via backend) whether the user has clicked the verification link.
+ * Returns true if verified, false if not yet verified.
+ */
+export async function checkEmailVerification(uid: string): Promise<boolean> {
+  const data = await _post<{ verified: boolean }>('/auth/check-verification', { uid });
+  return data.verified;
+}
+
+/**
+ * Re-send the verification email using the idToken from the original signup.
+ * The backend is rate-limited to 3 resends per IP per minute.
+ */
+export async function resendVerificationEmail(idToken: string): Promise<void> {
+  await _post('/auth/resend-verification', { id_token: idToken });
 }
 
 export async function signInWithEmail(email: string, password: string): Promise<AuthUser> {
@@ -169,6 +219,19 @@ export async function resetPassword(email: string): Promise<void> {
  *   - 'CANCELED' if the user dismisses the picker
  *   - Hebrew error message on backend failures
  */
+/**
+ * Record that the user accepted the Terms of Service.
+ * Saves to Firestore (legal record) via the backend.
+ * Non-critical — caller should .catch(() => {}) if needed.
+ */
+export async function acceptTerms(version: string): Promise<void> {
+  const user = auth.currentUser;
+  if (!user) return; // no session yet — skip Firestore write
+  const idToken = await user.getIdToken().catch(() => null);
+  if (!idToken) return;
+  await _post('/auth/accept-terms', { id_token: idToken, version });
+}
+
 export async function signInWithGoogle(): Promise<AuthUser> {
   if (!isGoogleSignInAvailable()) {
     throw new Error(

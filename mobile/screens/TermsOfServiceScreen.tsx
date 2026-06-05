@@ -86,7 +86,22 @@ export default function TermsOfServiceScreen() {
         </View>
 
         {/* 5 */}
-        <Text style={styles.sectionTitle}>5. קניין רוחני</Text>
+        <Text style={styles.sectionTitle}>5. כתב יד כנתון רגיש</Text>
+        <View style={styles.card}>
+          <Text style={styles.body}>
+            תמונות כתב היד שאתם מעלים עשויות להיחשב כנתון רגיש או ביומטרי
+            בחלק ממדינות העולם (לרבות מדינות מסוימות בארה"ב כגון אילינוי,
+            טקסס וושינגטון).{'\n\n'}
+            אנו מאחסנים את תמונות כתב ידכם אך ורק לצורך מתן השירות שביקשתם
+            ולא לכל מטרה אחרת. איננו מעבירים תמונות אלה לצדדים שלישיים
+            למטרות מסחריות.{'\n\n'}
+            בשימוש בשירות ובהעלאת תמונות כתב יד, אתם מסכימים לעיבוד הנתונים
+            הרגישים האמורים לצורכי השירות בלבד, בהתאם למדיניות הפרטיות.
+          </Text>
+        </View>
+
+        {/* 5b */}
+        <Text style={styles.sectionTitle}>5ב. קניין רוחני</Text>
         <View style={styles.card}>
           <Text style={styles.subTitle}>קניין HandScript IR</Text>
           <Text style={styles.body}>
@@ -122,6 +137,19 @@ export default function TermsOfServiceScreen() {
             תכנית Pro (בתשלום) תציע מכסה מורחבת. תנאי התשלום יפורסמו בעת
             השקת התכנית.{'\n\n'}
             אין החזרים על שימוש שכבר בוצע, למעט כנדרש על פי דין.
+          </Text>
+          <View style={styles.divider} />
+          <Text style={styles.subTitle}>רכישות דרך חנות האפליקציות</Text>
+          <Text style={styles.body}>
+            רכישות ומנויים המבוצעים דרך Apple App Store מתנהלות אך ורק לפי
+            תנאי Apple ומדיניות החזר הכספי שלה. ביטול מנוי פעיל יש לבצע
+            דרך הגדרות החשבון ב-App Store, ולא דרך מסך ההגדרות של האפליקציה.{'\n\n'}
+            רכישות ומנויים המבוצעים דרך Google Play מתנהלות אך ורק לפי
+            תנאי Google. ביטול מנוי יש לבצע דרך Google Play.{'\n\n'}
+            מנוי Pro מתחדש אוטומטית עד לביטולו. יש לבטל לפחות 24 שעות לפני
+            מועד החידוש כדי למנוע חיוב נוסף.{'\n\n'}
+            תנאי Apple: apple.com/legal/internet-services/itunes/il/terms.html{'\n'}
+            תנאי Google Play: play.google.com/intl/en_us/about/play-terms/index.html
           </Text>
         </View>
 
@@ -202,6 +230,17 @@ export default function TermsOfServiceScreen() {
         {/* 11 */}
         <Text style={styles.sectionTitle}>11. הוראות כלליות</Text>
         <View style={styles.card}>
+          <Text style={styles.subTitle}>כוח עליון</Text>
+          <Text style={styles.body}>
+            לא נהיה אחראים לאי-מתן השירות או לעיכוב במתן השירות עקב
+            אירועים שמחוץ לשליטתנו הסבירה, לרבות: אסון טבע, מלחמה, מגפה,
+            שיבוש בשירותי ענן (כגון Google Firebase), הפסקת שירות של ספק
+            תקשורת, פעולות ממשלתיות, או כל גורם חיצוני אחר שלא ניתן לצפות
+            מראש ולמנוע בנקיטת אמצעים סבירים.{'\n\n'}
+            אם אירוע כוח עליון נמשך מעבר ל-90 יום, כל אחד מהצדדים רשאי לסיים
+            את ההתקשרות ללא חבות.
+          </Text>
+          <View style={styles.divider} />
           <Text style={styles.subTitle}>הדין החל וסמכות שיפוט</Text>
           <Text style={styles.body}>
             תנאים אלה כפופים לדיני מדינת ישראל. כל סכסוך הנובע מתנאים אלה
@@ -248,7 +287,7 @@ export default function TermsOfServiceScreen() {
 
 function getStyles(colors: ThemeColors) {
   return StyleSheet.create({
-    safe:   { flex: 1, backgroundColor: colors.bgPage },
+    safe:   { flex: 1, backgroundColor: colors.bgPage, direction: 'rtl' },
     scroll: { paddingHorizontal: 20, paddingTop: 12 },
 
     updated: {

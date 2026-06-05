@@ -19,6 +19,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
+import { auth } from '../src/services/firebase';
 import { fonts } from '../src/theme';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Tutorial'>;
@@ -42,9 +43,9 @@ const SLIDES = [
     emoji:    '📷',
     bg:       '#0A1628',
     accent:   '#7EC8E3',
-    title:    'שלב 1 — צלם את האותיות שלך',
-    body:     'לך למסך "מאגר", לחץ על כל אות, וצלם אותה בכתב ידך. ככל שתצלם יותר דגימות לכל אות — כך הפונט יהיה טבעי ואמין יותר.',
-    tip:      '💡 מספיק 3 צילומים לאות כדי להתחיל',
+    title:    'שלב 1 — צלם או צייר את האותיות',
+    body:     'לך למסך "מאגר" ולחץ על כל אות. תוכל לצלם אותה בכתב ידך, או לצייר אותה ישירות עם האצבע במסך. ככל שתוסיף יותר דגימות לכל אות — כך הפונט יהיה טבעי ואמין יותר.',
+    tip:      '💡 מספיק 3 דגימות לאות כדי להתחיל',
   },
   {
     key:      '3',
@@ -112,9 +113,16 @@ export default function TutorialScreen({ navigation }: Props) {
   };
 
   // ── Finish: save flag + navigate away (no back) ───────────────────────────
+  // If the user is already logged in (returning user) → MainTabs.
+  // If the user is not logged in (new user flow: Terms → Tutorial → Onboarding)
+  // → Onboarding so they can create an account.
   const finish = async () => {
     await markTutorialSeen();
-    navigation.reset({ index: 0, routes: [{ name: 'MainTabs' }] });
+    if (auth.currentUser) {
+      navigation.reset({ index: 0, routes: [{ name: 'MainTabs' }] });
+    } else {
+      navigation.reset({ index: 0, routes: [{ name: 'Onboarding' }] });
+    }
   };
 
   return (
@@ -198,7 +206,7 @@ export default function TutorialScreen({ navigation }: Props) {
           accessibilityRole="button"
           accessibilityLabel={isLast ? 'התחל להשתמש באפליקציה' : 'השקף הבא'}
         >
-          <Text style={styles.btnText}>{isLast ? '🚀  בואנו!' : 'הבא  ←'}</Text>
+          <Text style={styles.btnText}>{isLast ? '🚀  בוא נתחיל!' : 'הבא  ←'}</Text>
         </Pressable>
 
       </SafeAreaView>

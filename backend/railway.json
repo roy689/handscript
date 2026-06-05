@@ -5,10 +5,10 @@
           "dockerfilePath": "Dockerfile"
     },
     "deploy": {
-          "startCommand": "sh -c 'gunicorn main:app -k uvicorn.workers.UvicornWorker -w ${WEB_CONCURRENCY:-2} --bind 0.0.0.0:${PORT:-8000} --timeout 120 --graceful-timeout 30 --max-requests 1000 --max-requests-jitter 100 --access-logfile - --error-logfile -'",
+          "startCommand": "sh -c 'gunicorn main:app -k uvicorn.workers.UvicornWorker -w ${WEB_CONCURRENCY:-2} --bind 0.0.0.0:${PORT:-8000} --timeout 300 --graceful-timeout 60 --max-requests 1000 --max-requests-jitter 100 --access-logfile - --error-logfile - --preload'",
           "restartPolicyType": "ON_FAILURE",
           "restartPolicyMaxRetries": 10,
           "healthcheckPath": "/health",
-          "healthcheckTimeout": 30
+          "healthcheckTimeout": 120
     }
 }

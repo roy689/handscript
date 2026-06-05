@@ -171,8 +171,18 @@ export async function fetchJSON<T>(
     if (!res.ok) {
       let detail = '';
       try {
-        const body = await res.json() as { detail?: string; error?: string };
-        detail = body.detail ?? body.error ?? '';
+        const body = await res.json() as { detail?: unknown; error?: string };
+        if (typeof body.detail === 'string') {
+          detail = body.detail;
+        } else if (Array.isArray(body.detail)) {
+          // Pydantic validation errors: [{loc, msg, type}, ...]
+          detail = (body.detail as Array<{ msg?: string }>)
+            .map(d => d.msg ?? '')
+            .filter(Boolean)
+            .join(', ');
+        } else if (body.error) {
+          detail = body.error;
+        }
       } catch {
         // ignore parse failure on error body
       }

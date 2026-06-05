@@ -8,11 +8,13 @@ import {
   View,
 } from 'react-native';
 import { showAlert } from '../src/utils/alert';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
 import { auth } from '../src/services/firebase';
 import { signOut } from '../src/services/auth';
+import { TERMS_STORAGE_KEY } from './TermsAcceptanceScreen';
 import { useTheme, type ThemeColors } from '../src/contexts/ThemeContext';
 import { fonts, radius, shadow } from '../src/theme';
 import { BACKEND_URL } from '../src/config';
@@ -74,18 +76,38 @@ export default function ProfileScreen({ navigation }: Props) {
             try {
               const token = await auth.currentUser?.getIdToken();
               const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-              // Delete user data + Firebase Auth account via backend
-              const [r1, r2] = await Promise.all([
-                fetch(`${BACKEND_URL}/user/${uid}`,      { method: 'DELETE', headers }),
-                fetch(`${BACKEND_URL}/auth/account`,     { method: 'DELETE', headers }),
-              ]);
-              if (!r1.ok || !r2.ok) {
-                throw new Error('המחיקה נכשלה. נסו שוב או צרו קשר.');
+
+              // Step 1: Delete all user DATA first (while the auth token is still valid).
+              // Running this before deleting the Firebase Auth account avoids a race
+              // condition where the token gets invalidated mid-request.
+              const r1 = await fetch(`${BACKEND_URL}/user/${uid}`, { method: 'DELETE', headers });
+              if (!r1.ok) {
+                throw new Error('מחיקת הנתונים נכשלה. נסה שנית.');
               }
+
+              // Step 2: Delete the Firebase Auth account itself.
+              const r2 = await fetch(`${BACKEND_URL}/auth/account`, { method: 'DELETE', headers });
+              if (!r2.ok) {
+                throw new Error('מחיקת החשבון נכשלה. נסה שנית.');
+              }
+
+              // Step 3: Wipe ALL local app data so a new registration with the
+              // same email starts completely fresh — no stale badges or tutorial flags.
+              // Wipe ALL local app data so a new registration starts completely
+              // fresh — no stale badges, tutorial flags, or terms acceptance.
+              // TERMS_STORAGE_KEY must be cleared so the new account is prompted
+              // to accept the policy even if it uses the same email address.
+              await AsyncStorage.multiRemove([
+                'character_status',
+                '@hs_tutorial_seen',
+                TERMS_STORAGE_KEY,
+              ]).catch(() => {});
+
               await auth.signOut();
               navigation.reset({ index: 0, routes: [{ name: 'Onboarding' }] });
             } catch (err: unknown) {
-              showAlert('שגיאה', 'מחיקת החשבון נכשלה. נסה שנית.');
+              const msg = err instanceof Error ? err.message : 'מחיקת החשבון נכשלה. נסה שנית.';
+              showAlert('שגיאה', msg);
             } finally {
               setDeletingAcc(false);
             }

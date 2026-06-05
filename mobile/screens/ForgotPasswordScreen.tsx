@@ -168,6 +168,9 @@ export default function ForgotPasswordScreen({ navigation }: Props) {
                 <Text style={styles.emailHighlight}>{email.trim()}</Text>
                 {'\n'}בדוק את תיבת הדואר שלך.
               </Text>
+              <Text style={styles.spamNote}>
+                לא קיבלת? בדוק גם את תיבת הספאם 📁
+              </Text>
 
               <Pressable
                 style={({ pressed }) => [
@@ -244,6 +247,14 @@ function getStyles(colors: ReturnType<typeof useTheme>['colors']) {
     emailHighlight: {
       fontFamily: fonts.semiBold,
       color:      'rgba(255,255,255,0.75)',
+    },
+    spamNote: {
+      fontSize:         13,
+      fontFamily:       fonts.regular,
+      color:            'rgba(255,255,255,0.35)',
+      textAlign:        'center',
+      writingDirection: 'rtl',
+      marginTop:        -8,
     },
     successIcon: {
       fontSize:   36,

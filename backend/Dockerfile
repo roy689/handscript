@@ -31,4 +31,4 @@ EXPOSE 8000
 # - --max-requests 1000 recycles workers to bound memory growth (OpenCV/PIL leaks).
 # - --graceful-timeout 30 lets in-flight requests finish during Railway redeploys.
 # - Logs to stdout/stderr so Railway captures them.
-CMD ["sh", "-c", "gunicorn main:app -k uvicorn.workers.UvicornWorker -w ${WEB_CONCURRENCY:-2} --bind 0.0.0.0:${PORT:-8000} --timeout 120 --graceful-timeout 30 --max-requests 1000 --max-requests-jitter 100 --access-logfile - --error-logfile -"]
+CMD ["sh", "-c", "gunicorn main:app -k uvicorn.workers.UvicornWorker -w ${WEB_CONCURRENCY:-2} --bind 0.0.0.0:${PORT:-8000} --timeout 300 --graceful-timeout 60 --max-requests 1000 --max-requests-jitter 100 --access-logfile - --error-logfile - --preload"]

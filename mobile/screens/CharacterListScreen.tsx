@@ -16,6 +16,7 @@ import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
 import { fonts, radius, shadow } from '../src/theme';
 import { useTheme, type ThemeColors } from '../src/contexts/ThemeContext';
+import { Ionicons } from '@expo/vector-icons';
 import { getCurrentUserId } from '../src/services/auth';
 import { impactLight, impactMedium } from '../src/utils/haptics';
 import { getAuthToken } from '../src/utils/api';
@@ -278,7 +279,11 @@ export default function CharacterListScreen({ navigation }: Props) {
       {/* ── Search bar ─────────────────────────────────────────────────── */}
       <View style={styles.searchRow}>
         <View style={styles.searchInputWrap}>
-          <Text style={styles.searchIcon}>🔍</Text>
+          <Ionicons
+            name="search-outline"
+            size={18}
+            color={isDark ? 'rgba(255,255,255,0.35)' : BROWN_MID}
+          />
           <TextInput
             style={styles.searchInput}
             value={searchChar}
@@ -298,9 +303,13 @@ export default function CharacterListScreen({ navigation }: Props) {
               accessibilityRole="button"
               accessibilityLabel="נקה חיפוש"
             >
-              <Text style={styles.searchClearText}>✕</Text>
+              <Ionicons
+                name="close-circle"
+                size={18}
+                color={isDark ? 'rgba(255,255,255,0.4)' : BROWN_MID}
+              />
             </Pressable>
-          ) : <View style={{ width: 20 }} />}
+          ) : <View style={{ width: 18 }} />}
         </View>
       </View>
 
@@ -514,9 +523,6 @@ function getStyles(colors: ThemeColors, isDark: boolean) {
       height:          48,
       gap:             8,
     },
-    searchIcon: {
-      fontSize: 16,
-    },
     searchInput: {
       flex:       1,
       fontSize:   22,
@@ -524,11 +530,6 @@ function getStyles(colors: ThemeColors, isDark: boolean) {
       color:      isDark ? colors.inkDark : INK_DARK,
       textAlign:  'center',
       height:     48,
-    },
-    searchClearText: {
-      fontSize:   16,
-      color:      isDark ? colors.inkLight : BROWN_MID,
-      paddingHorizontal: 2,
     },
 
     // ── Category tabs ─────────────────────────────────────────────────────────

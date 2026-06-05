@@ -53,28 +53,28 @@ export default function ContactScreen() {
         <Text style={styles.sectionLabel}>פרטי החברה</Text>
         <View style={styles.card}>
           <View style={styles.row}>
-            <Text style={styles.rowVal}>HandScript IR</Text>
             <Text style={styles.rowKey}>שם</Text>
+            <Text style={styles.rowVal}>HandScript IR</Text>
           </View>
           <View style={styles.divider} />
           <View style={styles.row}>
-            <Text style={styles.rowVal}>רועי מנשה אברהם ואיתמר אהרונוב</Text>
             <Text style={styles.rowKey}>מנהלים</Text>
+            <Text style={styles.rowVal}>רועי מנשה אברהם ואיתמר אהרונוב</Text>
           </View>
           <View style={styles.divider} />
           <View style={styles.row}>
-            <Text style={styles.rowVal}>הר ציון 31, גן יבנה 7080000</Text>
             <Text style={styles.rowKey}>כתובת</Text>
+            <Text style={styles.rowVal}>הר ציון 31, גן יבנה 7080000</Text>
           </View>
           <View style={styles.divider} />
           <View style={styles.row}>
-            <Text style={styles.rowVal}>{EMAIL}</Text>
             <Text style={styles.rowKey}>דוא"ל</Text>
+            <Text style={styles.rowVal}>{EMAIL}</Text>
           </View>
           <View style={styles.divider} />
           <View style={styles.row}>
-            <Text style={styles.rowVal}>עד 7 ימי עסקים</Text>
             <Text style={styles.rowKey}>זמן תגובה</Text>
+            <Text style={styles.rowVal}>עד 7 ימי עסקים</Text>
           </View>
         </View>
 
@@ -82,18 +82,18 @@ export default function ContactScreen() {
         <Text style={styles.sectionLabel}>שעות מענה</Text>
         <View style={styles.card}>
           <View style={styles.row}>
-            <Text style={styles.rowVal}>09:00 – 18:00</Text>
             <Text style={styles.rowKey}>ראשון – חמישי</Text>
+            <Text style={styles.rowVal}>09:00 – 18:00</Text>
           </View>
           <View style={styles.divider} />
           <View style={styles.row}>
-            <Text style={styles.rowVal}>09:00 – 13:00</Text>
             <Text style={styles.rowKey}>שישי</Text>
+            <Text style={styles.rowVal}>09:00 – 13:00</Text>
           </View>
           <View style={styles.divider} />
           <View style={styles.row}>
-            <Text style={styles.rowVal}>סגור</Text>
             <Text style={styles.rowKey}>שבת</Text>
+            <Text style={styles.rowVal}>סגור</Text>
           </View>
           <View style={styles.divider} />
           <Text style={styles.note}>
@@ -111,8 +111,8 @@ export default function ContactScreen() {
             accessibilityLabel="פנייה לתמיכה טכנית"
             accessibilityHint="פותח אפליקציית דואר עם פנייה לתמיכה"
           >
-            <Text style={styles.actionArrow}>←</Text>
             <Text style={styles.actionLabel}>תמיכה טכנית</Text>
+            <Text style={styles.actionArrow}>←</Text>
           </Pressable>
           <View style={styles.divider} />
           <Pressable
@@ -122,8 +122,8 @@ export default function ContactScreen() {
             accessibilityLabel="בקשה למחיקת נתונים אישיים"
             accessibilityHint="פותח דואר לבקשה למחיקה כללית של החשבון"
           >
-            <Text style={styles.actionArrow}>←</Text>
             <Text style={styles.actionLabel}>בקשת מחיקת נתונים</Text>
+            <Text style={styles.actionArrow}>←</Text>
           </Pressable>
           <View style={styles.divider} />
           <Pressable
@@ -133,8 +133,8 @@ export default function ContactScreen() {
             accessibilityLabel="בקשת עיון במידע אישי"
             accessibilityHint="פותח דואר לבקשה לקבל את כל המידע שנשמר"
           >
-            <Text style={styles.actionArrow}>←</Text>
             <Text style={styles.actionLabel}>עיון במידע שלי</Text>
+            <Text style={styles.actionArrow}>←</Text>
           </Pressable>
           <View style={styles.divider} />
           <Pressable
@@ -144,8 +144,8 @@ export default function ContactScreen() {
             accessibilityLabel="דיווח על שימוש לרעה"
             accessibilityHint="פותח דואר לדיווח על תוכן לא הולם או שימוש לרעה"
           >
-            <Text style={styles.actionArrow}>←</Text>
             <Text style={styles.actionLabel}>דיווח על שימוש לרעה</Text>
+            <Text style={styles.actionArrow}>←</Text>
           </Pressable>
           <View style={styles.divider} />
           <Pressable
@@ -155,8 +155,8 @@ export default function ContactScreen() {
             accessibilityLabel="הצעה לשיפור האפליקציה"
             accessibilityHint="פותח דואר לשליחת רעיונות לשיפור"
           >
-            <Text style={styles.actionArrow}>←</Text>
             <Text style={styles.actionLabel}>הצעה לשיפור</Text>
+            <Text style={styles.actionArrow}>←</Text>
           </Pressable>
         </View>
 
@@ -195,7 +195,7 @@ export default function ContactScreen() {
 
 function getStyles(colors: ThemeColors) {
   return StyleSheet.create({
-    safe:   { flex: 1, backgroundColor: colors.bgPage },
+    safe:   { flex: 1, backgroundColor: colors.bgPage, direction: 'rtl' },
     scroll: { paddingHorizontal: 20, paddingTop: 12 },
 
     sectionLabel: {

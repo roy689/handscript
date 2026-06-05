@@ -41,6 +41,7 @@ import type { RootStackParamList } from './navigation/types';
 import OnboardingScreen            from './screens/OnboardingScreen';
 import TutorialScreen              from './screens/TutorialScreen';
 import ForgotPasswordScreen        from './screens/ForgotPasswordScreen';
+import VerifyEmailScreen           from './screens/VerifyEmailScreen';
 import CharacterListScreen         from './screens/CharacterListScreen';
 import CharacterConfigScreen       from './screens/CharacterConfigScreen';
 import CharacterCaptureScreen      from './screens/CharacterCaptureScreen';
@@ -57,6 +58,7 @@ import SettingsScreen              from './screens/SettingsScreen';
 import PaywallScreen               from './screens/PaywallScreen';
 import PrivacyPolicyScreen         from './screens/PrivacyPolicyScreen';
 import TermsOfServiceScreen        from './screens/TermsOfServiceScreen';
+import TermsAcceptanceScreen, { TERMS_STORAGE_KEY, TERMS_VERSION } from './screens/TermsAcceptanceScreen';
 import ContactScreen               from './screens/ContactScreen';
 import ErrorBoundary               from './src/components/ErrorBoundary';
 import ProfileAvatar               from './src/components/ProfileAvatar';
@@ -115,6 +117,7 @@ function MainTabs() {
 
   return (
     <Tab.Navigator
+      initialRouteName="CharacterList"
       screenOptions={{
         ...sharedHeader,
         tabBarActiveTintColor:   colors.accent,
@@ -139,21 +142,21 @@ function MainTabs() {
       }}
     >
       <Tab.Screen
-        name="CharacterList"
-        component={CharacterListScreen}
-        options={{
-          title:        'מאגר אותיות',
-          tabBarLabel:  'מאגר',
-          tabBarIcon: ({ focused, color }) => <TabIcon name="camera" focused={focused} color={color} />,
-        }}
-      />
-      <Tab.Screen
         name="Editor"
         component={EditorScreen}
         options={{
           title:        'עורך טקסט',
           tabBarLabel:  'עורך',
           tabBarIcon: ({ focused, color }) => <TabIcon name="pencil" focused={focused} color={color} />,
+        }}
+      />
+      <Tab.Screen
+        name="CharacterList"
+        component={CharacterListScreen}
+        options={{
+          title:        'מאגר אותיות',
+          tabBarLabel:  'מאגר',
+          tabBarIcon: ({ focused, color }) => <TabIcon name="camera" focused={focused} color={color} />,
         }}
       />
       <Tab.Screen
@@ -200,6 +203,7 @@ function AppNavigator({ initialRoute }: { initialRoute: InitialRoute }) {
         <RootStack.Screen name="Onboarding"     component={OnboardingScreen}     options={{ headerShown: false }} />
         <RootStack.Screen name="Tutorial"       component={TutorialScreen}       options={{ headerShown: false, gestureEnabled: false }} />
         <RootStack.Screen name="ForgotPassword" component={ForgotPasswordScreen} options={{ title: 'איפוס סיסמה' }} />
+        <RootStack.Screen name="VerifyEmail"    component={VerifyEmailScreen}    options={{ headerShown: false, gestureEnabled: false }} />
         <RootStack.Screen name="MainTabs"       component={MainTabs}             options={{ headerShown: false }} />
 
         {/* ── Character bank flow ─────────────────────────────────────── */}
@@ -220,9 +224,10 @@ function AppNavigator({ initialRoute }: { initialRoute: InitialRoute }) {
         <RootStack.Screen name="Paywall"        component={PaywallScreen}        options={{ title: 'שדרג ל-Pro', presentation: 'modal' }} />
 
         {/* ── Legal ───────────────────────────────────────────────────── */}
-        <RootStack.Screen name="PrivacyPolicy"  component={PrivacyPolicyScreen}  options={{ title: 'מדיניות פרטיות' }} />
-        <RootStack.Screen name="TermsOfService" component={TermsOfServiceScreen} options={{ title: 'תנאי שימוש' }} />
-        <RootStack.Screen name="Contact"        component={ContactScreen}        options={{ title: 'יצירת קשר' }} />
+        <RootStack.Screen name="PrivacyPolicy"    component={PrivacyPolicyScreen}    options={{ title: 'מדיניות פרטיות' }} />
+        <RootStack.Screen name="TermsOfService"   component={TermsOfServiceScreen}   options={{ title: 'תנאי שימוש' }} />
+        <RootStack.Screen name="TermsAcceptance"  component={TermsAcceptanceScreen}  options={{ headerShown: false, gestureEnabled: false }} />
+        <RootStack.Screen name="Contact"          component={ContactScreen}          options={{ title: 'יצירת קשר' }} />
       </RootStack.Navigator>
     </NavigationContainer>
   );
@@ -244,6 +249,26 @@ export default function App() {
   useEffect(() => {
     try {
       const unsub = onAuthStateChanged(auth, async user => {
+        // ── Terms of Service gate ──────────────────────────────────────────────
+        // Check whether the current version of the TOS has been accepted.
+        // This runs for both logged-in and logged-out users so that existing
+        // accounts are also prompted once on first launch after the TOS update.
+        const termsRaw = await AsyncStorage.getItem(TERMS_STORAGE_KEY).catch(() => null);
+        let termsAccepted = false;
+        if (termsRaw) {
+          try {
+            const parsed = JSON.parse(termsRaw) as { version?: string };
+            termsAccepted = parsed.version === TERMS_VERSION;
+          } catch {
+            termsAccepted = false;
+          }
+        }
+
+        if (!termsAccepted) {
+          setInitialRoute('TermsAcceptance');
+          return;
+        }
+
         if (user) {
           // Show tutorial only once — on first-ever login after install.
           const seen = await AsyncStorage.getItem('@hs_tutorial_seen').catch(() => '1');

@@ -5,7 +5,7 @@ import React, {
   useRef,
   useState,
 } from 'react';
-import { PanResponder, StyleSheet, View } from 'react-native';
+import { PanResponder, Platform, StyleSheet, View } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 import * as FileSystem from 'expo-file-system/legacy';
 import { WebView } from 'react-native-webview';
@@ -60,14 +60,26 @@ function buildSvgPath(pts: Point[]): string {
 // Receives: array of stroke arrays (each stroke = [{x,y}, ...])
 // Returns:  { ok: true, base64: "..." } or { ok: false, error: "..." }
 const CONVERTER_HTML = `<!DOCTYPE html>
-<html><body style="margin:0;padding:0;background:white;">
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+</head>
+<body style="margin:0;padding:0;background:white;">
 <canvas id="c"></canvas>
 <script>
 window.drawStrokes = function(strokes, strokeWidth, w, h) {
   try {
     var canvas = document.getElementById('c');
+
+    // Always render at 1:1 logical pixel resolution regardless of devicePixelRatio.
+    // The coordinates coming in from PanResponder are already in logical (point) units,
+    // so we keep the canvas in logical pixels to avoid any coordinate mismatch on
+    // high-DPI iOS devices (retina / ProMotion screens).
     canvas.width  = w;
     canvas.height = h;
+    canvas.style.width  = w + 'px';
+    canvas.style.height = h + 'px';
+
     var ctx = canvas.getContext('2d');
 
     // White background
@@ -130,20 +142,48 @@ const DrawingCanvas = forwardRef<DrawingCanvasRef, Props>(({ size }, ref) => {
   const resolveCapture = useRef<((uri: string) => void) | null>(null);
   const rejectCapture  = useRef<((e: Error) => void) | null>(null);
 
+  // ── iOS coordinate fix ──────────────────────────────────────────────────────
+  // On iOS, PanResponder's locationX/locationY can be reported relative to a
+  // parent container rather than the actual touch layer when the canvas is
+  // nested inside absolute-positioned views. This causes strokes to appear
+  // shifted/distorted vs. what the user actually drew.
+  // Fix: measure the touch layer's screen position once on layout, then
+  // subtract it from pageX/pageY (which are always window-relative and correct).
+  const touchLayerRef = useRef<View>(null);
+  const originRef     = useRef({ x: 0, y: 0 });
+
+  const onTouchLayerLayout = useCallback(() => {
+    touchLayerRef.current?.measure((_x, _y, _w, _h, pageX, pageY) => {
+      originRef.current = { x: pageX, y: pageY };
+    });
+  }, []);
+
+  // Returns the corrected (x, y) relative to the canvas for any native event.
+  // On Android locationX/Y are reliable; on iOS we use pageX/Y minus measured origin.
+  function getCanvasPoint(nativeEvent: { locationX: number; locationY: number; pageX: number; pageY: number }) {
+    if (Platform.OS === 'ios') {
+      return {
+        x: nativeEvent.pageX - originRef.current.x,
+        y: nativeEvent.pageY - originRef.current.y,
+      };
+    }
+    return { x: nativeEvent.locationX, y: nativeEvent.locationY };
+  }
+
   const panResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder:  () => true,
 
       onPanResponderGrant: (e) => {
-        const { locationX: x, locationY: y } = e.nativeEvent;
+        const { x, y } = getCanvasPoint(e.nativeEvent);
         activePoints.current = [{ x, y }];
         allPoints.current.push({ x, y });
         setActivePath(buildSvgPath(activePoints.current));
       },
 
       onPanResponderMove: (e) => {
-        const { locationX: x, locationY: y } = e.nativeEvent;
+        const { x, y } = getCanvasPoint(e.nativeEvent);
         activePoints.current.push({ x, y });
         allPoints.current.push({ x, y });
         setActivePath(buildSvgPath(activePoints.current));
@@ -294,6 +334,9 @@ const DrawingCanvas = forwardRef<DrawingCanvasRef, Props>(({ size }, ref) => {
         javaScriptEnabled
         style={styles.hiddenWebView}
         scrollEnabled={false}
+        // Prevent iOS WKWebView from applying its own content scaling
+        scalesPageToFit={false}
+        automaticallyAdjustContentInsets={false}
       />
 
       {/* Live SVG preview of what the user is drawing */}
@@ -322,7 +365,12 @@ const DrawingCanvas = forwardRef<DrawingCanvasRef, Props>(({ size }, ref) => {
       </Svg>
 
       {/* Touch capture layer — must be last so it sits on top */}
-      <View style={StyleSheet.absoluteFill} {...panResponder.panHandlers} />
+      <View
+        ref={touchLayerRef}
+        style={StyleSheet.absoluteFill}
+        onLayout={onTouchLayerLayout}
+        {...panResponder.panHandlers}
+      />
     </View>
   );
 });

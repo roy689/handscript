@@ -73,3 +73,7 @@ if (!__DEV__ && BACKEND_URL.startsWith('http://')) {
 
 // Helpful breadcrumb in Metro logs
 console.log('[config] BACKEND_URL =', BACKEND_URL);
+
+// ── Text limits — must match _MAX_TEXT in backend/main.py ────────────────────
+export const MAX_TEXT_LEN       = 25_000;
+export const TEXT_WARN_THRESHOLD = Math.floor(MAX_TEXT_LEN * 0.9);

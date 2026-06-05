@@ -60,6 +60,30 @@ def _check_api_key() -> None:
         )
 
 
+def _ensure_admin() -> None:
+    """
+    Make sure the Firebase Admin SDK is initialised before using fb_auth.
+
+    The active storage module (firebase_storage in prod, local_storage in dev)
+    initialises the SDK lazily — only on the first Firestore/Storage call. The
+    custom-email flow calls Admin SDK auth functions (generate_*_link,
+    verify_id_token) which need an initialised app, and these can run before any
+    storage op (e.g. a password-reset request). So we trigger the active
+    client's init explicitly here. Idempotent and safe to call repeatedly.
+    """
+    import firebase_admin
+    if firebase_admin._apps:
+        return
+    try:
+        from services import config as _svc_config
+        client = getattr(_svc_config, "firebase_client", None)
+        init = getattr(client, "_ensure_init", None) or getattr(client, "_init", None)
+        if init:
+            init()
+    except Exception as exc:
+        logger.warning("_ensure_admin: could not initialise Firebase Admin: %s", exc)
+
+
 async def sign_in(email: str, password: str) -> dict:
     """Authenticate with email + password. Returns idToken, refreshToken, etc."""
     email = email.strip().lower()
@@ -242,6 +266,7 @@ async def send_password_reset(email: str) -> bool:
         return await _firebase_send_oob({"requestType": "PASSWORD_RESET", "email": email})
 
     try:
+        _ensure_admin()
         import firebase_admin.auth as fb_auth
         try:
             link = await asyncio.to_thread(fb_auth.generate_password_reset_link, email)
@@ -273,6 +298,7 @@ async def send_email_verification(id_token: str) -> bool:
         return await _firebase_send_oob({"requestType": "VERIFY_EMAIL", "idToken": id_token})
 
     try:
+        _ensure_admin()
         import firebase_admin.auth as fb_auth
         decoded = await asyncio.to_thread(fb_auth.verify_id_token, id_token)
         user    = await asyncio.to_thread(fb_auth.get_user, decoded["uid"])
