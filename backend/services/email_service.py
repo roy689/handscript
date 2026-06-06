@@ -8,7 +8,7 @@ emails, the backend:
   1. Generates the action link with the Firebase Admin SDK
      (generate_email_verification_link / generate_password_reset_link) — this
      returns the link WITHOUT Firebase sending any email.
-  2. Sends our own fully-designed HTML email through SMTP (Gmail).
+  2. Sends our own fully-designed HTML email.
 
 Delivery uses the Brevo (Sendinblue) transactional email HTTP API over HTTPS
 (port 443) instead of raw SMTP. This is required because Railway blocks outbound
@@ -23,6 +23,10 @@ Configuration is read from environment variables (never hard-coded):
 The sender address must be verified in Brevo (Senders & IP → Senders).
 If not fully configured, is_configured() returns False so callers can fall back
 to Firebase's default delivery.
+
+Email design follows the app's "Ink & Parchment" design system (theme.ts):
+warm parchment surfaces, fountain-pen Prussian-blue accent, warm-ink browns,
+the Heebo typeface, and artisanal rounded corners.
 """
 
 import logging
@@ -108,8 +112,8 @@ def send_html(to_addr: str, subject: str, html: str) -> bool:
 # Public helpers — verification + password reset
 # ---------------------------------------------------------------------------
 
-VERIFY_SUBJECT = "✍️ אמת את כתובת המייל שלך — HandScript"
-RESET_SUBJECT  = "🔐 איפוס סיסמה — HandScript"
+VERIFY_SUBJECT = "אימות כתובת המייל שלך — HandScript"
+RESET_SUBJECT  = "איפוס הסיסמה שלך — HandScript"
 
 
 def send_verification_email(to_addr: str, link: str) -> bool:
@@ -123,7 +127,9 @@ def send_password_reset_email(to_addr: str, link: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# HTML templates (designed for HandScript, RTL, dark theme).
+# HTML templates — "Ink & Parchment" design system, Hebrew RTL.
+# Palette: parchment #F4EFE6 · cream card #FDFAF4 · Prussian-blue accent
+# #1E3A5F · warm ink #1E1812/#6B5744/#9E8A78 · linen border #DEDAD1.
 # %LINK% is substituted with the Firebase action link at send time.
 # ---------------------------------------------------------------------------
 
@@ -132,89 +138,90 @@ _VERIFY_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>אימות מייל — HandScript</title>
+<meta name="x-apple-disable-message-reformatting">
+<title>אימות כתובת המייל — HandScript</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Heebo:wght@400;600;700;800&display=swap');
+  body { margin:0; padding:0; }
+  a { text-decoration:none; }
+</style>
 </head>
-<body style="margin:0;padding:0;background-color:#0D1117;font-family:'Segoe UI',Tahoma,Arial,sans-serif;direction:rtl;">
+<body style="margin:0;padding:0;background-color:#F4EFE6;font-family:'Heebo','Segoe UI',Tahoma,Arial,sans-serif;direction:rtl;">
 
-<table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#0D1117;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F4EFE6;">
 <tr>
-<td align="center" style="padding:48px 20px;">
+<td align="center" style="padding:40px 20px;">
 
-  <table width="560" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;width:100%;">
+  <table role="presentation" width="560" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;width:100%;">
 
-    <!-- לוגו -->
+    <!-- ── סמל המותג ──────────────────────────────────────────────── -->
     <tr>
-      <td align="center" style="padding-bottom:36px;">
-        <div style="font-size:56px;line-height:1;">✍️</div>
-        <div style="margin-top:10px;font-size:26px;font-weight:800;color:#E8C98A;letter-spacing:-0.5px;">HandScript</div>
-        <div style="margin-top:4px;font-size:13px;color:rgba(255,255,255,0.38);letter-spacing:0.3px;">כתב היד הדיגיטלי שלך</div>
+      <td align="center" style="padding-bottom:28px;">
+        <img src="https://raw.githubusercontent.com/roy689/handscript/master/mobile/assets/logo.png" width="260" alt="HandScript" style="display:block;margin:0 auto;width:260px;max-width:72%;height:auto;border:0;">
+        <div style="margin-top:10px;font-size:13px;color:#9E8A78;letter-spacing:0.2px;">כתב היד שלך, הופך לפונט</div>
       </td>
     </tr>
 
-    <!-- כרטיס ראשי -->
+    <!-- ── כרטיס ראשי ─────────────────────────────────────────────── -->
     <tr>
-      <td style="background-color:#161B22;border-radius:18px;border:1px solid rgba(255,255,255,0.09);padding:44px 40px;">
+      <td style="background-color:#FDFAF4;border-radius:18px;border:1px solid #DEDAD1;padding:40px 38px;">
 
-        <div style="font-size:22px;font-weight:800;color:#FFFFFF;margin-bottom:16px;line-height:1.3;">
-          אמת את כתובת המייל שלך 📬
+        <div style="font-size:22px;font-weight:800;color:#1E1812;margin:0 0 14px;line-height:1.35;">
+          ברוך הבא ל-HandScript
         </div>
 
-        <div style="font-size:15px;color:rgba(255,255,255,0.62);line-height:1.8;margin-bottom:32px;">
-          שלום!<br><br>
-          תודה שנרשמת ל-HandScript.<br>
-          לחץ על הכפתור למטה כדי לאמת את כתובת המייל שלך ולהתחיל ליצור את הפונט האישי שלך.
+        <div style="font-size:15px;color:#6B5744;line-height:1.85;margin:0 0 30px;">
+          עוד צעד קטן ואתה בפנים. אמת את כתובת המייל שלך כדי להתחיל ליצור פונט אישי מכתב היד שלך.
         </div>
 
-        <table width="100%" cellpadding="0" cellspacing="0" border="0">
+        <!-- כפתור פעולה -->
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
           <tr>
-            <td align="center" style="padding-bottom:32px;">
-              <a href="%LINK%"
-                 style="display:inline-block;background-color:#E8C98A;color:#111111;text-decoration:none;font-size:16px;font-weight:800;padding:18px 48px;border-radius:14px;letter-spacing:0.3px;">
-                ✅ &nbsp; אמת את המייל שלך
-              </a>
+            <td align="center" style="padding-bottom:30px;">
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  <td align="center" bgcolor="#1E3A5F" style="border-radius:12px;">
+                    <a href="%LINK%" style="display:inline-block;padding:16px 46px;font-size:16px;font-weight:700;color:#FDFAF4;background-color:#1E3A5F;border-radius:12px;">
+                      אימות כתובת המייל
+                    </a>
+                  </td>
+                </tr>
+              </table>
             </td>
           </tr>
         </table>
 
-        <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:24px;">
-          <tr>
-            <td style="height:1px;background-color:rgba(255,255,255,0.08);"></td>
-          </tr>
-        </table>
+        <!-- מפריד -->
+        <div style="height:1px;background-color:#EDE9E1;margin:0 0 22px;"></div>
 
-        <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:20px;">
-          <tr>
-            <td style="background-color:rgba(232,201,138,0.07);border-radius:10px;border:1px solid rgba(232,201,138,0.15);padding:12px 18px;">
-              <div style="font-size:13px;color:rgba(255,255,255,0.45);line-height:1.7;text-align:center;">
-                📁 &nbsp; לא קיבלת את המייל? בדוק את תיבת הספאם שלך
-              </div>
-            </td>
-          </tr>
-        </table>
+        <!-- הערת ספאם -->
+        <div style="font-size:13px;color:#9E8A78;line-height:1.7;text-align:center;margin:0 0 18px;">
+          לא רואה את המייל בתיבה? כדאי לבדוק גם בתיקיית הספאם.
+        </div>
 
-        <div style="font-size:12px;color:rgba(255,255,255,0.3);line-height:1.7;text-align:center;">
-          הכפתור לא עובד? העתק והדבק את הכתובת הבאה בדפדפן שלך:<br>
-          <span style="color:rgba(232,201,138,0.55);word-break:break-all;">%LINK%</span>
+        <!-- קישור חלופי -->
+        <div style="font-size:12px;color:#9E8A78;line-height:1.7;text-align:center;">
+          הכפתור לא עובד? אפשר להעתיק את הקישור הזה לדפדפן:<br>
+          <span style="color:#1E3A5F;word-break:break-all;">%LINK%</span>
         </div>
 
       </td>
     </tr>
 
-    <!-- הערת אבטחה -->
+    <!-- ── הערה מתחת לכרטיס ───────────────────────────────────────── -->
     <tr>
-      <td style="padding:20px 4px 0;text-align:center;">
-        <div style="font-size:12px;color:rgba(255,255,255,0.22);line-height:1.7;">
-          אם לא נרשמת ל-HandScript, פשוט התעלם מהודעה זו.<br>
-          הקישור יפוג תוך 24 שעות.
+      <td style="padding:20px 6px 0;text-align:center;">
+        <div style="font-size:12px;color:#9E8A78;line-height:1.75;">
+          הקישור תקף ל-24 שעות. אם לא נרשמת ל-HandScript, אפשר פשוט להתעלם מהמייל הזה.
         </div>
       </td>
     </tr>
 
-    <!-- פוטר -->
+    <!-- ── פוטר ───────────────────────────────────────────────────── -->
     <tr>
-      <td style="padding-top:32px;text-align:center;">
-        <div style="font-size:11px;color:rgba(255,255,255,0.15);">
-          © 2025 HandScript · כל הזכויות שמורות
+      <td style="padding-top:26px;text-align:center;">
+        <div style="font-size:11px;color:#C9B8A8;letter-spacing:0.2px;">
+          © 2026 HandScript · נוצר בכתב ידך
         </div>
       </td>
     </tr>
@@ -234,104 +241,101 @@ _RESET_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>איפוס סיסמה — HandScript</title>
+<meta name="x-apple-disable-message-reformatting">
+<title>איפוס הסיסמה — HandScript</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Heebo:wght@400;600;700;800&display=swap');
+  body { margin:0; padding:0; }
+  a { text-decoration:none; }
+</style>
 </head>
-<body style="margin:0;padding:0;background-color:#0A1628;font-family:'Segoe UI',Tahoma,Arial,sans-serif;direction:rtl;">
+<body style="margin:0;padding:0;background-color:#F4EFE6;font-family:'Heebo','Segoe UI',Tahoma,Arial,sans-serif;direction:rtl;">
 
-<table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#0A1628;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F4EFE6;">
 <tr>
-<td align="center" style="padding:48px 20px;">
+<td align="center" style="padding:40px 20px;">
 
-  <table width="560" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;width:100%;">
+  <table role="presentation" width="560" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;width:100%;">
 
-    <!-- לוגו -->
+    <!-- ── סמל המותג ──────────────────────────────────────────────── -->
     <tr>
-      <td align="center" style="padding-bottom:36px;">
-        <div style="font-size:56px;line-height:1;">✍️</div>
-        <div style="margin-top:10px;font-size:26px;font-weight:800;color:#7EC8E3;letter-spacing:-0.5px;">HandScript</div>
-        <div style="margin-top:4px;font-size:13px;color:rgba(255,255,255,0.38);letter-spacing:0.3px;">כתב היד הדיגיטלי שלך</div>
+      <td align="center" style="padding-bottom:28px;">
+        <img src="https://raw.githubusercontent.com/roy689/handscript/master/mobile/assets/logo.png" width="260" alt="HandScript" style="display:block;margin:0 auto;width:260px;max-width:72%;height:auto;border:0;">
+        <div style="margin-top:10px;font-size:13px;color:#9E8A78;letter-spacing:0.2px;">כתב היד שלך, הופך לפונט</div>
       </td>
     </tr>
 
-    <!-- כרטיס ראשי -->
+    <!-- ── כרטיס ראשי ─────────────────────────────────────────────── -->
     <tr>
-      <td style="background-color:#0F1F3A;border-radius:18px;border:1px solid rgba(126,200,227,0.15);padding:44px 40px;">
+      <td style="background-color:#FDFAF4;border-radius:18px;border:1px solid #DEDAD1;padding:40px 38px;">
 
-        <div style="text-align:center;margin-bottom:20px;">
-          <div style="display:inline-block;background-color:rgba(126,200,227,0.1);border:1.5px solid rgba(126,200,227,0.25);border-radius:50%;width:72px;height:72px;line-height:72px;font-size:34px;text-align:center;">
-            🔐
-          </div>
+        <div style="font-size:22px;font-weight:800;color:#1E1812;margin:0 0 14px;line-height:1.35;">
+          איפוס הסיסמה שלך
         </div>
 
-        <div style="font-size:22px;font-weight:800;color:#FFFFFF;margin-bottom:16px;line-height:1.3;text-align:center;">
-          בקשת איפוס סיסמה
+        <div style="font-size:15px;color:#6B5744;line-height:1.85;margin:0 0 30px;">
+          קיבלנו בקשה לאיפוס הסיסמה לחשבון ה-HandScript שלך. לחץ על הכפתור כדי לבחור סיסמה חדשה.
         </div>
 
-        <div style="font-size:15px;color:rgba(255,255,255,0.62);line-height:1.8;margin-bottom:32px;text-align:center;">
-          קיבלנו בקשה לאיפוס הסיסמה של חשבון ה-HandScript שלך.<br>
-          לחץ על הכפתור למטה כדי לבחור סיסמה חדשה.
-        </div>
-
-        <table width="100%" cellpadding="0" cellspacing="0" border="0">
+        <!-- כפתור פעולה -->
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
           <tr>
-            <td align="center" style="padding-bottom:32px;">
-              <a href="%LINK%"
-                 style="display:inline-block;background-color:#7EC8E3;color:#0A1628;text-decoration:none;font-size:16px;font-weight:800;padding:18px 48px;border-radius:14px;letter-spacing:0.3px;">
-                🔑 &nbsp; אפס את הסיסמה
-              </a>
+            <td align="center" style="padding-bottom:30px;">
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  <td align="center" bgcolor="#1E3A5F" style="border-radius:12px;">
+                    <a href="%LINK%" style="display:inline-block;padding:16px 46px;font-size:16px;font-weight:700;color:#FDFAF4;background-color:#1E3A5F;border-radius:12px;">
+                      בחירת סיסמה חדשה
+                    </a>
+                  </td>
+                </tr>
+              </table>
             </td>
           </tr>
         </table>
 
-        <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:24px;">
+        <!-- הערת אבטחה -->
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 22px;">
           <tr>
-            <td style="height:1px;background-color:rgba(126,200,227,0.12);"></td>
-          </tr>
-        </table>
-
-        <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:16px;">
-          <tr>
-            <td style="background-color:rgba(126,200,227,0.07);border-radius:10px;border:1px solid rgba(126,200,227,0.15);padding:12px 18px;">
-              <div style="font-size:13px;color:rgba(255,255,255,0.45);line-height:1.7;text-align:center;">
-                📁 &nbsp; לא קיבלת את המייל? בדוק את תיבת הספאם שלך
+            <td style="background-color:#FDF2E0;border:1px solid #F0DEC0;border-radius:12px;padding:14px 18px;">
+              <div style="font-size:13px;color:#A85A0A;line-height:1.7;text-align:center;">
+                לא ביקשת לאפס סיסמה? אפשר להתעלם מההודעה — הסיסמה שלך תישאר ללא שינוי.
               </div>
             </td>
           </tr>
         </table>
 
-        <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:20px;">
-          <tr>
-            <td style="background-color:rgba(126,200,227,0.07);border-radius:10px;border:1px solid rgba(126,200,227,0.15);padding:14px 18px;">
-              <div style="font-size:13px;color:rgba(255,255,255,0.5);line-height:1.7;text-align:center;">
-                ⚠️ &nbsp; אם לא ביקשת לאפס את הסיסמה שלך,<br>
-                התעלם מהודעה זו. הסיסמה שלך לא תשתנה.
-              </div>
-            </td>
-          </tr>
-        </table>
+        <!-- מפריד -->
+        <div style="height:1px;background-color:#EDE9E1;margin:0 0 22px;"></div>
 
-        <div style="font-size:12px;color:rgba(255,255,255,0.3);line-height:1.7;text-align:center;">
-          הכפתור לא עובד? העתק והדבק את הכתובת הבאה בדפדפן שלך:<br>
-          <span style="color:rgba(126,200,227,0.5);word-break:break-all;">%LINK%</span>
+        <!-- הערת ספאם -->
+        <div style="font-size:13px;color:#9E8A78;line-height:1.7;text-align:center;margin:0 0 18px;">
+          לא רואה את המייל בתיבה? כדאי לבדוק גם בתיקיית הספאם.
+        </div>
+
+        <!-- קישור חלופי -->
+        <div style="font-size:12px;color:#9E8A78;line-height:1.7;text-align:center;">
+          הכפתור לא עובד? אפשר להעתיק את הקישור הזה לדפדפן:<br>
+          <span style="color:#1E3A5F;word-break:break-all;">%LINK%</span>
         </div>
 
       </td>
     </tr>
 
-    <!-- הערת תוקף -->
+    <!-- ── הערה מתחת לכרטיס ───────────────────────────────────────── -->
     <tr>
-      <td style="padding:20px 4px 0;text-align:center;">
-        <div style="font-size:12px;color:rgba(255,255,255,0.22);line-height:1.7;">
-          הקישור לאיפוס הסיסמה יפוג תוך שעה אחת.
+      <td style="padding:20px 6px 0;text-align:center;">
+        <div style="font-size:12px;color:#9E8A78;line-height:1.75;">
+          הקישור לאיפוס תקף לשעה אחת בלבד.
         </div>
       </td>
     </tr>
 
-    <!-- פוטר -->
+    <!-- ── פוטר ───────────────────────────────────────────────────── -->
     <tr>
-      <td style="padding-top:32px;text-align:center;">
-        <div style="font-size:11px;color:rgba(255,255,255,0.15);">
-          © 2025 HandScript · כל הזכויות שמורות
+      <td style="padding-top:26px;text-align:center;">
+        <div style="font-size:11px;color:#C9B8A8;letter-spacing:0.2px;">
+          © 2026 HandScript · נוצר בכתב ידך
         </div>
       </td>
     </tr>
