@@ -90,7 +90,7 @@
         "projectId": "28b061a5-77c0-4634-871b-f9e473e9ba81"
       },
       "BACKEND_URL": "https://handscript-production-2667.up.railway.app",
-      "GOOGLE_WEB_CLIENT_ID": "REPLACE_WITH_FIREBASE_WEB_CLIENT_ID.apps.googleusercontent.com",
+      "GOOGLE_WEB_CLIENT_ID": "66192616030-hmmlf2urb7kmaqf8tmf344f9c733o8l4.apps.googleusercontent.com",
       "GOOGLE_IOS_CLIENT_ID": "REPLACE_WITH_FIREBASE_IOS_CLIENT_ID.apps.googleusercontent.com"
     }
   }
