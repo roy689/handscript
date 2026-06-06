@@ -196,11 +196,6 @@ _VERIFY_HTML = """<!DOCTYPE html>
         <!-- מפריד -->
         <div style="height:1px;background-color:#EDE9E1;margin:0 0 22px;"></div>
 
-        <!-- הערת ספאם -->
-        <div style="font-size:13px;color:#9E8A78;line-height:1.7;text-align:center;margin:0 0 18px;">
-          לא רואה את המייל בתיבה? כדאי לבדוק גם בתיקיית הספאם.
-        </div>
-
         <!-- קישור חלופי -->
         <div style="font-size:12px;color:#9E8A78;line-height:1.7;text-align:center;">
           הכפתור לא עובד? אפשר להעתיק את הקישור הזה לדפדפן:<br>
@@ -311,11 +306,6 @@ _RESET_HTML = """<!DOCTYPE html>
 
         <!-- מפריד -->
         <div style="height:1px;background-color:#EDE9E1;margin:0 0 22px;"></div>
-
-        <!-- הערת ספאם -->
-        <div style="font-size:13px;color:#9E8A78;line-height:1.7;text-align:center;margin:0 0 18px;">
-          לא רואה את המייל בתיבה? כדאי לבדוק גם בתיקיית הספאם.
-        </div>
 
         <!-- קישור חלופי -->
         <div style="font-size:12px;color:#9E8A78;line-height:1.7;text-align:center;">
