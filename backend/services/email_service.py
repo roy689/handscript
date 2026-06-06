@@ -157,8 +157,11 @@ _VERIFY_HTML = """<!DOCTYPE html>
     <!-- ── סמל המותג ──────────────────────────────────────────────── -->
     <tr>
       <td align="center" style="padding-bottom:28px;">
-        <img src="https://raw.githubusercontent.com/roy689/handscript/master/mobile/assets/logo.png" width="260" alt="HandScript" style="display:block;margin:0 auto;width:260px;max-width:72%;height:auto;border:0;">
-        <div style="margin-top:10px;font-size:13px;color:#9E8A78;letter-spacing:0.2px;">כתב היד שלך, הופך לפונט</div>
+        <div style="width:120px;height:120px;border-radius:60px;overflow:hidden;background-color:#F5F0E8;margin:0 auto;">
+          <img src="https://raw.githubusercontent.com/roy689/handscript/master/mobile/assets/logo.png" alt="HandScript" width="225" height="120" style="display:block;width:225px;height:120px;max-width:none;margin:0 0 0 -52px;border:0;">
+        </div>
+        <div style="margin-top:16px;font-size:26px;font-weight:800;color:#1E3A5F;letter-spacing:-0.4px;">HandScript</div>
+        <div style="margin-top:4px;font-size:13px;color:#9E8A78;letter-spacing:0.2px;">כתב היד שלך, הופך לפונט</div>
       </td>
     </tr>
 
@@ -260,8 +263,11 @@ _RESET_HTML = """<!DOCTYPE html>
     <!-- ── סמל המותג ──────────────────────────────────────────────── -->
     <tr>
       <td align="center" style="padding-bottom:28px;">
-        <img src="https://raw.githubusercontent.com/roy689/handscript/master/mobile/assets/logo.png" width="260" alt="HandScript" style="display:block;margin:0 auto;width:260px;max-width:72%;height:auto;border:0;">
-        <div style="margin-top:10px;font-size:13px;color:#9E8A78;letter-spacing:0.2px;">כתב היד שלך, הופך לפונט</div>
+        <div style="width:120px;height:120px;border-radius:60px;overflow:hidden;background-color:#F5F0E8;margin:0 auto;">
+          <img src="https://raw.githubusercontent.com/roy689/handscript/master/mobile/assets/logo.png" alt="HandScript" width="225" height="120" style="display:block;width:225px;height:120px;max-width:none;margin:0 0 0 -52px;border:0;">
+        </div>
+        <div style="margin-top:16px;font-size:26px;font-weight:800;color:#1E3A5F;letter-spacing:-0.4px;">HandScript</div>
+        <div style="margin-top:4px;font-size:13px;color:#9E8A78;letter-spacing:0.2px;">כתב היד שלך, הופך לפונט</div>
       </td>
     </tr>
 
