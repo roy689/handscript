@@ -84,7 +84,13 @@
           "iosUrlScheme": "com.googleusercontent.apps.placeholder"
         }
       ],
-      "react-native-google-mobile-ads"
+      [
+        "react-native-google-mobile-ads",
+        {
+          "androidAppId": "ca-app-pub-3940256099942544~3347511713",
+          "iosAppId": "ca-app-pub-3940256099942544~1458002511"
+        }
+      ]
     ],
     "extra": {
       "eas": {
@@ -98,9 +104,5 @@
       "ADMOB_APP_OPEN_ID": "REPLACE_WITH_ADMOB_APP_OPEN_UNIT_ID",
       "ADMOB_NATIVE_ID": "REPLACE_WITH_ADMOB_NATIVE_UNIT_ID"
     }
-  },
-  "react-native-google-mobile-ads": {
-    "android_app_id": "ca-app-pub-3940256099942544~3347511713",
-    "ios_app_id": "ca-app-pub-3940256099942544~1458002511"
   }
 }
