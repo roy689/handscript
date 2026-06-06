@@ -312,6 +312,12 @@ async def _startup() -> None:
     asyncio.create_task(_cleanup_loop())
     if not os.getenv("FIREBASE_WEB_API_KEY"):
         logger.critical("FIREBASE_WEB_API_KEY missing — /auth/* endpoints will fail")
+    # Build the circular email logo (best-effort; never blocks startup).
+    try:
+        from services.logo import ensure_round_logo
+        await asyncio.to_thread(ensure_round_logo)
+    except Exception as exc:
+        logger.warning("round logo init failed: %s", exc)
 # /banks is no longer a public StaticFiles mount — served via authenticated route below
 
 
