@@ -6,6 +6,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import AdBanner from '../src/components/AdBanner';
 import { useTheme, type ThemeColors } from '../src/contexts/ThemeContext';
 import { fonts, radius } from '../src/theme';
 
@@ -281,6 +282,7 @@ export default function TermsOfServiceScreen() {
 
         <View style={{ height: 48 }} />
       </ScrollView>
+      <AdBanner />
     </SafeAreaView>
   );
 }

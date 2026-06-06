@@ -83,7 +83,8 @@
         {
           "iosUrlScheme": "com.googleusercontent.apps.placeholder"
         }
-      ]
+      ],
+      "react-native-google-mobile-ads"
     ],
     "extra": {
       "eas": {
@@ -91,7 +92,15 @@
       },
       "BACKEND_URL": "https://handscript-production-2667.up.railway.app",
       "GOOGLE_WEB_CLIENT_ID": "66192616030-hmmlf2urb7kmaqf8tmf344f9c733o8l4.apps.googleusercontent.com",
-      "GOOGLE_IOS_CLIENT_ID": "REPLACE_WITH_FIREBASE_IOS_CLIENT_ID.apps.googleusercontent.com"
+      "GOOGLE_IOS_CLIENT_ID": "REPLACE_WITH_FIREBASE_IOS_CLIENT_ID.apps.googleusercontent.com",
+      "ADMOB_BANNER_ID": "REPLACE_WITH_ADMOB_BANNER_UNIT_ID",
+      "ADMOB_INTERSTITIAL_ID": "REPLACE_WITH_ADMOB_INTERSTITIAL_UNIT_ID",
+      "ADMOB_APP_OPEN_ID": "REPLACE_WITH_ADMOB_APP_OPEN_UNIT_ID",
+      "ADMOB_NATIVE_ID": "REPLACE_WITH_ADMOB_NATIVE_UNIT_ID"
     }
+  },
+  "react-native-google-mobile-ads": {
+    "android_app_id": "ca-app-pub-3940256099942544~3347511713",
+    "ios_app_id": "ca-app-pub-3940256099942544~1458002511"
   }
 }

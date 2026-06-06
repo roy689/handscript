@@ -20,6 +20,7 @@ import { fonts, radius, shadow } from '../src/theme';
 import { impactLight, impactMedium } from '../src/utils/haptics';
 import { BACKEND_URL } from '../src/config';
 import { getCurrentUserId } from '../src/services/auth';
+import AdBanner from '../src/components/AdBanner';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'HandwritingCustomizer'>;
 
@@ -279,6 +280,7 @@ export default function HandwritingCustomizerScreen({ navigation: _navigation }:
     setHs(prev => ({ ...prev, [key]: v }));
 
   return (
+    <View style={{ flex: 1 }}>
     <ScrollView
       style={styles.root}
       contentContainerStyle={styles.content}
@@ -367,6 +369,8 @@ export default function HandwritingCustomizerScreen({ navigation: _navigation }:
         </Pressable>
       </View>
     </ScrollView>
+    <AdBanner />
+    </View>
   );
 }
 

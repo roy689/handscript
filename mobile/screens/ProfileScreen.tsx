@@ -10,6 +10,7 @@ import {
 import { showAlert } from '../src/utils/alert';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import AdBanner from '../src/components/AdBanner';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
 import { auth } from '../src/services/firebase';
@@ -216,6 +217,7 @@ export default function ProfileScreen({ navigation }: Props) {
 
         <View style={{ height: 48 }} />
       </ScrollView>
+      <AdBanner />
     </SafeAreaView>
   );
 }

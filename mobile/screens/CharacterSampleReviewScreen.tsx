@@ -18,6 +18,7 @@ import { fonts, radius, shadow } from '../src/theme';
 import { useTheme, type ThemeColors } from '../src/contexts/ThemeContext';
 import { impactLight, impactMedium } from '../src/utils/haptics';
 import { BACKEND_URL } from '../src/config';
+import { useExitInterstitial } from '../src/hooks/useExitInterstitial';
 import { getAuthToken } from '../src/utils/api';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'CharacterSampleReview'>;
@@ -26,6 +27,7 @@ export default function CharacterSampleReviewScreen({ route, navigation }: Props
   const { character, samples, returnTo } = route.params;
   const { width: W } = useWindowDimensions();
   const { colors } = useTheme();
+  useExitInterstitial(navigation);  // interstitial when leaving the capture flow
   const styles = useMemo(() => getStyles(colors), [colors]);
 
   const [uris,       setUris]       = useState<string[]>(samples);

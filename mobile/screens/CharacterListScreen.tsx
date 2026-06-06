@@ -21,6 +21,7 @@ import { getCurrentUserId } from '../src/services/auth';
 import { impactLight, impactMedium } from '../src/utils/haptics';
 import { getAuthToken } from '../src/utils/api';
 import { BACKEND_URL } from '../src/config';
+import NativeAdCard from '../src/components/NativeAdCard';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'CharacterList'>;
 
@@ -346,7 +347,7 @@ export default function CharacterListScreen({ navigation }: Props) {
         sections={filteredSections}
         keyExtractor={(_, index) => String(index)}
         onScrollToIndexFailed={() => { /* no-op */ }}
-        ListHeaderComponent={ListHeader}
+        ListHeaderComponent={<>{ListHeader}<NativeAdCard /></>}
         ListEmptyComponent={
           searchChar ? (
             <View style={styles.emptyState}>

@@ -63,6 +63,8 @@ import ContactScreen               from './screens/ContactScreen';
 import ErrorBoundary               from './src/components/ErrorBoundary';
 import ProfileAvatar               from './src/components/ProfileAvatar';
 import { AppAlertHost }            from './src/components/AppAlert';
+import AppOpenAdManager            from './src/components/AppOpenAdManager';
+import { initAds }                 from './src/services/ads';
 import { ThemeProvider, useTheme } from './src/contexts/ThemeContext';
 import { fonts }                   from './src/theme';
 import { auth }                    from './src/services/firebase';
@@ -290,6 +292,11 @@ export default function App() {
     }
   }, [initialRoute, fontsLoaded]);
 
+  // Initialise the Mobile Ads SDK once (no-op in Expo Go / web).
+  useEffect(() => {
+    initAds();
+  }, []);
+
   // ── Show diagnostic screen if any error was caught ─────────────────────────
   const anyError = _globalError || firebaseError;
   if (anyError) {
@@ -346,6 +353,7 @@ export default function App() {
         <ThemeProvider>
           <AppNavigator initialRoute={initialRoute} />
           <AppAlertHost />
+          <AppOpenAdManager />
         </ThemeProvider>
       </ErrorBoundary>
     </SafeAreaProvider>

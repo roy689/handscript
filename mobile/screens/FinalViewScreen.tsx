@@ -44,6 +44,7 @@ import { BACKEND_URL }                 from '../src/config';
 import { getCurrentUserId }            from '../src/services/auth';
 import { getAuthToken }               from '../src/utils/api';
 import { impactLight, impactMedium }   from '../src/utils/haptics';
+import { useExitInterstitial }         from '../src/hooks/useExitInterstitial';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'FinalView'>;
 
@@ -262,6 +263,7 @@ export default function FinalViewScreen({ navigation, route }: Props) {
   const { width: W } = useWindowDimensions();
   const { colors } = useTheme();
   const styles = useMemo(() => getStyles(colors), [colors]);
+  useExitInterstitial(navigation);  // show interstitial when leaving the result
 
   // If PreviewScreen already rendered this document, use those URLs directly.
   // This guarantees preview = final output with zero additional server latency.

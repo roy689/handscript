@@ -20,6 +20,7 @@ import { BACKEND_URL } from '../src/config';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getCurrentUserId } from '../src/services/auth';
 import { getAuthToken } from '../src/utils/api';
+import AdBanner from '../src/components/AdBanner';
 
 async function authHeaders(): Promise<Record<string, string>> {
   const token = await getAuthToken();
@@ -337,6 +338,7 @@ export default function CharacterVariantsScreen({ route, navigation }: Props) {
         </Pressable>
       </View>
 
+      <AdBanner />
     </View>
   );
 }

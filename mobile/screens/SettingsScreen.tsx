@@ -11,6 +11,7 @@ import {
 } from 'react-native';
 import { showAlert } from '../src/utils/alert';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import AdBanner from '../src/components/AdBanner';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as StoreReview from 'expo-store-review';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -220,6 +221,7 @@ export default function SettingsScreen({ navigation }: Props) {
 
         <View style={{ height: 40 }} />
       </ScrollView>
+      <AdBanner />
     </SafeAreaView>
   );
 }
