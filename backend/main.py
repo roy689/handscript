@@ -1436,7 +1436,7 @@ async def save_character_samples(body: SaveCharacterSamplesRequest, uid: str = D
     )
 
     # Invalidate cached bank so the next preview render picks up the new samples.
-    _invalidate_bank_cache(body.user_id)
+    _invalidate_bank_cache(uid)
 
     return {
         "status":        "success",
