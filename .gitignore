@@ -14,3 +14,8 @@ backend/data/banks/
 backend/test_output_layout/
 backend/debug_output/
 *.tmp
+
+# Local secrets — NEVER commit
+HANDSCRIPT_SECRETS.md
+*secrets*
+*.secret

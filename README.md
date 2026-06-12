@@ -1,23 +1,66 @@
 # HandScript
 
-**כתב היד שלך, הופך לפונט.** אפליקציית מובייל שלוכדת את כתב היד של המשתמש (תו-תו),
-ומאפשרת לייצר ממנו מסמכים בכתב היד האישי שלו.
+**כתב היד שלך, הופך לפונט.** אפליקציית מובייל לזיהוי וסינתזה של כתב יד (בעברית
+ובלטינית): המשתמש מצלם/מצייר דגימות של כל תו, השרת בונה מאגר אישי, והמשתמש מקליד
+טקסט ומקבל תמונה של הטקסט בכתב היד האישי שלו.
 
-מונורפו הכולל אפליקציית React Native (Expo), שרת Python (FastAPI), וטיפוסים
-משותפים ב-TypeScript.
+> מסמך זה הוא מקור האמת היחיד לפרויקט — מאחד את כל מסמכי ההמשך (handoff) הקודמים.
 
 ---
 
 ## תוכן עניינים
 
+- [ארכיטקטורה](#ארכיטקטורה)
+- [Production — שירותים וכתובות](#production--שירותים-וכתובות)
 - [מבנה הפרויקט](#מבנה-הפרויקט)
 - [שפת העיצוב — Ink & Parchment](#שפת-העיצוב--ink--parchment)
-- [mobile/ — אפליקציית React Native](#mobile--אפליקציית-react-native)
-- [backend/ — שרת FastAPI](#backend--שרת-fastapi)
+- [זרימת הליבה: לכידה → המרה → תוצאה](#זרימת-הליבה-לכידה--המרה--תוצאה)
+- [בחירת Variants (גיוון דגימות)](#בחירת-variants-גיוון-דגימות)
+- [מערכת טיפוגרפיה, ריווח ועובי קו](#מערכת-טיפוגרפיה-ריווח-ועובי-קו)
 - [משתני סביבה](#משתני-סביבה)
-- [פריסה (Deployment)](#פריסה-deployment)
+- [הרצה מקומית ופריסה](#הרצה-מקומית-ופריסה)
 - [תכונות שמומשו](#תכונות-שמומשו)
 - [משימות פתוחות / TODO](#משימות-פתוחות--todo)
+- [טיפים להמשך פיתוח](#טיפים-להמשך-פיתוח)
+
+---
+
+## ארכיטקטורה
+
+```
+Mobile (React Native + Expo SDK 54, New Architecture)
+        │  HTTPS
+        ▼
+Railway  ──►  Backend (FastAPI + Python 3.11, Gunicorn + 2× Uvicorn)
+        │
+        ├──►  Firebase (Auth + Firestore + Cloud Storage)
+        ├──►  Google Cloud Vision API (OCR לעברית)
+        ├──►  Brevo (שליחת מיילים טרנזקציוניים, HTTP API)
+        └──►  Sentry (ניטור שגיאות)
+```
+
+- כל מפתחות Firebase/הסודות נשארים בשרת; המובייל מדבר רק מול ה-backend.
+- ה-backend פורס אוטומטית ב-Railway בכל דחיפה ל-`master` (לא `main`!).
+
+---
+
+## Production — שירותים וכתובות
+
+| שירות | כתובת / מזהה |
+|---|---|
+| Railway Backend | `https://handscript-production-2667.up.railway.app` |
+| GitHub Repo | `https://github.com/roy689/handscript` (branch: **master**) |
+| Firebase Project | `a-written-scanner` (תוכנית Blaze) |
+| Firebase Storage Bucket | `a-written-scanner.firebasestorage.app` |
+| EAS Project ID | `28b061a5-77c0-4634-871b-f9e473e9ba81` |
+| Bundle ID | `com.roey.handscript` (iOS + Android) |
+| Brevo sender | `handscript3@gmail.com` (מאומת) |
+| Sentry | `handscript-backend` |
+
+בדיקת בריאות: `curl https://handscript-production-2667.up.railway.app/health` → `{"status":"ok"}`
+
+> ⚠️ **אבטחה:** אל תכניסו ערכי סוד (API keys, service account) לקבצים שנדחפים ל-git.
+> הם מוגדרים רק ב-Railway → Variables וב-`.env` מקומי (שב-`.gitignore`).
 
 ---
 
@@ -25,218 +68,254 @@
 
 ```
 handscript/
-├── mobile/      React Native (Expo SDK 54) app
-├── backend/     Python FastAPI server (deployed on Railway)
-└── shared/      Shared TypeScript types and constants
+├── backend/                     FastAPI על Railway
+│   ├── main.py                  כל ה-endpoints (~2000 שורות)
+│   ├── modules/
+│   │   ├── auth.py              Firebase Admin SDK auth
+│   │   ├── extractor.py         Vision API + OpenCV — חילוץ תווים
+│   │   ├── firebase_storage.py  Firestore + Cloud Storage (production, lazy init)
+│   │   ├── local_storage.py     אחסון דיסק (dev בלבד)
+│   │   ├── synthesizer.py       בחירת variants + רינדור (shuffled-deck)
+│   │   ├── layout.py            פריסת A4 + אפקט צילום
+│   │   └── validator.py         בדיקת כיסוי תווים
+│   ├── services/
+│   │   ├── auth_service.py      פרוקסי Firebase Auth + שליחת מיילים
+│   │   ├── email_service.py     שליחת מיילי HTML דרך Brevo
+│   │   ├── logo.py              לוגו עגול ל-/static/logo_round.png
+│   │   ├── firebase_service.py  מנוי + usage
+│   │   └── config.py            הפניית firebase_client משותפת
+│   ├── requirements.txt · Dockerfile · railway.json · .env.example
+│
+├── mobile/                      React Native + Expo SDK 54
+│   ├── App.tsx                  Root navigator + RTL + ErrorBoundary + אתחול פרסומות
+│   ├── app.json                 הגדרות Expo, plugins, extra (client IDs, AdMob)
+│   ├── generate-icons.js        מייצר אייקונים עגולים מ-logo.png (jimp)
+│   ├── assets/logo.png          הלוגו הרשמי
+│   ├── screens/                 ראה "זרימת הליבה" למטה
+│   └── src/
+│       ├── config.ts            לוגיקת BACKEND_URL
+│       ├── theme.ts             מערכת העיצוב
+│       ├── services/            firebase.ts, auth.ts, ads.ts, subscription.ts
+│       ├── components/          AdBanner, NativeAdCard, AppOpenAdManager, ...
+│       ├── hooks/               useExitInterstitial
+│       └── utils/               api.ts, haptics.ts, offlineQueue.ts
+│
+├── firestore.rules · storage.rules   (deny-by-default)
+└── README.md                    ← המסמך הזה
 ```
-
-- **Backend** מתארח ב-**Railway** ופורס אוטומטית בכל דחיפה ל-`master`:
-  `https://handscript-production-2667.up.railway.app`
-- **Mobile** נבנה עם **EAS** (`eas build`). פרסומות והתחברות Google דורשות build
-  native — הן **לא** עובדות ב-Expo Go.
-- **Firebase project:** `a-written-scanner` (Auth + Firestore + Storage).
-
-**כלל אצבע לפריסה:**
-- שינוי תחת `backend/` → רק `git push` (Railway פורס, בלי build לאפליקציה).
-- שינוי תחת `mobile/` (קוד, `app.json`, אייקונים, פרסומות) → צריך `eas build`
-  חדש והתקנה מחדש על המכשיר.
 
 ---
 
 ## שפת העיצוב — Ink & Parchment
 
-מוגדרת ב-`mobile/src/theme.ts`. אסתטיקה של "דיו וקלף": משטחי קלף חמים, דיו
-חום-כהה, ודגש כחול עט-נובע.
+מוגדרת ב-`mobile/src/theme.ts`. "דיו וקלף": משטחי קלף חמים, דיו חום-כהה, ודגש
+כחול עט-נובע.
 
 | תפקיד | בהיר | כהה |
 |---|---|---|
 | רקע עמוד | `#F4EFE6` | `#1A1714` |
 | כרטיס | `#FDFAF4` | `#242018` |
 | דיו (טקסט ראשי) | `#1E1812` | `#EDE6DA` |
-| דיו משני | `#6B5744` | `#A09484` |
 | Accent (כחול עט) | `#1E3A5F` | `#5B9BD6` |
 | מסגרת | `#DEDAD1` | `#3A3028` |
 
-- גופן: **Heebo** (400/600/700/800).
-- פינות מעוגלות אומנותיות (`radius.lg = 18`), צללים בגוון דיו חם.
+גופן **Heebo** · פינות `radius.lg = 18` · צללים בגוון דיו חם.
 
 ---
 
-## mobile/ — אפליקציית React Native
+## זרימת הליבה: לכידה → המרה → תוצאה
 
-**Tech:** React Native 0.81 · Expo SDK 54 · TypeScript · New Architecture.
+**מסכים (`mobile/screens/`):** Onboarding (התחברות/הרשמה + Google) · VerifyEmail ·
+ForgotPassword · CharacterList (מאגר) · CharacterConfig · CharacterCapture →
+CharacterSampleReview (שמירה) · CharacterVariants (ניהול דגמים) ·
+HandwritingCustomizer · Editor → Preview → FinalView · Profile · Settings · Paywall ·
+Privacy · Terms · Contact.
 
-**חבילות מרכזיות:**
+**זרימת ההמרה (Editor → Preview → FinalView):**
 
-| חבילה | תפקיד |
-|---|---|
-| `@react-navigation/native` + `native-stack` + `bottom-tabs` | ניווט |
-| `expo-camera` | צילום כתב יד |
-| `expo-image-manipulator` | חיתוך/שינוי גודל לפני העלאה |
-| `expo-media-library` / `expo-sharing` / `expo-print` | שמירה ושיתוף תוצרים |
-| `firebase` | Auth בצד הלקוח |
-| `@react-native-google-signin/google-signin` | התחברות עם Google |
-| `react-native-google-mobile-ads` (**16.3.3**) | פרסומות AdMob |
+1. **EditorScreen** — המשתמש מקליד; ניקוי תווי Unicode בלתי-נראים בכל הקלדה
+   (U+200B–200F, 202A–202E, 2060–206F, FEFF) למניעת "כתב מחשב". בלחיצת "המר":
+   `Keyboard.dismiss()`, אימות תווים (`/validate`), משיכת גליפים (`/glyphs`), וניווט.
+   ספירת השימוש **לא** גדלה כאן.
+2. **PreviewScreen** — לב המעבר. שתי שכבות: ציור מקומי מיידי (canvas) + רינדור
+   אמיתי מהשרת (`/convert-both` עם `preview=true`, debounce ~600ms). זה מבטיח
+   שהתצוגה בעריכה תואמת לקובץ הסופי. בחירת ה-variants משכפלת את לוגיקת השרת.
+3. **FinalViewScreen** — מקבל את `previewUrls` ומציג מיד **ללא רינדור נוסף** (נאמנות
+   מלאה — בדיוק מה שהמשתמש ראה). ברקע קורא **`/finalize`** ששומר את אותם בתים
+   לאחסון קבוע ומגדיל את ספירת השימוש פעם אחת. שמירה/שיתוף/ייצוא ממתינים לקבצים
+   הקבועים. מצב "נקי" ומצב "צילום" נטענים מראש להחלפה מיידית.
 
-**מסכים עיקריים (`mobile/screens/`):**
+> **עיקרון נאמנות:** מנוע הסינתזה **אינו דטרמיניסטי** (אקראיות בבחירת variants, רעידה,
+> ריווח, רעש). לכן הסופי זהה לתצוגה רק ע"י **שימוש חוזר באותו קובץ רינדור**, לא רינדור
+> מחדש. `/finalize` מעלה את הבתים הקיימים; אם נמחקו, הוא מחזיר `expired` והלקוח מרנדר מחדש.
 
-- `OnboardingScreen` — התחברות / הרשמה (כולל כפתור Google), עם לוגו עגול.
-- `VerifyEmailScreen` / `ForgotPasswordScreen` — אימות מייל ואיפוס סיסמה.
-- `CharacterListScreen` — מאגר האותיות (מכיל פרסומת native).
-- `CharacterCaptureScreen` → `CharacterSampleReviewScreen` — לכידת דגימות של תו ושמירה.
-- `CharacterVariantsScreen` — צפייה/מחיקה של דגימות שמורות.
-- `HandwritingCustomizerScreen` — מכוון פרמטרים (גודל, ריווח, רעידת שורה) עם תצוגה חיה.
-- `EditorScreen` → `PreviewScreen` → `FinalViewScreen` — הקלדת טקסט, המרה לכתב יד, ותוצאה סופית.
-- `ProfileScreen` / `SettingsScreen` / `ContactScreen` / `Privacy` / `Terms`.
+---
 
-**הרצה (פיתוח):**
-```bash
-cd mobile
-npm install
-npx expo start --dev-client   # dev client — לא Expo Go (בגלל מודולים native)
+## בחירת Variants (גיוון דגימות)
+
+מבטיח שכל דגימה של אות מופיעה לסירוגין (ולא תמיד אותה אחת).
+
+- **Shuffled deck:** לכל אות נוצרת חפיסה של כל האינדקסים בסדר אקראי; מוציאים
+  אחד-אחד עד שהחפיסה ריקה ואז מערבבים מחדש → כל variant מופיע פעם אחת לפני חזרה.
+- **שרת** (`synthesizer.py`, `VariantPicker`): `_pick_queues` (חפיסה לכל אות),
+  `_cache` (LRU 200 תמונות). `pick()` שולף מהחפיסה.
+- **לקוח** (`PreviewScreen`): משכפל את הלוגיקה עם `seededRand` בנוסחת **Mulberry32**
+  (hash שלם, התפלגות אחידה) כדי שתצוגה ושרת יבחרו אותו דבר לכל מיקום.
+
+**Firestore:**
 ```
-
-**בנייה עצמאית להתקנה ישירה (עם פרסומות):**
-```bash
-eas build --profile preview --platform android
-```
-
-**אייקון ומסך פתיחה:** נוצרים מ-`assets/logo.png` ע"י `generate-icons.js`
-(משתמש ב-`jimp`), בצורה **עגולה** על רקע קלף:
-```bash
-node generate-icons.js   # מייצר icon.png, adaptive-icon.png, splash-icon.png, favicon.png
+character_banks/{user_id}/chars/{char_hex}/
+  character: "א"
+  variants: [{ url, storage_path, added_at }]   # עד 5
+  count, updated_at
 ```
 
 ---
 
-## backend/ — שרת FastAPI
+## מערכת טיפוגרפיה, ריווח ועובי קו
 
-**Tech:** Python 3.11 · FastAPI · Uvicorn/Gunicorn · OpenCV · Pillow · NumPy ·
-firebase-admin.
+ב-`backend/modules/synthesizer.py`:
 
-**זרימת ליבה:** לכידת דגימות → חילוץ תו (סף, הסרת קווי מחברת, נרמול עובי קו,
-וקטוריזציה ב-potrace) → אחסון ב-Firebase Storage/Firestore → סינתזה (`synthesizer`)
-שמרכיבה עמוד בכתב היד מהדגימות.
-
-**Endpoints עיקריים:**
-
-| נתיב | תיאור |
-|---|---|
-| `POST /auth/login` · `/auth/signup` · `/auth/signin-google` · `/auth/refresh` | פרוקסי אימות (מחזיק את מפתחות Firebase בשרת) |
-| `POST /auth/reset-password` · `/auth/resend-verification` · `/auth/check-verification` | זרימות מייל |
-| `POST /save-character-samples` | שמירת דגימות של תו |
-| `GET /character/{uid}/{char}/variants` · `DELETE .../variant/{i}` | צפייה/מחיקת דגימות |
-| `POST /convert` · `/convert-both` · `/glyphs` | המרת טקסט לכתב יד |
-| `GET /subscription/{uid}` · `GET /health` | שונות |
-
-**שירותים/מודולים מרכזיים:**
-- `services/auth_service.py` — פרוקסי Firebase Auth + שליחת מיילים מותאמים.
-- `services/email_service.py` — שליחת מיילי HTML דרך **Brevo HTTP API**.
-- `services/logo.py` — מייצר לוגו עגול בהפעלה ומגיש ב-`/static/logo_round.png`.
-- `modules/extractor.py`, `modules/synthesizer.py` — חילוץ וסינתזת כתב יד.
-- `modules/firebase_storage.py` — Firestore + Storage (אתחול עצל).
-
-**הרצה (מקומית):**
-```bash
-cd backend
-python -m venv venv
-venv\Scripts\activate          # Windows  (mac/linux: source venv/bin/activate)
-pip install -r requirements.txt
-uvicorn main:app --reload
 ```
-העתק `.env.example` ל-`.env` ומלא ערכים לפני הרצה.
+_LINE_HEIGHT = 180px · _TARGET_CHAR_H = 80px · _BASELINE_Y_RATIO = 0.62
+baseline_y = 112px ·  char_height = round(80 × h_ratio)
+top_y = baseline_y − round(char_height × asc_ratio)   ← נקודת ההדבקה של הגליף
+```
+
+- `_CHAR_HEIGHT_RATIO` / `_CHAR_ASCENDER_RATIO` — טבלאות מלאות לכל תו (עברית כולל
+  סופיות, ספרות, לטינית, פיסוק, מתמטיקה).
+- `asc_ratio = 1.0` יושב על baseline · `>1.0` ascender · `<1.0` descender (ך, ן, g, j).
+- **ריווח אותיות**: נמדד דיו-לדיו (`_hcrop_to_ink`). מיפוי `slider×0.3 − 8`; מינימום
+  שלילי = חפיפה קלה (השרת מגביל ל-max −25% מרוחב אות ממוצע).
+- **ריווח מילים**: נמדד דיו-לדיו. מיפוי `slider×0.85`; מינימום 0 = מילים צמודות.
+- **עובי קו**: `normalize_stroke_width` (יעד `_STROKE_RATIO = 0.075`) רץ **תמיד**
+  ברינדור (גם preview) וגם בשמירת דגימות חדשות → עובי אחיד בתצוגה ובסופי.
 
 ---
 
 ## משתני סביבה
 
-**Backend (Railway → Variables, או `backend/.env` מקומית):**
+**Backend** (Railway → Variables, או `backend/.env`):
 
 | משתנה | תיאור |
 |---|---|
 | `APP_ENV` | `production` / `development` |
-| `FIREBASE_SERVICE_ACCOUNT` | JSON של חשבון השירות (או `FIREBASE_CREDENTIALS_JSON` / נתיב קובץ מקומי) |
+| `SERVER_HOST` · `TRUSTED_HOSTS` · `ALLOWED_ORIGINS` · `WEB_CONCURRENCY` | רשת/CORS |
+| `FIREBASE_SERVICE_ACCOUNT` | JSON של service account (סוד) |
 | `FIREBASE_STORAGE_BUCKET` | `a-written-scanner.firebasestorage.app` |
-| `FIREBASE_WEB_API_KEY` | מפתח Web של Firebase (לפרוקסי האימות) |
-| `GOOGLE_VISION_API_KEY` | (אם בשימוש) |
-| `SERVER_HOST` · `ALLOWED_ORIGINS` · `TRUSTED_HOSTS` | רשת/CORS בפרודקשן |
-| `BREVO_API_KEY` | מפתח Brevo לשליחת מיילים |
-| `BREVO_SENDER_EMAIL` | כתובת שולח מאומתת ב-Brevo (נופל ל-`SMTP_FROM`) |
-| `EMAIL_FROM_NAME` | שם השולח (ברירת מחדל: `HandScript`) |
-| `SENTRY_DSN` · `ENABLE_DEBUG_ENDPOINTS` | אופציונלי |
+| `FIREBASE_WEB_API_KEY` | מפתח Web (לפרוקסי האימות) |
+| `GOOGLE_VISION_API_KEY` | OCR |
+| `BREVO_API_KEY` · `BREVO_SENDER_EMAIL` · `EMAIL_FROM_NAME` | שליחת מיילים |
+| `SENTRY_DSN` · `SENTRY_TRACES_SAMPLE_RATE` · `ENABLE_DEBUG_ENDPOINTS` | אופציונלי |
 
-**Mobile (`mobile/app.json` → `extra`):**
+> `SKIP_AUTH` **אסור** בייצור.
 
-| משתנה | תיאור |
-|---|---|
-| `BACKEND_URL` | כתובת ה-backend ב-Railway |
-| `GOOGLE_WEB_CLIENT_ID` | מזהה OAuth מ-Firebase (מוגדר) |
-| `GOOGLE_IOS_CLIENT_ID` | TODO — דורש רישום אפליקציית iOS |
-| `ADMOB_BANNER_ID` / `ADMOB_INTERSTITIAL_ID` / `ADMOB_APP_OPEN_ID` / `ADMOB_NATIVE_ID` | מזהי יחידות פרסומת (כרגע placeholders — בדיקה ב-dev) |
-
-מזהי ה-AdMob App ID נמצאים תחת `plugins` ב-`app.json` (`androidAppId`/`iosAppId`).
+**Mobile** (`mobile/app.json` → `extra`):
+`BACKEND_URL` · `GOOGLE_WEB_CLIENT_ID` (מוגדר) · `GOOGLE_IOS_CLIENT_ID` (TODO) ·
+`ADMOB_BANNER_ID` / `_INTERSTITIAL_ID` / `_APP_OPEN_ID` / `_NATIVE_ID` (כרגע placeholders).
+מזהי AdMob App ID תחת `plugins` (`androidAppId`/`iosAppId`).
 
 ---
 
-## פריסה (Deployment)
+## הרצה מקומית ופריסה
 
-- **Backend:** דחיפה ל-`master` ב-GitHub → Railway בונה ופורס אוטומטית.
-- **Mobile:** `eas build --profile <preview|development> --platform android` →
-  התקנת ה-APK על המכשיר. `development` דורש שרת Metro רץ; `preview` עצמאי.
+**Backend (dev):**
+```cmd
+cd backend
+venv\Scripts\activate
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+**Mobile (dev):**
+```cmd
+cd mobile
+npm install
+npx expo start --dev-client --clear --lan
+```
+
+**בנייה (פרסומות/Google דורשים build native — לא Expo Go):**
+```cmd
+cd mobile
+node generate-icons.js                                  REM אייקונים עגולים
+eas build --profile preview --platform android          REM APK עצמאי לבדיקה
+```
+
+**Git / פריסה:**
+```cmd
+cd "C:\Users\Roey\OneDrive\Desktop\New folder\handscript"
+git add <files>
+git status                      REM ודא שאין .env / serviceAccountKey
+git commit -m "..."
+git push origin master          REM Railway פורס תוך 3–7 דקות
+```
+
+**כלל אצבע:** שינוי ב-`backend/` → רק `git push`. שינוי ב-`mobile/` → `eas build` חדש + התקנה.
 
 ---
 
 ## תכונות שמומשו
 
-### מיילי אימות ואיפוס סיסמה (מותאמים אישית)
+**אימות וחשבון:** Email/Password (פרוקסי בשרת), אימות מייל, איפוס סיסמה, אישור תנאים,
+מחיקת חשבון. Rate limiting (20/דק' כללי, 6/דק' המרה, 3/דק' איפוס). הגנות path-traversal,
+TrustedHost, HTTPS-redirect, וכללי Firestore/Storage deny-by-default.
 
-- קונסולת Firebase **חוסמת עריכה** של תבניות המייל המובנות בפרויקט הזה, ולכן
-  המיילים מורכבים ונשלחים מה-backend.
-- זרימה: ה-backend מייצר את קישור הפעולה דרך Firebase Admin SDK
-  (`generate_email_verification_link` / `generate_password_reset_link`), ואז
-  שולח מייל HTML מעוצב.
-- שליחה דרך **Brevo HTTP API** (HTTPS) ולא SMTP — כי Railway חוסם פורטי SMTP
-  יוצאים (25/465/587); SMTP ישיר נכשל ב-`Network is unreachable`.
-- עיצוב המייל תואם את שפת **Ink & Parchment**, עם הלוגו האמיתי כעיגול בכותרת.
-- קוד: `backend/services/email_service.py`, מחובר ל-`auth_service.py`. בדיקה:
-  `backend/test_smtp.py`.
+**מיילי אימות/איפוס מותאמים:** קונסולת Firebase חוסמת עריכת תבניות, ולכן ה-backend
+מייצר את הקישור (Admin SDK) ושולח מייל HTML מעוצב (Ink & Parchment, לוגו עגול)
+דרך **Brevo HTTP API** — לא SMTP, כי Railway חוסם פורטי SMTP יוצאים. קוד:
+`services/email_service.py` + `auth_service.py`. בדיקה: `backend/test_smtp.py`.
 
-### התחברות עם Google
+**התחברות Google:** ממומש בקוד (`@react-native-google-signin` + `/auth/signin-google`).
+Google מופעל ב-Firebase Auth, ו-`GOOGLE_WEB_CLIENT_ID` אמיתי הוכנס. נותר: iOS client ID
++ `iosUrlScheme`, SHA-1 לאנדרואיד, ו-build native.
 
-- ממומש בקוד (mobile `src/services/auth.ts` + backend `/auth/signin-google`).
-  הושלם: Google מופעל ב-Firebase Auth, ו-`GOOGLE_WEB_CLIENT_ID` אמיתי ב-`app.json`.
-- נותר: מזהה iOS + `iosUrlScheme`, טביעת SHA-1 של אנדרואיד ב-Firebase, ו-build native.
+**פרסומות AdMob (חינמיים):** `react-native-google-mobile-ads` **16.3.3** (נדרש ל-Expo
+54 / RN 0.81). `src/services/ads.ts` + קומפוננטות:
+App Open (חזרה מרקע, cap 4 דק'), Native (במאגר), Interstitial (יציאה מ-FinalView /
+אחרי סקירת דגימות, cap 3 דק'), Banners (מסכים שקטים). ללא פרסומות במצלמה/עורך/preview
+חי/onboarding/תוצאה ראשונה. `shouldShowAds()` מרוכז להשבתה עתידית ל-Pro.
 
-### פרסומות AdMob (למשתמשים חינמיים)
+**מיתוג:** אייקון, adaptive-icon, splash ו-favicon נוצרים מ-`logo.png` (`generate-icons.js`,
+jimp), **עגולים** על רקע קלף.
 
-- ספרייה: `react-native-google-mobile-ads` **16.3.3** (נדרש ל-Expo 54 / RN 0.81;
-  גרסה 14.x נכשלה בקומפילציה).
-- מימוש ב-`mobile/src/services/ads.ts` + קומפוננטות:
-  - **App Open** — בחזרה מהרקע (cap 4 דק') — `AppOpenAdManager`.
-  - **Native** — בתוך מאגר האותיות — `NativeAdCard`.
-  - **Interstitial** — ביציאה מ-FinalView ואחרי סקירת דגימות (cap 3 דק') — `useExitInterstitial`.
-  - **Banners** — במסכים שקטים (Variants, Settings, Profile, Contact, Privacy, Terms, Customizer) — `AdBanner`.
-  - ללא פרסומות: מצלמה, עורך, תצוגה חיה, onboarding, תוצאה ראשונה.
-- `shouldShowAds()` מרוכז כדי לאפשר השבתה ל-Pro בעתיד.
+**סינתזה ונאמנות:** Shuffled-deck variant selection (שרת + לקוח Mulberry32), endpoint
+`/finalize` לשמירת הרינדור המדויק בלי רינדור מחדש, ריווח דיו-לדיו, ונרמול עובי קו עקבי.
 
-### מיתוג — אייקון ומסך פתיחה
-
-- נוצרים מ-`assets/logo.png` ע"י `mobile/generate-icons.js` (jimp), בצורה
-  **עגולה** על רקע קלף. רקעי splash/adaptive ב-`app.json` הוגדרו ל-`#F4EFE6`.
-
-### תיקוני באגים
-
-- **500 בשמירת תו** — `save-character-samples` שמר את התו אך אז קרא ל-
-  `_invalidate_bank_cache(body.user_id)`, ולמודל הבקשה אין `user_id` (הוא מגיע
-  מה-JWT כ-`uid`). ה-`AttributeError` החזיר 500 *אחרי* השמירה, כך שהתו נשמר אך
-  המשתמש ראה שגיאה. תוקן לשימוש ב-`uid` (`backend/main.py`).
+**תיקוני באגים מרכזיים:**
+- **500 בשמירת תו** — `save-character-samples` קרא `_invalidate_bank_cache(body.user_id)`
+  אך למודל אין `user_id` (מגיע מה-JWT כ-`uid`). ה-`AttributeError` החזיר 500 *אחרי*
+  השמירה (התו נשמר אך הוצגה שגיאה). תוקן ל-`uid`.
+- **500 ב-`/convert-both`** — `ImportError: prefetch_bank_images` ו-`NameError: _STROKE_RATIO`
+  מגרסאות ישנות; מתוקנים בקוד הנוכחי (שני הסמלים מוגדרים ב-`synthesizer.py`).
 
 ---
 
 ## משימות פתוחות / TODO
 
+**להשלמה לפני release:**
 - להחליף מזהי בדיקה של AdMob (App ID + יחידות) במזהים אמיתיים; להוסיף מסך הסכמת
-  פרטיות (UMP/GDPR) לפני production.
-- להשלים הגדרת Google Sign-In: מזהה iOS, `iosUrlScheme`, ו-SHA-1 לאנדרואיד.
-- לבטל את סיסמת האפליקציה הישנה של Gmail (אם עוד לא בוטלה) — היא הוחלפה ב-Brevo.
-- לשקול הורדת רמת ה-DEBUG של `modules.synthesizer` ב-production (כמות לוגים גבוהה).
+  פרטיות (UMP/GDPR).
+- להשלים Google Sign-In: iOS client ID + `iosUrlScheme`, SHA-1 לאנדרואיד.
+- **Apple Sign-In** — חובה ל-iOS release אם יש כניסה חברתית. לא מומש.
+- אימות טפסים אחיד, מצבי ריק/טעינה/שגיאה אחידים בכל המסכים.
+- EAS production build + TestFlight + Play Internal testing.
+
+**אחזקה/אופטימיזציה:**
+- להוריד את רמת ה-DEBUG של `modules.synthesizer` בפרודקשן (כמות לוגים גבוהה גרמה
+  ל-Railway להפיל לוגים).
+- נרמול חד-פעמי של עובי קו לדגימות **קיימות** (כרגע רק חדשות מנורמלות בשמירה).
+- caching ל-`load_character_bank`, retry על קריאות Firebase, CDN לקבצים סטטיים.
+- לבטל את סיסמת האפליקציה הישנה של Gmail (הוחלפה ב-Brevo).
+
+---
+
+## טיפים להמשך פיתוח
+
+- **Grep לפני Read** — חיפוש ממוקד עדיף על קריאת קבצים שלמים. `main.py` הוא ~2000 שורות.
+- **Read עם offset/limit** — קרא רק את החלק הרלוונטי; השתמש בעץ המבנה כמפה.
+- **דחיפה תכופה** — אל תצבור שינויים לא-committed; ודא תמיד שאין `.env`/מפתחות בדחיפה.
+- **הסביבה הלינוקסית** (git/python/build מהצ'אט) לא תמיד זמינה במחשב הזה
+  (`HYPERVISOR_VIRT_DISABLED`); המשתמש מריץ פקודות מהמסוף בעצמו.
+
+---
+
+**משתמש:** רועי · `r0534571051@gmail.com` · ישראל · עברית · RTL
