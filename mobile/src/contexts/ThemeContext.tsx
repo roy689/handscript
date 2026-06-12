@@ -2,7 +2,9 @@ import React, { createContext, useCallback, useContext, useEffect, useState } fr
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { lightColors, darkColors } from '../theme';
 
-export type ThemeColors = typeof lightColors;
+// Mapped to `string` (not the literal hex types of the `as const` palette) so
+// both lightColors and darkColors satisfy the same type.
+export type ThemeColors = { [K in keyof typeof lightColors]: string };
 export type ThemeMode   = 'light' | 'dark';
 
 interface ThemeContextValue {

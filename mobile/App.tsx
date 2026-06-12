@@ -73,6 +73,15 @@ const RootStack = createNativeStackNavigator<RootStackParamList>();
 const Tab       = createBottomTabNavigator();
 type InitialRoute = keyof RootStackParamList;
 
+// Tab screens (Editor / CharacterList / Profile) declare their Props as
+// NativeStackScreenProps because at runtime they navigate through the PARENT
+// stack (the tab navigator is nested inside RootStack, so navigation calls
+// bubble up). TypeScript can't see that nesting, so registering them in the
+// untyped Tab navigator fails. The fully-typed fix is CompositeScreenProps in
+// every screen; this cast is the pragmatic equivalent with zero runtime change.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyScreen = React.ComponentType<any>;
+
 // ── Tab icon ──────────────────────────────────────────────────────────────────
 
 type IoniconsName = React.ComponentProps<typeof Ionicons>['name'];
@@ -144,7 +153,7 @@ function MainTabs() {
     >
       <Tab.Screen
         name="Editor"
-        component={EditorScreen}
+        component={EditorScreen as AnyScreen}
         options={{
           title:        'עורך טקסט',
           tabBarLabel:  'עורך',
@@ -153,7 +162,7 @@ function MainTabs() {
       />
       <Tab.Screen
         name="CharacterList"
-        component={CharacterListScreen}
+        component={CharacterListScreen as AnyScreen}
         options={{
           title:        'מאגר אותיות',
           tabBarLabel:  'מאגר',
@@ -162,7 +171,7 @@ function MainTabs() {
       />
       <Tab.Screen
         name="Profile"
-        component={ProfileScreen}
+        component={ProfileScreen as AnyScreen}
         options={{
           title:        'פרופיל',
           tabBarLabel:  'פרופיל',

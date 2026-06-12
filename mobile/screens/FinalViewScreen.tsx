@@ -542,8 +542,9 @@ export default function FinalViewScreen({ navigation, route }: Props) {
       if (!isAvailable) { showAlert('שיתוף לא זמין', 'המכשיר אינו תומך בשיתוף'); return; }
 
       const urls = await getExportUrls();
-      if (urls.length === 1) {
-        const localUri = await getLocalUri(urls[0]);  // cached — no re-download
+      const firstUrl = urls[0];
+      if (urls.length === 1 && firstUrl) {
+        const localUri = await getLocalUri(firstUrl);  // cached — no re-download
         await Sharing.shareAsync(localUri, { mimeType: 'image/png', dialogTitle: 'שתף כתב יד' });
       } else {
         // buildPdf uses getLocalUri internally — reuses already-downloaded files

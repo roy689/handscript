@@ -140,9 +140,9 @@ export default function CharacterListScreen({ navigation }: Props) {
     return SECTIONS
       .map(sec => ({
         ...sec,
-        data: [sec.data[0].filter(c => c === searchChar)],
+        data: [(sec.data[0] ?? []).filter(c => c === searchChar)],
       }))
-      .filter(sec => sec.data[0].length > 0);
+      .filter(sec => (sec.data[0] ?? []).length > 0);
   }, [searchChar]);
 
   const captured  = Object.values(status).filter(s => s.captured).length;
@@ -370,7 +370,8 @@ export default function CharacterListScreen({ navigation }: Props) {
         }
         renderSectionHeader={({ section }) => {
           const idx = SECTIONS.findIndex(s => s.key === section.key);
-          const anim = sectionAnims[idx] ?? sectionAnims[0];
+          // SECTIONS is a non-empty constant, so index 0 always exists.
+          const anim = sectionAnims[idx] ?? sectionAnims[0]!;
           return (
             <Animated.View style={[
               styles.sectionHeader,
@@ -387,7 +388,7 @@ export default function CharacterListScreen({ navigation }: Props) {
         }}
         renderItem={({ item, section }) => {
           const idx  = SECTIONS.findIndex(s => s.key === section.key);
-          const anim = sectionAnims[idx] ?? sectionAnims[0];
+          const anim = sectionAnims[idx] ?? sectionAnims[0]!;
           return (
             <Animated.View style={{
               opacity:   anim,

@@ -42,17 +42,21 @@ interface Props {
 type Point = { x: number; y: number };
 
 function buildSvgPath(pts: Point[]): string {
-  if (pts.length === 0) return '';
+  const first = pts[0];
+  if (!first) return '';
   if (pts.length === 1) {
-    return `M ${pts[0].x} ${pts[0].y} L ${pts[0].x + 0.5} ${pts[0].y + 0.5}`;
+    return `M ${first.x} ${first.y} L ${first.x + 0.5} ${first.y + 0.5}`;
   }
-  let d = `M ${pts[0].x} ${pts[0].y}`;
+  let d = `M ${first.x} ${first.y}`;
   for (let i = 1; i < pts.length - 1; i++) {
-    const mx = (pts[i].x + pts[i + 1].x) / 2;
-    const my = (pts[i].y + pts[i + 1].y) / 2;
-    d += ` Q ${pts[i].x} ${pts[i].y} ${mx} ${my}`;
+    const cur  = pts[i]!;
+    const next = pts[i + 1]!;
+    const mx = (cur.x + next.x) / 2;
+    const my = (cur.y + next.y) / 2;
+    d += ` Q ${cur.x} ${cur.y} ${mx} ${my}`;
   }
-  d += ` L ${pts[pts.length - 1].x} ${pts[pts.length - 1].y}`;
+  const last = pts[pts.length - 1]!;
+  d += ` L ${last.x} ${last.y}`;
   return d;
 }
 
@@ -305,9 +309,10 @@ const DrawingCanvas = forwardRef<DrawingCanvasRef, Props>(({ size }, ref) => {
 
   const getBoundingBox = useCallback((): BoundingBox | null => {
     const pts = allPoints.current;
-    if (pts.length === 0) return null;
-    let minX = pts[0].x, maxX = pts[0].x;
-    let minY = pts[0].y, maxY = pts[0].y;
+    const first = pts[0];
+    if (!first) return null;
+    let minX = first.x, maxX = first.x;
+    let minY = first.y, maxY = first.y;
     for (const p of pts) {
       if (p.x < minX) minX = p.x;
       if (p.x > maxX) maxX = p.x;

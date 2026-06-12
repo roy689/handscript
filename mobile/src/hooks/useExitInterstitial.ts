@@ -10,7 +10,10 @@
 import { useEffect } from 'react';
 import { maybeShowInterstitial } from '../services/ads';
 
-export function useExitInterstitial(navigation: { addListener: (e: string, cb: () => void) => () => void }) {
+// Structural type wide enough for any react-navigation prop: addListener is
+// generically keyed there ('blur' | 'focus' | ...), so a `string` parameter is
+// too loose to assign. Accepting `(e: 'blur', ...)` matches every navigator.
+export function useExitInterstitial(navigation: { addListener: (e: 'blur', cb: () => void) => () => void }) {
   useEffect(() => {
     const unsub = navigation.addListener('blur', () => {
       maybeShowInterstitial();

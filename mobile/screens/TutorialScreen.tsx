@@ -93,7 +93,9 @@ export default function TutorialScreen({ navigation }: Props) {
   const fadeAnim  = useRef(new Animated.Value(1)).current;
   const slideAnim = useRef(new Animated.Value(0)).current; // translateX for button enter
 
-  const slide = SLIDES[index];
+  // SLIDES is a non-empty constant and `index` is always kept in range by goTo,
+  // so the fallback never fires at runtime — it only narrows the type for TS.
+  const slide = SLIDES[index] ?? SLIDES[0]!;
   const isLast = index === SLIDES.length - 1;
 
   // ── Navigate to a different slide with a crossfade ────────────────────────

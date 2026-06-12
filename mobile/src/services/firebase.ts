@@ -101,7 +101,9 @@ class _Auth {
 
   private async _getToken(forceRefresh: boolean): Promise<string> {
     if (!forceRefresh) {
-      const [[, token], [, expStr]] = await AsyncStorage.multiGet([_K_TOKEN, _K_EXP]);
+      const pairs  = await AsyncStorage.multiGet([_K_TOKEN, _K_EXP]);
+      const token  = pairs[0]?.[1];
+      const expStr = pairs[1]?.[1];
       if (token && Date.now() < parseInt(expStr ?? '0', 10) - 60_000) {
         return token;
       }
