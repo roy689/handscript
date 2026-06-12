@@ -169,9 +169,42 @@ def configure(server_base_url: str) -> None:
     pass
 
 
+# ── Bank versioning (REWRITE_PLAN §3.1) ───────────────────────────────────────
+# Every mutation of the glyph bank (add / replace / delete a variant or char)
+# bumps an integer `version` on the parent doc character_banks/{user_id}.
+# Renders pin themselves to a version so a deterministic (text, style, seed,
+# bank_version) tuple always reproduces the same bytes — even if the user
+# edits their bank between preview and finalize.
+
+def _bump_bank_version(user_id: str) -> None:
+    """Atomically increment the bank version. Never raises (best-effort)."""
+    try:
+        _db().collection("character_banks").document(user_id).set(
+            {
+                "version":    firestore.firestore.Increment(1),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            merge=True,
+        )
+    except Exception as exc:
+        logger.error("_bump_bank_version failed for %s: %s", user_id, exc)
+
+
+def get_bank_version(user_id: str) -> int:
+    """Current bank version; 0 for legacy banks that were never bumped."""
+    try:
+        doc = _db().collection("character_banks").document(user_id).get()
+        if doc.exists:
+            return int(doc.to_dict().get("version", 0) or 0)
+    except Exception as exc:
+        logger.error("get_bank_version failed for %s: %s", user_id, exc)
+    return 0
+
+
 def save_character_bank(user_id: str, bank: dict) -> bool:
     db = _db()
     all_ok = True
+    changed = False
 
     for char, value in bank.items():
         try:
@@ -220,12 +253,16 @@ def save_character_bank(user_id: str, bank: dict) -> bool:
                 "count": len(new_variants),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
+            changed = True
             logger.info(
                 "Saved %d variants for char '%s' (user=%s)", len(new_variants), char, user_id
             )
         except Exception as exc:
             logger.error("Failed to save char '%s': %s", char, exc)
             all_ok = False
+
+    if changed:
+        _bump_bank_version(user_id)
 
     return all_ok
 
@@ -320,6 +357,7 @@ def delete_character_variant(user_id: str, char: str, index: int) -> bool:
 
         if not variants:
             char_ref.delete()
+            _bump_bank_version(user_id)
             return True
 
         char_ref.set({
@@ -328,6 +366,7 @@ def delete_character_variant(user_id: str, char: str, index: int) -> bool:
             "count": len(variants),
             "updated_at": datetime.now(timezone.utc).isoformat(),
         })
+        _bump_bank_version(user_id)
         return True
     except Exception as exc:
         logger.error("delete_character_variant failed: %s", exc)
@@ -353,6 +392,7 @@ def delete_character(user_id: str, char: str) -> bool:
                     except Exception:
                         pass
             char_ref.delete()
+            _bump_bank_version(user_id)
         return True
     except Exception as exc:
         logger.error("delete_character failed: %s", exc)

@@ -234,12 +234,18 @@ def _get_lighting_maps(h: int, w: int) -> dict:
     return maps
 
 
-def apply_photo_effect(page: np.ndarray) -> np.ndarray:
+def apply_photo_effect(page: np.ndarray, seed: int | None = None) -> np.ndarray:
     """
     Apply realistic phone-scan post-processing to a fully-rendered A4 page.
 
     Processes at 50 % resolution for speed (4× fewer pixels), which is still
     ample quality for on-screen display and gallery export.
+
+    seed : int | None
+        When given, the paper-fiber texture and sensor noise are deterministic
+        — same seed → byte-identical photo effect (required for the WYSIWYG
+        contract: preview bytes must be reproducible at finalize time).
+        None → fresh entropy per call (legacy behaviour).
 
     Pipeline:
     1. Downscale to 50 %
@@ -267,9 +273,9 @@ def apply_photo_effect(page: np.ndarray) -> np.ndarray:
     arr[is_bg, 2] *= 0.930   # B: -7 %  → warm cream
 
     # ── 2. Paper fiber texture ────────────────────────────────────────────
-    # Use a fresh, truly random seed each call so every document gets a unique
-    # paper texture — previously seed=42 made every scan identical.
-    rng   = np.random.default_rng()
+    # seed=None → fresh entropy (every document gets a unique paper texture).
+    # seed=int  → deterministic texture, reproducible at finalize time.
+    rng   = np.random.default_rng(seed)
     fiber = rng.normal(0.0, 12.0, (h, w)).astype(np.float32)
     arr[..., :3] += fiber[..., np.newaxis] * (0.08 * 255.0 / 12.0)
 

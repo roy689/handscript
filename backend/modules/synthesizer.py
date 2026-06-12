@@ -186,7 +186,7 @@ class VariantPicker:
     # Public methods
     # ------------------------------------------------------------------
 
-    def pick(self, char: str) -> Optional[np.ndarray]:
+    def pick(self, char: str, rng: "random.Random | None" = None) -> Optional[np.ndarray]:
         """
         Return an RGBA numpy array for one variant of *char*.
 
@@ -236,7 +236,9 @@ class VariantPicker:
         queue = self._pick_queues.get(bank_key)
         if not queue:
             deck = list(range(n))
-            random.shuffle(deck)
+            # Seeded shuffle when rng is provided → deterministic variant
+            # rotation per document seed. None → legacy random behaviour.
+            (rng if rng is not None else random).shuffle(deck)
             # Avoid starting the fresh deck with the card we just used.
             last = self._last_used.get(bank_key)
             if last is not None and len(deck) > 1 and deck[0] == last:
@@ -457,7 +459,11 @@ def prefetch_bank_images(bank: dict, max_workers: int = 12) -> None:
 # Jitter and ink simulation
 # ---------------------------------------------------------------------------
 
-def apply_jitter(char_img: np.ndarray, fast_mode: bool = False) -> tuple[np.ndarray, int]:
+def apply_jitter(
+    char_img: np.ndarray,
+    fast_mode: bool = False,
+    rng: "random.Random | None" = None,
+) -> tuple[np.ndarray, int]:
     """
     Apply small random geometric perturbations to a character image so that
     repeated glyphs look hand-drawn rather than stamped.
@@ -486,6 +492,11 @@ def apply_jitter(char_img: np.ndarray, fast_mode: bool = False) -> tuple[np.ndar
         (transformed RGBA array, vertical_offset_pixels)
         vertical_offset_pixels is negative = shift up, positive = shift down.
     """
+    # Deterministic rendering: when *rng* is provided every random draw comes
+    # from it, so the same seed reproduces the exact same jitter. When None,
+    # the module-level `random` keeps legacy (non-deterministic) behaviour.
+    _r = rng if rng is not None else random
+
     # Validate input — promote to RGBA if caller passes a grayscale or BGR array.
     # Normal path: char_img is already RGBA from _load_variant.
     if char_img.ndim != 3 or char_img.shape[2] != 4:
@@ -500,7 +511,7 @@ def apply_jitter(char_img: np.ndarray, fast_mode: bool = False) -> tuple[np.ndar
     # of the glyph is clipped.  The new background pixels are (0,0,0,0)
     # (transparent) because we are in RGBA mode.
     resample = Image.BILINEAR if fast_mode else Image.BICUBIC
-    angle = random.uniform(-2.0, 2.0)
+    angle = _r.uniform(-2.0, 2.0)
     pil_img = pil_img.rotate(
         angle,
         resample=resample,
@@ -511,7 +522,7 @@ def apply_jitter(char_img: np.ndarray, fast_mode: bool = False) -> tuple[np.ndar
     # ------------------------------------------------------------------
     # Step 2 — Scale
     # ------------------------------------------------------------------
-    scale  = random.uniform(0.97, 1.03)
+    scale  = _r.uniform(0.97, 1.03)
     new_w  = max(1, round(pil_img.width  * scale))
     new_h  = max(1, round(pil_img.height * scale))
     pil_img = pil_img.resize((new_w, new_h), Image.BILINEAR if fast_mode else Image.LANCZOS)
@@ -521,7 +532,7 @@ def apply_jitter(char_img: np.ndarray, fast_mode: bool = False) -> tuple[np.ndar
     # ------------------------------------------------------------------
     # Spacing jitter controls the gap to the next character. A negative
     # value means slightly tighter; clamping to 0 honours "do not clip".
-    h_jitter = random.randint(-1, 2)
+    h_jitter = _r.randint(-1, 2)
     pad      = max(0, h_jitter)
     if pad > 0:
         padded = Image.new("RGBA", (pil_img.width + pad, pil_img.height), (0, 0, 0, 0))
@@ -531,12 +542,15 @@ def apply_jitter(char_img: np.ndarray, fast_mode: bool = False) -> tuple[np.ndar
     # ------------------------------------------------------------------
     # Step 4 — Vertical offset (metadata only — returned, not applied)
     # ------------------------------------------------------------------
-    v_offset = random.randint(-3, 3)
+    v_offset = _r.randint(-3, 3)
 
     return np.array(pil_img, dtype=np.uint8), v_offset
 
 
-def apply_ink_simulation(char_img: np.ndarray) -> np.ndarray:
+def apply_ink_simulation(
+    char_img: np.ndarray,
+    rng: "random.Random | None" = None,
+) -> np.ndarray:
     """
     Add subtle ink-variation effects so each glyph looks individually drawn.
 
@@ -564,6 +578,9 @@ def apply_ink_simulation(char_img: np.ndarray) -> np.ndarray:
             f"got shape {char_img.shape}"
         )
 
+    # Seeded RNG for determinism (None → legacy non-deterministic behaviour).
+    _r = rng if rng is not None else random
+
     # ------------------------------------------------------------------
     # Step 1 & 2 — Brightness and contrast via Pillow ImageEnhance.
     #
@@ -578,11 +595,11 @@ def apply_ink_simulation(char_img: np.ndarray) -> np.ndarray:
     pil_rgb = Image.merge("RGB", (r, g, b))
 
     # Brightness: 0.92–1.0 — subtle variation, never dips into "faded" territory
-    brightness = random.uniform(0.92, 1.0)
+    brightness = _r.uniform(0.92, 1.0)
     pil_rgb = ImageEnhance.Brightness(pil_rgb).enhance(brightness)
 
     # Contrast: slight boost (1.05–1.15) to keep strokes punchy
-    contrast = random.uniform(1.05, 1.15)
+    contrast = _r.uniform(1.05, 1.15)
     pil_rgb = ImageEnhance.Contrast(pil_rgb).enhance(contrast)
 
     # Recombine with the untouched alpha channel.
@@ -600,7 +617,10 @@ def apply_ink_simulation(char_img: np.ndarray) -> np.ndarray:
     # ------------------------------------------------------------------
     ink_mask = result[:, :, 3] > 128   # shape (H, W), bool
 
-    noise = np.random.normal(0, 3, result[:, :, :3].shape).astype(np.float32)
+    # numpy noise seeded from the (possibly seeded) python RNG so the entire
+    # glyph appearance is reproducible from one master seed.
+    np_rng = np.random.default_rng(_r.getrandbits(32))
+    noise = np_rng.normal(0, 3, result[:, :, :3].shape).astype(np.float32)
     rgb   = result[:, :, :3]
 
     # Apply noise only where ink_mask is True.
@@ -1084,26 +1104,28 @@ def _add_ink_blob(
     glyph_h: int,
     blob_prob: float,
     ink_rgb: tuple,
+    rng: "random.Random | None" = None,
 ) -> None:
     """
     With probability *blob_prob*, draw a small ink-accumulation dot on *canvas*
     near the start or end of the glyph stroke (simulates pen start/stop blobs).
-    Modifies canvas in-place.
+    Modifies canvas in-place. Seeded via *rng* for deterministic rendering.
     """
-    if blob_prob <= 0 or random.random() > blob_prob:
+    _r = rng if rng is not None else random
+    if blob_prob <= 0 or _r.random() > blob_prob:
         return
     draw = ImageDraw.Draw(canvas)
     r, g, b = ink_rgb
-    for _ in range(random.randint(1, 2)):
+    for _ in range(_r.randint(1, 2)):
         # Blob anchors: right edge (pen start in RTL) or a random mid-stroke point
-        if random.random() < 0.55:
-            bx = glyph_x + glyph_w + random.randint(-2, 2)
-            by = glyph_y + glyph_h - random.randint(0, max(1, glyph_h // 5))
+        if _r.random() < 0.55:
+            bx = glyph_x + glyph_w + _r.randint(-2, 2)
+            by = glyph_y + glyph_h - _r.randint(0, max(1, glyph_h // 5))
         else:
-            bx = glyph_x + random.randint(0, max(1, glyph_w))
-            by = glyph_y + random.randint(0, glyph_h)
-        radius = random.randint(max(4, glyph_h // 10), max(8, glyph_h // 5))
-        alpha  = random.randint(180, 240)
+            bx = glyph_x + _r.randint(0, max(1, glyph_w))
+            by = glyph_y + _r.randint(0, glyph_h)
+        radius = _r.randint(max(4, glyph_h // 10), max(8, glyph_h // 5))
+        alpha  = _r.randint(180, 240)
         draw.ellipse(
             [bx - radius, by - radius, bx + radius, by + radius],
             fill=(r, g, b, alpha),
@@ -1140,6 +1162,7 @@ def compose_line(
     style: "dict | None" = None,
     ink_color: str = "black",
     fast_mode: bool = False,
+    rng: "random.Random | None" = None,
 ) -> np.ndarray:
     """
     Render a single line of text as an RGBA numpy array.
@@ -1178,6 +1201,13 @@ def compose_line(
         return np.zeros((_LINE_HEIGHT, 0, 4), dtype=np.uint8)
 
     # ------------------------------------------------------------------
+    # Deterministic rendering: a seeded rng makes every random decision in
+    # this line (variant picks, jitter, spacing, blobs) reproducible.
+    # None → legacy non-deterministic behaviour (module-level random).
+    # ------------------------------------------------------------------
+    _r = rng if rng is not None else random
+
+    # ------------------------------------------------------------------
     # Style dict — resolve early so all steps below can reference it.
     # ------------------------------------------------------------------
     _st = style or {}
@@ -1192,7 +1222,7 @@ def compose_line(
         if ch == " ":
             glyphs.append(None)
         else:
-            raw = picker.pick(ch)
+            raw = picker.pick(ch, rng=rng)
             if raw is None:
                 logger.warning("compose_line: char %r not in bank — leaving gap", ch)
                 glyphs.append(None)   # character absent from bank → blank gap
@@ -1219,8 +1249,8 @@ def compose_line(
                     raw = normalize_stroke_width(raw, target_char_h_global)
                     logger.debug("compose_line: char=%r  raw=%dx%d → scaled=%dx%d (h_ratio=%.2f)",
                                  ch, raw_h, raw_w, raw.shape[0], raw.shape[1], h_ratio)
-                    jittered, v_off = apply_jitter(raw, fast_mode=fast_mode)
-                    inked           = apply_ink_simulation(jittered)
+                    jittered, v_off = apply_jitter(raw, fast_mode=fast_mode, rng=rng)
+                    inked           = apply_ink_simulation(jittered, rng=rng)
                     inked           = _recolor_glyph(inked, ink_color)
                     # Tight horizontal crop so spacing is measured ink-to-ink,
                     # making it uniform, fully slider-controlled, and able to
@@ -1315,7 +1345,7 @@ def compose_line(
         # the caller did NOT set word_spacing explicitly, otherwise slider=0
         # could never produce touching words.
         floor = round(avg_glyph_w * 0.6) if word_sp_base is None else 0
-        return max(floor, int(random.gauss(_WSP, _WSP_SIGMA)))
+        return max(floor, int(_r.gauss(_WSP, _WSP_SIGMA)))
 
     widths = [
         glyphs[i][0].shape[1] if glyphs[i] is not None else _word_w()
@@ -1326,7 +1356,7 @@ def compose_line(
     # so characters never fully disappear behind each other.
     _CLAMP_NEG = int(-avg_glyph_w * 0.25)
     spacings = [
-        max(_CLAMP_NEG, int(random.gauss(_LSP, _LSP_SIGMA)))
+        max(_CLAMP_NEG, int(_r.gauss(_LSP, _LSP_SIGMA)))
         for _ in visual_indices
     ]
 
@@ -1361,7 +1391,7 @@ def compose_line(
             baseline_dance = (
                 0
                 if is_descender
-                else int(random.gauss(0, target_h_here * (jitter_pct / 100.0)))
+                else int(_r.gauss(0, target_h_here * (jitter_pct / 100.0)))
             )
             if ch_here == 'י':
                 # Yod: pin top to normal x-height top.
@@ -1373,7 +1403,7 @@ def compose_line(
             y = max(0, y)
             canvas.paste(pil_g, (x, y), pil_g)
             # Ink blobs at stroke endpoints
-            _add_ink_blob(canvas, x, y, pil_g.width, pil_g.height, blob_prob, ink_rgb)
+            _add_ink_blob(canvas, x, y, pil_g.width, pil_g.height, blob_prob, ink_rgb, rng=rng)
         x += w + s
 
     return np.array(canvas, dtype=np.uint8)
@@ -1415,6 +1445,7 @@ def compose_paragraph(
     style: "dict | None" = None,
     ink_color: str = "black",
     fast_mode: bool = False,
+    rng: "random.Random | None" = None,
 ) -> list[np.ndarray]:
     """
     Lay out *text* into multiple lines that each fit within *page_width*.
@@ -1446,6 +1477,11 @@ def compose_paragraph(
 
     usable_w = max(1, page_width - 2 * margin)
     _style = style or {}
+    # Deterministic rendering: one sequential rng drives the whole document.
+    # Same (text, style, seed) → identical draws → identical output bytes.
+    # Sequential consumption also gives PREFIX STABILITY: editing text on line
+    # N leaves lines 1…N-1 pixel-identical (their draws come first).
+    _r = rng if rng is not None else random
 
     def _pack_words_into_lines(rendered_words: list[np.ndarray]) -> list[np.ndarray]:
         """Pack a flat list of rendered word-images into wrapped lines."""
@@ -1461,7 +1497,7 @@ def compose_paragraph(
             # Reduced sigma (15 % vs old 20 %) + no 60 % floor — makes spacing
             # consistent across the line and lets slider=0 produce near-zero gaps.
             sigma = word_sp_base * 0.15
-            return max(0, int(random.gauss(word_sp_base, sigma)))
+            return max(0, int(_r.gauss(word_sp_base, sigma)))
 
         out_lines: list[np.ndarray] = []
         line_words: list[np.ndarray] = []
@@ -1509,7 +1545,8 @@ def compose_paragraph(
             chars = list(word)
             dir_  = _detect_direction(chars)
             rendered_words.append(
-                compose_line(chars, picker, dir_, style=_style, ink_color=ink_color, fast_mode=fast_mode)
+                compose_line(chars, picker, dir_, style=_style, ink_color=ink_color,
+                             fast_mode=fast_mode, rng=rng)
             )
 
         # ── Step 2: wrap words into lines ─────────────────────────────────────
@@ -2061,6 +2098,41 @@ def run_tests() -> None:
             assert idx != prev, "Repetition avoidance broken when calling pick('A') repeatedly"
         prev = idx
     print("PASS  repetition avoidance works correctly via normalised key")
+
+    # Test 41 — DETERMINISTIC RENDERING (REWRITE_PLAN §3.1, the WYSIWYG contract)
+    # Same (text, style, seed) → byte-identical output. Different seed → differs.
+    bank_det   = _make_bank({"א": 3, "ב": 2, "ג": 4})
+    _det_style = {"char_height": 80, "letter_spacing": 4, "word_spacing": 35,
+                  "baseline_jitter": 7.5, "ink_blobs": 0.2}
+    _det_text  = "אבג גבא אאב\nבגא אב גג"
+
+    def _render_det(seed_val: int) -> bytes:
+        picker_det = VariantPicker(bank_det)          # fresh picker per render
+        rng_det    = random.Random(seed_val)          # fresh seeded rng per render
+        det_lines  = compose_paragraph(
+            _det_text, picker_det, style=_det_style, rng=rng_det,
+        )
+        return b"".join(ln.tobytes() for ln in det_lines)
+
+    _out_a = _render_det(123)
+    _out_b = _render_det(123)
+    assert _out_a == _out_b, "DETERMINISM BROKEN: same seed produced different bytes"
+    _out_c = _render_det(456)
+    assert _out_a != _out_c, "different seeds unexpectedly produced identical bytes"
+    print("PASS  deterministic rendering: same seed → identical bytes; different seed → differs")
+
+    # Test 42 — determinism must hold even when the GLOBAL random state differs
+    # between runs (proves no code path still leaks module-level random).
+    random.seed(111)
+    _out_d = _render_det(123)
+    random.seed(999)
+    _out_e = _render_det(123)
+    assert _out_d == _out_e, (
+        "DETERMINISM LEAK: output depends on global random state — "
+        "some draw still uses module-level random instead of the seeded rng"
+    )
+    assert _out_d == _out_a, "seeded render changed across global-state variations"
+    print("PASS  no leakage to module-level random (global state does not affect seeded renders)")
 
     print()
     print("All tests passed.")

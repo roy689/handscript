@@ -203,6 +203,10 @@ def check_is_pro_user(user_id: str) -> bool:
 def get_usage_count(user_id: str) -> int:
     return 0
 
+def get_bank_version(user_id: str) -> int:
+    # Local dev has no version tracking — 0 mirrors a legacy/unversioned bank.
+    return 0
+
 def upload_rendered_page_bytes(user_id: str, filename: str, image_bytes: bytes) -> str:
     return upload_rendered_page(user_id, filename, image_bytes)
 

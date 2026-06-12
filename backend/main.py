@@ -3,6 +3,8 @@ import hashlib
 import json
 import logging
 import os
+import random
+import secrets
 import tempfile
 import time
 from contextlib import contextmanager
@@ -528,6 +530,11 @@ class StyleParams(BaseModel):
     baseline_jitter:  float = Field(7.5,  ge=0.0, le=25.0)
     slant:            float = Field(2.25, ge=0.0, le=40.0)
     ink_blobs:        float = Field(0.03, ge=0.0, le=0.30)
+    # Deterministic-render seed. Same (text, style, seed, bank) → identical
+    # output bytes. None → the server draws a random seed and returns it in
+    # the response ("seed"), so the client can reproduce the exact render
+    # later (finalize). This is the foundation of the WYSIWYG contract.
+    seed:             int | None = Field(None, ge=0, le=2_147_483_647)
 
 
 class ConvertRequest(BaseModel):
@@ -1719,12 +1726,17 @@ async def convert(body: ConvertRequest, uid: str = Depends(require_auth)):
             "slant":           body.style.slant,
             "ink_blobs":       body.style.ink_blobs,
         }
+        # Deterministic render: explicit seed from client, or a fresh one drawn
+        # here. Either way the seed is returned so the render is reproducible.
+        used_seed  = body.style.seed if body.style.seed is not None else secrets.randbits(31)
+        render_rng = random.Random(used_seed)
         lines = await asyncio.to_thread(
             compose_paragraph,
             body.text, picker,
             margin=_MARGIN,
             style=style_dict,
             ink_color=ink_color,
+            rng=render_rng,
         )
         logger.info("convert: synthesised %d lines for %d chars",
                     len(lines), len([c for c in body.text if c != " "]))
@@ -1790,6 +1802,7 @@ async def convert(body: ConvertRequest, uid: str = Depends(require_auth)):
             "error":            None,
             "watermark_visible": not is_pro,
             "usage_remaining":  usage_remaining,
+            "seed":             used_seed,
         }
 
     except HTTPException:
@@ -2013,6 +2026,12 @@ async def convert_both(body: ConvertBothRequest, uid: str = Depends(require_auth
             "ink_blobs":       body.style.ink_blobs,
         }
 
+        # Deterministic render: explicit seed from client, or a fresh one drawn
+        # here. The seed is returned in the response so the EXACT same document
+        # can be reproduced at finalize time (WYSIWYG contract — REWRITE_PLAN §3.1).
+        used_seed  = body.style.seed if body.style.seed is not None else secrets.randbits(31)
+        render_rng = random.Random(used_seed)
+
         # fast_mode skips normalize_stroke_width and uses BILINEAR resampling —
         # saves ~800-1200 ms per page with imperceptible quality difference at preview sizes.
         lines = await asyncio.to_thread(
@@ -2022,6 +2041,7 @@ async def convert_both(body: ConvertBothRequest, uid: str = Depends(require_auth
             style=style_dict,
             ink_color=ink_color,
             fast_mode=body.preview,
+            rng=render_rng,
         )
         logger.info("convert-both: synthesised %d lines (fast_mode=%s)", len(lines), body.preview)
 
@@ -2040,9 +2060,14 @@ async def convert_both(body: ConvertBothRequest, uid: str = Depends(require_auth
             slant_px=body.style.slant, scan_mode='clean',
         )
 
-        # Derive photo pages from clean pages (avoids second synthesis pass)
+        # Derive photo pages from clean pages (avoids second synthesis pass).
+        # Each page gets a deterministic per-page seed derived from the master
+        # seed, so the paper texture / sensor noise are reproducible too.
         photo_pages = await asyncio.to_thread(
-            lambda: [apply_photo_effect(p.copy()) for p in clean_pages]
+            lambda: [
+                apply_photo_effect(p.copy(), seed=(used_seed * 1_000_003 + i) & 0x7FFFFFFF)
+                for i, p in enumerate(clean_pages)
+            ]
         )
 
         timestamp = int(time.time())
@@ -2131,6 +2156,8 @@ async def convert_both(body: ConvertBothRequest, uid: str = Depends(require_auth
             "error":            None,
             "watermark_visible": not is_pro,
             "usage_remaining":  usage_remaining,
+            "seed":             used_seed,
+            "bank_version":     firebase_client.get_bank_version(body.user_id),
         }
 
     except HTTPException:
@@ -2217,7 +2244,12 @@ async def get_glyphs(body: GlyphsRequest, uid: str = Depends(require_auth)):
             missing.append(ch)
             logger.warning("[glyphs] char=%r → NOT FOUND in bank", ch)
 
-    return {"glyphs": glyph_map, "missing": missing}
+    # bank_version pins the glyph set this map was built from (REWRITE_PLAN §3.1).
+    return {
+        "glyphs":       glyph_map,
+        "missing":      missing,
+        "bank_version": firebase_client.get_bank_version(body.user_id),
+    }
 
 
 @app.get("/bank/{user_id}")
