@@ -47,7 +47,6 @@ import CharacterConfigScreen       from './screens/CharacterConfigScreen';
 import CharacterCaptureScreen      from './screens/CharacterCaptureScreen';
 import CharacterSampleReviewScreen from './screens/CharacterSampleReviewScreen';
 import CharacterVariantsScreen     from './screens/CharacterVariantsScreen';
-import HandwritingCustomizerScreen from './screens/HandwritingCustomizerScreen';
 import CameraScreen                from './screens/CameraScreen';
 import ReviewScreen                from './screens/ReviewScreen';
 import EditorScreen                from './screens/EditorScreen';
@@ -211,7 +210,6 @@ function AppNavigator({ initialRoute }: { initialRoute: InitialRoute }) {
         {/* ── Character bank flow ─────────────────────────────────────── */}
         <RootStack.Screen name="CharacterConfig"       component={CharacterConfigScreen}       options={{ title: 'הגדרת תו' }} />
         <RootStack.Screen name="CharacterVariants"     component={CharacterVariantsScreen}     options={{ title: 'דגמים שמורים' }} />
-        <RootStack.Screen name="HandwritingCustomizer" component={HandwritingCustomizerScreen} options={{ title: 'מכוון כתב היד' }} />
         <RootStack.Screen name="CharacterCapture"      component={CharacterCaptureScreen}      options={{ headerTransparent: true, headerTitle: '', headerTintColor: '#fff' }} />
         <RootStack.Screen name="CharacterSampleReview" component={CharacterSampleReviewScreen} options={{ title: 'סקירת דגימות' }} />
         <RootStack.Screen name="Camera"                component={CameraScreen}                options={{ headerTransparent: true, headerTitle: '', headerTintColor: '#fff' }} />

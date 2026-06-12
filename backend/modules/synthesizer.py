@@ -1050,6 +1050,10 @@ def apply_slant(img: np.ndarray, angle_deg: float) -> np.ndarray:
     """
     Apply horizontal shear to simulate handwriting lean (slant/italic effect).
 
+    NOTE: currently UNUSED. The "slant" style parameter is consumed as a
+    per-LINE baseline tilt in layout.py (render_full_page slant_px), not as a
+    per-glyph shear. Kept for a possible future glyph-level italic feature.
+
     Positive angle_deg → bottom of glyph shifts right relative to top, which
     produces the natural forward-lean seen in flowing Hebrew handwriting.
     The canvas is widened to avoid clipping the sheared pixels.
@@ -1270,7 +1274,11 @@ def compose_line(
     # The old `or 0` coerced None AND 0 to 0, then the fallback fired even for explicit 0.
     _raw_lsp = _st.get("letter_spacing")
     letter_sp_base = float(_raw_lsp) if _raw_lsp is not None else None
-    word_sp_base   = float(_st.get("word_spacing", None) or 0)   # explicit px override
+    # None-sentinel here too (mirrors compose_paragraph): explicit 0 means
+    # "words touching" and must NOT fall back to natural spacing. The old
+    # `or 0` + `> 0` combo silently replaced slider=0 with avg_glyph_w.
+    _raw_wsp = _st.get("word_spacing")
+    word_sp_base = float(_raw_wsp) if _raw_wsp is not None else None
     jitter_pct     = float(_st.get("baseline_jitter", 2.0))        # σ % of char height
 
     glyph_widths_px = [
@@ -1283,8 +1291,8 @@ def compose_line(
     # Letter spacing:
     #   • None (no style key) → natural fallback of 15 % of avg glyph width
     #   • Any explicit value (including 0 or negative) → use as-is
-    #   Negative values are intentional: the client sends slider*0.30-10, so slider=0
-    #   gives -10 px (letters tight/overlapping).  We clamp at -25 % of avg width to
+    #   Negative values are intentional: the client sends slider*0.30-8, so slider=0
+    #   gives -8 px (letters tight/overlapping).  We clamp at -25 % of avg width to
     #   prevent complete character overlap at extreme settings.
     if letter_sp_base is None:
         _LSP = avg_glyph_w * 0.15          # natural spacing when no style given
@@ -1294,14 +1302,20 @@ def compose_line(
     # Sigma always positive; reduced for tight/negative values to avoid wild swings.
     _LSP_SIGMA = abs(_LSP) * 0.20
 
-    # Word spacing (within-line spaces): explicit style override or 100 % of avg glyph width.
-    # Previously this ignored style.word_spacing — now it matches compose_paragraph behaviour.
-    _WSP       = word_sp_base if word_sp_base > 0 else avg_glyph_w * 1.0
+    # Word spacing (within-line spaces): explicit style override (0 honoured —
+    # words touching) or 100 % of avg glyph width when no style key was given.
+    if word_sp_base is None:
+        _WSP = avg_glyph_w * 1.0
+    else:
+        _WSP = max(0.0, word_sp_base)
     _WSP_SIGMA = _WSP * 0.25
 
     def _word_w() -> int:
-        return max(round(avg_glyph_w * 0.6),
-                   int(random.gauss(_WSP, _WSP_SIGMA)))
+        # The 60%-of-glyph floor is a readability default — apply it only when
+        # the caller did NOT set word_spacing explicitly, otherwise slider=0
+        # could never produce touching words.
+        floor = round(avg_glyph_w * 0.6) if word_sp_base is None else 0
+        return max(floor, int(random.gauss(_WSP, _WSP_SIGMA)))
 
     widths = [
         glyphs[i][0].shape[1] if glyphs[i] is not None else _word_w()

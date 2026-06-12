@@ -51,13 +51,15 @@ type InkColor  = 'black' | 'blue' | 'red';
 type PageBg    = 'lines' | 'grid' | 'blank';
 
 // All slider values are 0-100 (display units). Conversion to backend px happens in FinalViewScreen.
+// SINGLE SOURCE OF TRUTH for the formulas — keep in sync with FinalViewScreen.tsx
+// and this screen's own /convert-both call:
 interface HandwritingStyle {
-  charHeight:     number;  // 0-100 → char_height  40-130 backend px
-  letterSpacing:  number;  // 0-100 → letter_spacing 0–30 backend px  (slider*0.30)
-  wordSpacing:    number;  // 0-100 → word_spacing   15–100 backend px  (15+slider*0.85)
-  baselineJitter: number;  // 0-100 → 0-25 % of char height
-  slant:          number;  // 0-100 → 0-40 px line-tilt
-  inkBlobs:       number;  // 0-100 → 0-0.30 blob probability
+  charHeight:     number;  // 0-100 → char_height     = 40 + s*0.9   (40…130 backend px)
+  letterSpacing:  number;  // 0-100 → letter_spacing  = s*0.30 - 8   (-8…+22 px, negative = overlap)
+  wordSpacing:    number;  // 0-100 → word_spacing    = s*0.85       (0…85 px, 0 = words touch)
+  baselineJitter: number;  // 0-100 → baseline_jitter = s*0.25       (0…25 % σ of char height)
+  slant:          number;  // 0-100 → slant           = s*0.4        (0…40 px line-tilt)
+  inkBlobs:       number;  // 0-100 → ink_blobs       = s*0.003      (0…0.30 blob probability)
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -85,11 +87,16 @@ const PAGE_LINES = 16;
 
 // Slider (0-100) → backend px conversion factors (used in FinalViewScreen too)
 // charHeight   : backend = 40 + slider * 0.9   (range 40–130 px)
-// letterSpacing: backend = slider * 0.30 - 10   (range -10–+20 px)
-// wordSpacing  : backend = slider * 0.85        (range   0–85 px)
+// letterSpacing: backend = slider * 0.30 - 8   (range  -8–+22 px, negative = overlap)
+// wordSpacing  : backend = slider * 0.85       (range   0–85 px)
 // baselineJitter: backend = slider * 0.25      (range  0–25 %)
 // slant        : backend = slider * 0.4        (range  0–40 px line-tilt)
 // inkBlobs     : backend = slider * 0.003      (range  0–0.30)
+//
+// Server-side clamps (synthesizer.py): letter spacing floored at -25% of the
+// average glyph width; the canvas applies the same clamp (see lsp below).
+// Server-side threshold (layout.py): line tilt is skipped when slant_px ≤ 0.5;
+// the canvas applies the same threshold (see slantPx below).
 
 // Notebook visual colours
 const NOTEBOOK_BG       = '#FAFAF8';
@@ -131,10 +138,25 @@ function seededRand(seed: number): number {
 }
 
 /**
+ * Seeded standard-normal sample (Box-Muller over two seededRand draws).
+ * Used to approximate the server's `random.gauss` for baseline jitter so the
+ * canvas shows the same *distribution* (bell curve with tails) instead of the
+ * old uniform ±σ, which looked flatter/more mechanical than the final render.
+ */
+function seededGauss(seed: number): number {
+  const u1 = Math.max(1e-9, seededRand(seed));
+  const u2 = seededRand((seed ^ 0x6d2b79f5) >>> 0);
+  return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+}
+
+/**
  * Pick one variant URL for a single character occurrence.
  *
- * Replicates the server's shuffled-deck selection (synthesizer.py VariantPicker)
- * so the preview matches the final output as closely as possible.
+ * Approximates the server's shuffled-deck selection (synthesizer.py
+ * VariantPicker). NOTE: the server's shuffle is NOT seeded (true random per
+ * render), so the canvas can only match the statistical contract — every
+ * variant appears once per cycle, no immediate repeats — never the exact
+ * picks. Exact fidelity comes from displaying the server image itself.
  *
  * How it works:
  *   - The N variants are conceptually arranged in a "shuffled deck" that repeats
@@ -172,31 +194,34 @@ function pickVariantUrl(
 
   // Build a deterministic shuffled deck for this (char, cycle) pair.
   // Fisher-Yates with seededRand as the RNG.
-  const deck = Array.from({ length: n }, (_, i) => i);
-  for (let i = n - 1; i > 0; i--) {
-    // Unique seed per (char, cycle, swap-position) so each step is independent
-    const swapSeed = (charCode * 31 + cycle * 1_000_003 + i * 7) >>> 0;
-    const j = Math.floor(seededRand(swapSeed) * (i + 1));
-    [deck[i], deck[j]] = [deck[j], deck[i]];
-  }
+  // (Indices are provably in-bounds; `!` silences noUncheckedIndexedAccess.)
+  const shuffledDeck = (c: number): number[] => {
+    const deck = Array.from({ length: n }, (_, i) => i);
+    for (let i = n - 1; i > 0; i--) {
+      // Unique seed per (char, cycle, swap-position) so each step is independent
+      const swapSeed = (charCode * 31 + c * 1_000_003 + i * 7) >>> 0;
+      const j   = Math.floor(seededRand(swapSeed) * (i + 1));
+      const tmp = deck[i]!;
+      deck[i]   = deck[j]!;
+      deck[j]   = tmp;
+    }
+    return deck;
+  };
+
+  const deck = shuffledDeck(cycle);
 
   // Mirror the server's _last_used guard: if the first card of this deck equals
   // the last card of the previous deck, swap it with the last card of this deck.
   if (cycle > 0 && n > 1) {
-    // Compute the last index of the previous deck
-    const prevDeck = Array.from({ length: n }, (_, i) => i);
-    for (let i = n - 1; i > 0; i--) {
-      const swapSeed = (charCode * 31 + (cycle - 1) * 1_000_003 + i * 7) >>> 0;
-      const j = Math.floor(seededRand(swapSeed) * (i + 1));
-      [prevDeck[i], prevDeck[j]] = [prevDeck[j], prevDeck[i]];
-    }
-    const lastOfPrev = prevDeck[n - 1];
+    const lastOfPrev = shuffledDeck(cycle - 1)[n - 1];
     if (deck[0] === lastOfPrev) {
-      [deck[0], deck[n - 1]] = [deck[n - 1], deck[0]];
+      const tmp   = deck[0]!;
+      deck[0]     = deck[n - 1]!;
+      deck[n - 1] = tmp;
     }
   }
 
-  return arr[deck[posInCycle]];
+  return arr[deck[posInCycle]!];
 }
 
 // ── Per-character typography ──────────────────────────────────────────────────
@@ -468,16 +493,17 @@ function lineDirection(words: string[]): 'rtl' | 'ltr' {
 // ── Handwriting canvas ────────────────────────────────────────────────────────
 
 const HandwritingCanvas = React.memo(function HandwritingCanvas({
-  pageLines, glyphMap, displayCharH, lsp, wsp, jitter,
+  pageLines, glyphMap, displayCharH, lsp, wsp, jitterPct,
   slantPx, blobProb,
   canvasInnerW, lineH, topM, dims, inkColor,
+  lineIndexOffset, initialOccurrences,
 }: {
   pageLines:    string[][];
   glyphMap:     Record<string, string[]>;
   displayCharH: number;
   lsp:          number;
   wsp:          number;
-  jitter:       number;
+  jitterPct:    number;   // σ as % of per-char height — matches server jitter_pct
   slantPx:      number;
   blobProb:     number;
   canvasInnerW: number;
@@ -485,14 +511,22 @@ const HandwritingCanvas = React.memo(function HandwritingCanvas({
   topM:         number;
   dims:         GlyphDims;
   inkColor:     InkColor;
+  // Global line index of the first line on this page (currentPage * PAGE_LINES).
+  // The server seeds line tilt by DOCUMENT line index (layout.py line_idx), so
+  // the canvas must offset its page-local index to match on pages 2+.
+  lineIndexOffset: number;
+  // Per-char occurrence counts accumulated on PREVIOUS pages. The server's
+  // VariantPicker counts occurrences across the whole document, so round-robin
+  // cycles on pages 2+ must start from these offsets, not from zero.
+  initialOccurrences: Record<string, number>;
 }) {
   const { colors } = useTheme();
   const inkHex = INK_COLORS[inkColor];
 
-  // Track how many times each character has appeared so far on this page,
-  // so we can do strict round-robin sample selection across all occurrences.
-  // Declared here so it persists across all lines/words in the page render.
-  const charOccurrences: Record<string, number> = {};
+  // Track how many times each character has appeared so far in the DOCUMENT
+  // (seeded with counts from previous pages), so round-robin sample selection
+  // stays continuous across page boundaries — same contract as the server.
+  const charOccurrences: Record<string, number> = { ...initialOccurrences };
 
   // All glyphs rendered at uniform displayCharH → consistent stroke weight
   return (
@@ -503,8 +537,14 @@ const HandwritingCanvas = React.memo(function HandwritingCanvas({
         let x = rtl ? canvasInnerW : 0;
         const cells: React.ReactElement[] = [];
 
-        // Per-line tilt: direction alternates per line, magnitude from slantPx
-        const lineSeed  = (li * 2654435761) & 0xFFFFFFFF;
+        // Global (document-wide) line index — matches the server's line_idx in
+        // layout.py, which runs across ALL lines, not per page. Using the
+        // page-local index here made tilt direction/magnitude diverge on page 2+.
+        const gli = li + lineIndexOffset;
+
+        // Per-line tilt: direction alternates per line, magnitude from slantPx.
+        // Seed formula mirrors layout.py exactly: (line_idx * 2654435761) & 0xFFFFFFFF.
+        const lineSeed  = (gli * 2654435761) & 0xFFFFFFFF;
         const tiltDir   = (lineSeed >> 16) & 1 ? 1 : -1;
         const tiltVar   = 0.6 + 0.8 * ((lineSeed & 0xFFFF) / 65535);
         const lineTilt  = slantPx > 0 ? tiltDir * slantPx * tiltVar : 0;
@@ -517,26 +557,43 @@ const HandwritingCanvas = React.memo(function HandwritingCanvas({
 
         line.forEach((word, wi) => {
           word.split('').forEach((ch, ci) => {
-            const sizeJitter = 1 + (seededRand(li * 997 + wi * 97 + ci * 53 + 7) - 0.5) * 0.06;
-            const gh  = Math.round(glyphDisplayH(ch, displayCharH) * sizeJitter);
-            const cw  = Math.round(charWidthFor(ch, displayCharH, dims) * sizeJitter);
+            // Base (un-jittered) cell size — the cursor advances by THESE values
+            // so the canvas layout matches breakLines() exactly (which measures
+            // un-jittered widths). The visual ±3% size jitter below is applied
+            // to the rendered glyph only, centred inside the base cell — same
+            // as the server, which positions glyphs from PRE-jitter metrics.
+            const ghBase = glyphDisplayH(ch, displayCharH);
+            const cwBase = charWidthFor(ch, displayCharH, dims);
+            const sizeJitter = 1 + (seededRand(gli * 997 + wi * 97 + ci * 53 + 7) - 0.5) * 0.06;
+            const gh  = Math.round(ghBase * sizeJitter);
+            const cw  = Math.round(cwBase * sizeJitter);
 
             // RTL: move cursor left before placing; LTR: place then move right
-            if (rtl) x -= cw;
-            const glyphX = x;
-            if (!rtl) x += cw;
+            if (rtl) x -= cwBase;
+            const glyphX = x + Math.round((cwBase - cw) / 2);   // centre jittered glyph in base cell
+            if (!rtl) x += cwBase;
 
             const ascRatio = CHAR_ASCENDER_RATIO[ch] ?? 1.0;
-            const glyphTop = baselineY - gh * ascRatio;
-            const jit   = (seededRand(li * 997 + wi * 97 + ci * 31 + 13) - 0.5) * 2 * jitter;
+            // Position from PRE-jitter height (server: "Use pre-jitter ascender
+            // so scale/rotation jitter don't shift position").
+            const glyphTop = baselineY - ghBase * ascRatio;
+            // Baseline dance — mirrors synthesizer.py: Gaussian with
+            // σ = char_height × jitter_pct/100, SKIPPED for descenders (tails
+            // stay anchored) and for yod (pinned to x-height top).
+            const isDescender = ascRatio < 1.0;
+            const jit = (isDescender || ch === 'י' || jitterPct <= 0)
+              ? 0
+              : seededGauss(gli * 997 + wi * 97 + ci * 31 + 13) * ghBase * (jitterPct / 100);
             const tiltY = rtl
               ? lineTilt * (1 - glyphX / canvasInnerW)
               : lineTilt * (glyphX / canvasInnerW);
             // Pick variant by round-robin: count how many times this character
-            // has appeared so far on the page and advance the counter.
+            // has appeared so far in the document and advance the counter.
+            // charCode seeds the deck shuffle so each character gets its own
+            // rotation rhythm (omitting it made ALL chars share one deck order).
             const occurrence = charOccurrences[ch] ?? 0;
             charOccurrences[ch] = occurrence + 1;
-            const url  = pickVariantUrl(glyphMap[ch], occurrence);
+            const url  = pickVariantUrl(glyphMap[ch], occurrence, ch.charCodeAt(0));
             cells.push(
               <View
                 key={`${li}_${wi}_${ci}`}
@@ -598,25 +655,37 @@ const HandwritingCanvas = React.memo(function HandwritingCanvas({
                 )}
               </View>,
             );
-            // Ink blob dot near glyph endpoint
-            const blobSeed = seededRand(li * 997 + wi * 97 + ci * 67 + 11);
+            // Ink blob dot near glyph endpoint.
+            // Mirrors _add_ink_blob in synthesizer.py more closely: 55% of blobs
+            // sit at the stroke END (bottom-right corner of the glyph), the rest
+            // anywhere on the glyph; size ~ glyph height / 10…5.
+            const blobSeed = seededRand(gli * 997 + wi * 97 + ci * 67 + 11);
             if (blobSeed < blobProb) {
-              const blobSize = Math.max(2, Math.round(displayCharH * 0.09));
-              const blobOffX = seededRand(li * 997 + wi * 97 + ci * 67 + 13) * cw;
-              const blobOffY = seededRand(li * 997 + wi * 97 + ci * 67 + 17) * displayCharH * 0.4;
-              const blobOpa  = 0.45 + seededRand(li * 997 + wi * 97 + ci * 67 + 19) * 0.45;
+              const sizeT    = seededRand(gli * 997 + wi * 97 + ci * 67 + 23);
+              const blobSize = Math.max(2, Math.round(gh * (0.1 + sizeT * 0.1)));   // h/10…h/5
+              const atEnd    = seededRand(gli * 997 + wi * 97 + ci * 67 + 29) < 0.55;
+              const blobOffX = atEnd
+                ? cw - blobSize / 2
+                : seededRand(gli * 997 + wi * 97 + ci * 67 + 13) * cw;
+              // Vertical position relative to the GLYPH (server: by = glyph_y + …),
+              // not the line box — blobs stick to the letter they belong to.
+              const blobTop = atEnd
+                ? glyphTop + gh - seededRand(gli * 997 + wi * 97 + ci * 67 + 17) * gh * 0.2 - blobSize / 2
+                : glyphTop + seededRand(gli * 997 + wi * 97 + ci * 67 + 17) * gh - blobSize / 2;
+              const blobOpa  = 0.70 + seededRand(gli * 997 + wi * 97 + ci * 67 + 19) * 0.24;   // ≈ alpha 180–240
               cells.push(
                 <View
                   key={`b_${li}_${wi}_${ci}`}
                   style={{
                     position:        'absolute',
                     left:            glyphX + blobOffX,
-                    bottom:          blobOffY,
+                    top:             blobTop,
                     width:           blobSize,
                     height:          blobSize,
                     borderRadius:    blobSize / 2,
                     backgroundColor: inkHex,
                     opacity:         blobOpa,
+                    transform:       [{ translateY: jit + tiltY }],
                   }}
                 />,
               );
@@ -635,6 +704,61 @@ const HandwritingCanvas = React.memo(function HandwritingCanvas({
           </View>
         );
       })}
+    </View>
+  );
+});
+
+// ── Slider row ────────────────────────────────────────────────────────────────
+
+/** Field-by-field equality — used to skip no-op commits (tap without drag). */
+function styleEquals(a: HandwritingStyle, b: HandwritingStyle): boolean {
+  return a.charHeight     === b.charHeight
+    &&   a.letterSpacing  === b.letterSpacing
+    &&   a.wordSpacing    === b.wordSpacing
+    &&   a.baselineJitter === b.baselineJitter
+    &&   a.slant          === b.slant
+    &&   a.inkBlobs       === b.inkBlobs;
+}
+
+/**
+ * One labelled slider. Keeps its displayed value in LOCAL state so the number
+ * tracks the thumb on every frame (no 80ms throttle lag) without re-rendering
+ * the whole screen. Canvas updates still flow through the parent's throttle.
+ */
+const PreviewSliderRow = React.memo(function PreviewSliderRow({
+  id, label, value, styles, accentColor, borderColor, onLiveChange, onComplete,
+}: {
+  id:           keyof HandwritingStyle;
+  label:        string;
+  value:        number;
+  styles:       ReturnType<typeof getStyles>;
+  accentColor:  string;
+  borderColor:  string;
+  onLiveChange: (id: keyof HandwritingStyle, v: number) => void;
+  onComplete:   (id: keyof HandwritingStyle, v: number) => void;
+}) {
+  const [display, setDisplay] = useState(value);
+  // Re-sync when the committed value changes externally (e.g. draft restore).
+  useEffect(() => { setDisplay(value); }, [value]);
+
+  return (
+    <View style={styles.sliderHalf}>
+      <View style={styles.sliderHeader}>
+        <Text style={styles.sliderLabel}>{label}</Text>
+        <Text style={styles.sliderValue}>{Math.round(display)}</Text>
+      </View>
+      <Slider
+        style={styles.sliderControl}
+        minimumValue={0} maximumValue={100} step={1}
+        value={value}
+        onValueChange={v => { setDisplay(v); onLiveChange(id, v); }}
+        onSlidingComplete={v => { setDisplay(v); onComplete(id, v); }}
+        minimumTrackTintColor={accentColor}
+        maximumTrackTintColor={borderColor}
+        thumbTintColor={accentColor}
+        accessibilityLabel={label}
+        accessibilityValue={{ min: 0, max: 100, now: Math.round(display) }}
+      />
     </View>
   );
 });
@@ -666,8 +790,8 @@ export default function PreviewScreen({ navigation, route }: Props) {
 
   // Convert initStyle (backend px units) → 0-100 slider values.
   // Inverse of FinalViewScreen formulas:
-  //   letterSpacing: backend = slider*0.30-10  → slider = (backend+10)/0.30
-  //   wordSpacing:   backend = slider*0.85     → slider = backend/0.85
+  //   letterSpacing: backend = slider*0.30-8  → slider = (backend+8)/0.30
+  //   wordSpacing:   backend = slider*0.85    → slider = backend/0.85
   const clamp = (v: number) => Math.round(Math.max(0, Math.min(100, v)));
   const [hs, setHs] = useState<HandwritingStyle>({
     charHeight:     clamp((initStyle.charHeight - 40) / 0.9),        // 85→50
@@ -752,6 +876,46 @@ export default function PreviewScreen({ navigation, route }: Props) {
   const pendingHsRef  = useRef<HandwritingStyle>(hs);
   const throttleRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
   const draftDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Safety net for cancelled gestures: if onSlidingComplete never fires
+  // (gesture interrupted — happens on Android), commit after 1.5s of silence
+  // so isDragging can't get stuck true (which would hide the server preview).
+  const dragSafetyRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // ── Slider handlers (stable identities so PreviewSliderRow can memo) ──────
+  const handleSliderLive = useCallback((id: keyof HandwritingStyle, v: number) => {
+    pendingHsRef.current = { ...pendingHsRef.current, [id]: v };
+    setIsDragging(true);
+    // Throttled canvas update — at most one re-render per 80ms during drag.
+    if (!throttleRef.current) {
+      throttleRef.current = setTimeout(() => {
+        setLiveHs({ ...pendingHsRef.current });
+        throttleRef.current = null;
+      }, 80);
+    }
+    // (Re)arm the cancelled-gesture safety timer.
+    if (dragSafetyRef.current) clearTimeout(dragSafetyRef.current);
+    dragSafetyRef.current = setTimeout(() => {
+      dragSafetyRef.current = null;
+      const cur = { ...pendingHsRef.current };
+      setIsDragging(false);
+      setLiveHs(cur);
+      setHs(prev => (styleEquals(prev, cur) ? prev : cur));
+    }, 1500);
+  }, []);
+
+  const handleSliderComplete = useCallback((id: keyof HandwritingStyle, v: number) => {
+    if (dragSafetyRef.current) { clearTimeout(dragSafetyRef.current); dragSafetyRef.current = null; }
+    if (throttleRef.current)   { clearTimeout(throttleRef.current);   throttleRef.current = null; }
+    const next = { ...pendingHsRef.current, [id]: v };
+    pendingHsRef.current = next;
+    setLiveHs(next);
+    setIsDragging(false);
+    impactLight();
+    // No-op commit guard: a tap on the thumb without movement keeps the same
+    // hs identity → the server-render effect does NOT fire → no flicker and
+    // no wasted /convert-both call.
+    setHs(prev => (styleEquals(prev, next) ? prev : next));
+  }, []);
 
   // ── Server background render state ────────────────────────────────────────
   const [serverPreviewUrls, setServerPreviewUrls] = useState<{ clean: string[]; photo: string[] } | null>(null);
@@ -771,6 +935,7 @@ export default function PreviewScreen({ navigation, route }: Props) {
 
   useEffect(() => () => {
     if (throttleRef.current)          { clearTimeout(throttleRef.current);          throttleRef.current = null; }
+    if (dragSafetyRef.current)        { clearTimeout(dragSafetyRef.current);        dragSafetyRef.current = null; }
     if (draftDebounce.current)        { clearTimeout(draftDebounce.current);        draftDebounce.current = null; }
     if (serverRenderDebounceRef.current) { clearTimeout(serverRenderDebounceRef.current); }
     if (finishSafetyTimerRef.current) { clearTimeout(finishSafetyTimerRef.current); }
@@ -809,18 +974,35 @@ export default function PreviewScreen({ navigation, route }: Props) {
   // canvas, causing the preview to break lines earlier than the server.
   const displayCharH = Math.max(4, Math.round(charHBackend * pixelScale));
 
+  // Average glyph width at the current size — used for the same negative-spacing
+  // clamp the server applies (letter spacing floored at -25% of avg glyph width).
+  const avgCharW = useMemo(() => {
+    const chars = editableText.replace(/\s+/g, '').split('');
+    if (chars.length === 0) return displayCharH * FALLBACK_RATIO;
+    const total = chars.reduce((s, ch) => s + charWidthFor(ch, displayCharH, glyphDims), 0);
+    return total / chars.length;
+  }, [editableText, displayCharH, glyphDims]);
+
   // ── Spacing — both scaled by pixelScale to stay proportional to the server render ──
   // Letter spacing: backend_px = slider * 0.30 - 8, scaled to preview px.
   // slider=0 → -8 px (letters overlap, tighter than touching), matching the server.
-  const lsp = Math.round((liveHs.letterSpacing * 0.30 - 8) * pixelScale);
+  // Clamped at -25% of avg glyph width — same floor as synthesizer.py (_CLAMP_NEG).
+  const lsp = Math.max(
+    Math.round(-avgCharW * 0.25),
+    Math.round((liveHs.letterSpacing * 0.30 - 8) * pixelScale),
+  );
   //
   // Word spacing:    backend_px = slider * 0.85          (range   0 …  +85 px)
   //   slider=0  →  0 px (words touching)  |  slider=100 → +85 px
   const wsp = Math.max(0, Math.round(liveHs.wordSpacing * 0.85 * pixelScale));
-  const jitter  = Math.max(0, charHBackend * liveHs.baselineJitter * 0.0025 * pixelScale);
+  // jitterPct: σ as % of per-char height — same unit the server uses
+  // (baseline_jitter = slider * 0.25). Per-glyph Gaussian happens in the canvas.
+  const jitterPct = Math.max(0, liveHs.baselineJitter * 0.25);
   // slantPx: line tilt per line in preview pixels.
-  // Server sends slant = slider * 0.4 (server px), scaled by pixelScale → preview px.
-  const slantPx  = liveHs.slant * 0.4 * pixelScale;
+  // Server sends slant = slider * 0.4 (server px) and SKIPS tilt entirely when
+  // slant_px ≤ 0.5 (layout.py) — apply the same threshold before scaling.
+  const slantBackendPx = liveHs.slant * 0.4;
+  const slantPx  = slantBackendPx > 0.5 ? slantBackendPx * pixelScale : 0;
   const blobProb = liveHs.inkBlobs * 0.003; // 0-0.30
   // ── Prefetch glyph images ──────────────────────────────────────────────────
   useEffect(() => {
@@ -854,9 +1036,10 @@ export default function PreviewScreen({ navigation, route }: Props) {
         promises.push(Image.prefetch(absUrl(u)).catch(() => null));
       }
       // Measure dimensions from the first variant only.
+      // (entries are pre-filtered to urls.length > 0, so urls[0] exists)
       promises.push(
         new Promise<void>(resolve => {
-          Image.getSize(absUrl(urls[0]),
+          Image.getSize(absUrl(urls[0]!),
             (w, h) => { collectedDims[ch] = { w, h }; resolve(); },
             ()     => { resolve(); },
           );
@@ -910,9 +1093,25 @@ export default function PreviewScreen({ navigation, route }: Props) {
     [allLines, currentPage],
   );
 
-  // Reset to page 0 on any style/content change, or when serverPreviewUrls arrive
-  // (server page count may differ from canvas estimate — avoid out-of-bounds index).
-  useEffect(() => { setCurrentPage(0); }, [liveHs, inkColor, pageBg, editableText, serverPreviewUrls]);
+  // Occurrence count of every char on pages BEFORE the current one — feeds the
+  // canvas so variant round-robin continues across page boundaries, matching
+  // the server's document-wide VariantPicker counters.
+  const initialOccurrences = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const line of allLines.slice(0, currentPage * PAGE_LINES)) {
+      for (const word of line) {
+        for (const ch of word) counts[ch] = (counts[ch] ?? 0) + 1;
+      }
+    }
+    return counts;
+  }, [allLines, currentPage]);
+
+  // Reset to page 0 only when the TEXT changes (pagination genuinely reshuffles).
+  // Style/ink/background tweaks keep the user on their current page — resetting
+  // on every throttled liveHs update used to yank users back to page 1 while
+  // dragging a slider on page 2+. Out-of-bounds indices are handled by the
+  // clamp effect below when totalPages shrinks.
+  useEffect(() => { setCurrentPage(0); }, [editableText]);
   useEffect(() => {
     setCurrentPage(p => Math.min(p, Math.max(0, totalPages - 1)));
   }, [totalPages]);
@@ -1066,10 +1265,14 @@ export default function PreviewScreen({ navigation, route }: Props) {
     if (isFinishingRef.current || pendingFinishRef.current) return;   // drop duplicate taps
 
     // Flush any pending throttle so hs is fully up-to-date.
+    // styleEquals guard: an unchanged flush must keep the same hs identity,
+    // otherwise the render effect re-fires and nulls serverPreviewUrls right
+    // as we try to take the fast path with it.
     if (throttleRef.current) {
       clearTimeout(throttleRef.current);
       throttleRef.current = null;
-      setHs({ ...pendingHsRef.current });
+      const cur = { ...pendingHsRef.current };
+      setHs(prev => (styleEquals(prev, cur) ? prev : cur));
     }
 
     // Fast path: an exact server render matching the current settings is ready
@@ -1137,7 +1340,7 @@ export default function PreviewScreen({ navigation, route }: Props) {
                     displayCharH={displayCharH}
                     lsp={lsp}
                     wsp={wsp}
-                    jitter={jitter}
+                    jitterPct={jitterPct}
                     slantPx={slantPx}
                     blobProb={blobProb}
                     canvasInnerW={canvasInnerW}
@@ -1145,6 +1348,8 @@ export default function PreviewScreen({ navigation, route }: Props) {
                     topM={topM}
                     dims={glyphDims}
                     inkColor={inkColor}
+                    lineIndexOffset={currentPage * PAGE_LINES}
+                    initialOccurrences={initialOccurrences}
                   />
                 )}
               </NotebookPage>
@@ -1243,7 +1448,6 @@ export default function PreviewScreen({ navigation, route }: Props) {
                 maxLength={MAX_TEXT_LEN}
                 textAlign="right"
                 textAlignVertical="top"
-                writingDirection="rtl"
                 autoCorrect={false}
                 autoCapitalize="none"
                 accessibilityLabel="עריכת טקסט — תווים שאינם במאגר יוצגו בגופן רגיל"
@@ -1261,41 +1465,17 @@ export default function PreviewScreen({ navigation, route }: Props) {
           ] as [string, keyof HandwritingStyle][][]).map((row, ri) => (
             <View key={ri} style={[styles.slidersRow, ri === 2 && { marginBottom: 14 }]}>
               {row.map(([label, key]) => (
-                <View key={key} style={styles.sliderHalf}>
-                  <View style={styles.sliderHeader}>
-                    <Text style={styles.sliderLabel}>{label}</Text>
-                    <Text style={styles.sliderValue}>{Math.round(liveHs[key] as number)}</Text>
-                  </View>
-                  <Slider
-                    style={styles.sliderControl}
-                    minimumValue={0} maximumValue={100} step={1}
-                    value={hs[key] as number}
-                    onValueChange={v => {
-                      pendingHsRef.current = { ...pendingHsRef.current, [key]: v };
-                      if (!isDragging) setIsDragging(true);
-                      if (!throttleRef.current) {
-                        throttleRef.current = setTimeout(() => {
-                          setLiveHs({ ...pendingHsRef.current });
-                          throttleRef.current = null;
-                        }, 80);
-                      }
-                    }}
-                    onSlidingComplete={v => {
-                      if (throttleRef.current) {
-                        clearTimeout(throttleRef.current);
-                        throttleRef.current = null;
-                      }
-                      const next = { ...pendingHsRef.current, [key]: v };
-                      pendingHsRef.current = next;
-                      setLiveHs(next);
-                      setHs(next);
-                      setIsDragging(false);
-                    }}
-                    minimumTrackTintColor={colors.accent}
-                    maximumTrackTintColor={colors.border}
-                    thumbTintColor={colors.accent}
-                  />
-                </View>
+                <PreviewSliderRow
+                  key={key}
+                  id={key}
+                  label={label}
+                  value={hs[key] as number}
+                  styles={styles}
+                  accentColor={colors.accent}
+                  borderColor={colors.border}
+                  onLiveChange={handleSliderLive}
+                  onComplete={handleSliderComplete}
+                />
               ))}
             </View>
           ))}

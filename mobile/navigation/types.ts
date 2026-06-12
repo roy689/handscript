@@ -7,7 +7,6 @@ export type RootStackParamList = {
   CharacterList:    undefined;
   CharacterConfig:  { character: string };
   CharacterVariants:      { character: string };
-  HandwritingCustomizer:  undefined;
   CharacterCapture: { character: string; totalSamples: number; existingSamples?: string[]; returnTo?: 'CharacterVariants' };
   CharacterSampleReview: { character: string; samples: string[]; totalSamples: number; returnTo?: 'CharacterVariants' };
   Camera:           { missingChars?: string[] } | undefined;
