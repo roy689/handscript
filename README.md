@@ -291,13 +291,24 @@ jimp), **עגולים** על רקע קלף.
 
 ## משימות פתוחות / TODO
 
-**להשלמה לפני release:**
-- להחליף מזהי בדיקה של AdMob (App ID + יחידות) במזהים אמיתיים; להוסיף מסך הסכמת
-  פרטיות (UMP/GDPR).
-- להשלים Google Sign-In: iOS client ID + `iosUrlScheme`, SHA-1 לאנדרואיד.
-- **Apple Sign-In** — חובה ל-iOS release אם יש כניסה חברתית. לא מומש.
+> **הפרויקט מתמקד ב-Android בלבד.** ולכן **Apple Sign-In אינו נדרש** (זו דרישת
+> App Store של אפל ל-iOS; אם בעתיד יתווסף iOS — חובה לממש אותו כי אפל פוסלת
+> אוטומטית אפליקציות עם התחברות חברתית בלי Apple Sign-In).
+
+### הושלם — הסכמת פרטיות (UMP/GDPR) ל-AdMob
+
+- מומש ב-`src/services/ads.ts` (`gatherConsent`): באתחול הפרסומות נקרא ה-UMP SDK
+  המובנה (`AdsConsent`), שמציג את מסך ההסכמה למשתמשי אירופה לפני טעינת פרסומות.
+  בלי זה AdMob עלול להפסיק להגיש פרסומות באירופה ולפגוע בהכנסה.
+- נותר רק לוודא מול **חשבון AdMob אמיתי** (אחרי החלפת מזהי הבדיקה) שטופס ההסכמה
+  מוגדר ב-AdMob → Privacy & messaging.
+
+### להשלמה לפני release
+
+- להחליף מזהי בדיקה של AdMob (App ID + יחידות) במזהים אמיתיים מחשבון AdMob.
+- להשלים Google Sign-In לאנדרואיד: הוספת טביעת **SHA-1** ב-Firebase.
 - אימות טפסים אחיד, מצבי ריק/טעינה/שגיאה אחידים בכל המסכים.
-- EAS production build + TestFlight + Play Internal testing.
+- EAS production build + Play Internal testing.
 
 **אחזקה/אופטימיזציה:**
 - להוריד את רמת ה-DEBUG של `modules.synthesizer` בפרודקשן (כמות לוגים גבוהה גרמה

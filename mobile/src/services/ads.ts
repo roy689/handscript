@@ -4,8 +4,7 @@
  * Placement plan (free users only — Pro users see no ads):
  *   • App Open  — on cold start / resume (frequency-capped)            → App.tsx
  *   • Native    — inside the character bank list                       → CharacterListScreen
- *   • Banner    — quiet screens: CharacterVariants, Privacy, Terms,
- *                 HandwritingCustomizer                                → <AdBanner/>
+ *   • Banner    — quiet screens: CharacterVariants, Privacy, Terms    → <AdBanner/>
  *
  * IMPORTANT
  *  - Requires a native build (EAS dev client / production). Ads do NOT work in
@@ -59,11 +58,37 @@ export const AD_UNITS = {
 
 let _initialised = false;
 
+/**
+ * Gather GDPR / UMP consent before serving ads.
+ *
+ * Required by AdMob: without a consent flow, AdMob may stop serving ads to
+ * users in the EEA/UK (and can restrict other regions). Uses the built-in
+ * User Messaging Platform (`AdsConsent`) — no extra SDK needed. The consent
+ * form is shown automatically only when required (e.g. EU users on first run).
+ */
+async function gatherConsent(): Promise<void> {
+  const AdsConsent = (_ads as any)?.AdsConsent;
+  if (!AdsConsent?.requestInfoUpdate) return;
+  try {
+    // In development you can force the EEA form for testing by passing
+    // { debugGeography: AdsConsentDebugGeography.EEA, testDeviceIdentifiers: [...] }.
+    await AdsConsent.requestInfoUpdate();
+    if (AdsConsent.loadAndShowConsentFormIfRequired) {
+      await AdsConsent.loadAndShowConsentFormIfRequired();
+    } else if (AdsConsent.gatherConsent) {
+      await AdsConsent.gatherConsent();
+    }
+  } catch {
+    // Consent is best-effort — never block app start on it.
+  }
+}
+
 /** Initialise the Mobile Ads SDK once. Safe to call from anywhere. */
 export async function initAds(): Promise<void> {
   if (_initialised || !isAdsAvailable()) return;
   _initialised = true;
   try {
+    await gatherConsent();            // GDPR/UMP consent before any ad loads
     await _ads!.default().initialize();
     preloadInterstitial();
   } catch {
