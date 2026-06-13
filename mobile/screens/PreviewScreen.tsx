@@ -89,7 +89,9 @@ async function fetchWithBackoff(
     });
     delayMs = Math.min(delayMs * 2, 30_000);
   }
-  throw new Error('fetchWithBackoff: max retries exceeded');
+  // Unreachable: the loop always returns on the last attempt (res.status !== 429 || attempt === maxRetries).
+  // TypeScript requires a return type, so satisfy it:
+  throw new Error('fetchWithBackoff: unreachable');
 }
 
 // Server-side page geometry (A4 @ 300 DPI) — used as ratio source

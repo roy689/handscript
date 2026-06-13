@@ -1995,7 +1995,9 @@ async def finalize(body: FinalizeRequest, uid: str = Depends(require_auth)):
                     detail="הרינדור פג תוקף ולא ניתן לשחזרו. נסה לצפות מחדש.",
                 )
 
-            # Re-render with identical params (determinism → byte-identical output)
+            # Re-render with identical params (determinism → byte-identical output).
+            # Protected by _RENDER_SEMAPHORE so expired-cache re-renders under load
+            # don't bypass the concurrency cap that /convert-both enforces (§5).
             from modules.synthesizer import VariantPicker, compose_paragraph, prefetch_bank_images
             from modules.layout import (
                 load_background, render_full_page, apply_photo_effect,
@@ -2004,56 +2006,60 @@ async def finalize(body: FinalizeRequest, uid: str = Depends(require_auth)):
 
             re_text       = manifest["text"]
             re_style_dict = manifest["style"]
-            re_seed       = manifest["seed"]
             re_bg         = manifest.get("background", "lines")
             re_ink        = manifest.get("ink_color", "black")
             re_used_seed  = manifest["used_seed"]
 
-            bank          = firebase_client.load_character_bank(uid)
+            bank     = firebase_client.load_character_bank(uid)
             await asyncio.to_thread(prefetch_bank_images, bank)
 
-            _MARGIN    = 200
-            re_rng     = random.Random(re_used_seed)
-            lines      = await asyncio.to_thread(
-                compose_paragraph, re_text, VariantPicker(bank),
-                margin=_MARGIN, style=re_style_dict, ink_color=re_ink,
-                fast_mode=False, rng=re_rng,
-            )
-            bg         = load_background(re_bg)
-            clean_pgs  = await asyncio.to_thread(
-                render_full_page, lines, bg, margin=_MARGIN,
-                slant_px=re_style_dict.get("slant", 0.0), scan_mode="clean",
-            )
-            photo_pgs  = await asyncio.to_thread(
-                lambda: [
-                    apply_photo_effect(p.copy(), seed=(re_used_seed * 1_000_003 + i) & 0x7FFFFFFF)
-                    for i, p in enumerate(clean_pgs)
-                ]
-            )
+            _MARGIN  = 200
+            re_rng   = random.Random(re_used_seed)
 
-            def _rerender_promote():
-                clean_bytes = [page_to_png_bytes(embed_watermark(p, uid)) for p in clean_pgs]
-                photo_bytes = [page_to_png_bytes(embed_watermark(p, uid)) for p in photo_pgs]
-                return firebase_client.promote_from_cache.__func__ if False else \
-                    _direct_promote(uid, doc_id, clean_bytes, photo_bytes)
+            try:
+                async with asyncio.timeout(_RENDER_ACQUIRE_S):
+                    async with _RENDER_SEMAPHORE:
+                        lines = await asyncio.to_thread(
+                            compose_paragraph, re_text, VariantPicker(bank),
+                            margin=_MARGIN, style=re_style_dict, ink_color=re_ink,
+                            fast_mode=False, rng=re_rng,
+                        )
+                        bg        = load_background(re_bg)
+                        clean_pgs = await asyncio.to_thread(
+                            render_full_page, lines, bg, margin=_MARGIN,
+                            slant_px=re_style_dict.get("slant", 0.0), scan_mode="clean",
+                        )
+                        photo_pgs = await asyncio.to_thread(
+                            lambda: [
+                                apply_photo_effect(p.copy(), seed=(re_used_seed * 1_000_003 + i) & 0x7FFFFFFF)
+                                for i, p in enumerate(clean_pgs)
+                            ]
+                        )
+            except TimeoutError:
+                raise HTTPException(
+                    status_code=429,
+                    detail="השרת עמוס כרגע. נסה שוב בעוד 5 שניות.",
+                    headers={"Retry-After": str(_RENDER_RETRY_AFTER)},
+                )
 
-            def _direct_promote(u, did, cb, pb):
+            def _upload_pages(
+                u: str, did: str,
+                clean_pages: list, photo_pages: list,
+            ) -> dict:
                 clean_urls = [
-                    firebase_client.upload_rendered_page(u, f"page_clean_{i:02d}.png", d)
-                    for i, d in enumerate(cb)
+                    firebase_client.upload_rendered_page(u, f"page_clean_{i:02d}.png",
+                                                         page_to_png_bytes(embed_watermark(p, u)))
+                    for i, p in enumerate(clean_pages)
                 ]
                 photo_urls = [
-                    firebase_client.upload_rendered_page(u, f"page_photo_{i:02d}.png", d)
-                    for i, d in enumerate(pb)
+                    firebase_client.upload_rendered_page(u, f"page_photo_{i:02d}.png",
+                                                         page_to_png_bytes(embed_watermark(p, u)))
+                    for i, p in enumerate(photo_pages)
                 ]
                 return {"clean_urls": clean_urls, "photo_urls": photo_urls}
 
             result = await asyncio.to_thread(
-                lambda: _direct_promote(
-                    uid, doc_id,
-                    [page_to_png_bytes(embed_watermark(p, uid)) for p in clean_pgs],
-                    [page_to_png_bytes(embed_watermark(p, uid)) for p in photo_pgs],
-                )
+                _upload_pages, uid, doc_id, clean_pgs, photo_pgs
             )
 
         firebase_client.increment_usage(body.user_id)
