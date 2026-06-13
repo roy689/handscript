@@ -207,6 +207,142 @@ def get_bank_version(user_id: str) -> int:
     # Local dev has no version tracking — 0 mirrors a legacy/unversioned bank.
     return 0
 
+
+# ── Render cache stubs (REWRITE_PLAN §3.5) ───────────────────────────────────
+# In local dev, "cache" is just a sub-directory under the static folder.
+# The interface mirrors firebase_storage.py so main.py can call either.
+
+_CACHE_DIR = Path(__file__).parent.parent / "static" / "render_cache"
+
+
+def _cache_prefix(uid: str, render_hash: str) -> Path:
+    _safe_uid(uid)
+    p = _CACHE_DIR / uid / render_hash
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def store_render_cache(
+    uid: str,
+    render_hash: str,
+    preview_clean: list,
+    preview_photo: list,
+    final_clean:   list,
+    final_photo:   list,
+    manifest:      dict,
+) -> dict:
+    """Write rendered pages to the local cache directory."""
+    d = _cache_prefix(uid, render_hash)
+    clean_urls: list[str] = []
+    photo_urls: list[str] = []
+
+    for i, data in enumerate(preview_clean):
+        p = d / f"preview_clean_{i:02d}.webp"
+        p.write_bytes(data)
+        clean_urls.append(f"{_SERVER_BASE}/static/render_cache/{uid}/{render_hash}/preview_clean_{i:02d}.webp")
+
+    for i, data in enumerate(preview_photo):
+        p = d / f"preview_photo_{i:02d}.webp"
+        p.write_bytes(data)
+        photo_urls.append(f"{_SERVER_BASE}/static/render_cache/{uid}/{render_hash}/preview_photo_{i:02d}.webp")
+
+    for i, data in enumerate(final_clean):
+        (d / f"final_clean_{i:02d}.png").write_bytes(data)
+
+    for i, data in enumerate(final_photo):
+        (d / f"final_photo_{i:02d}.png").write_bytes(data)
+
+    full_manifest = {
+        **manifest,
+        "n_pages": len(preview_clean),
+        "uid":     uid,
+    }
+    (d / "manifest.json").write_text(
+        json.dumps(full_manifest, ensure_ascii=False), encoding="utf-8"
+    )
+    logger.info("local store_render_cache: %d pages, hash=%s", len(preview_clean), render_hash[:8])
+    return {"clean_urls": clean_urls, "photo_urls": photo_urls}
+
+
+def check_render_cache(uid: str, render_hash: str) -> "dict | None":
+    """Return URLs if cache exists on disk, else None."""
+    d = _CACHE_DIR / uid / render_hash
+    manifest_path = d / "manifest.json"
+    if not manifest_path.exists():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        n_pages = manifest.get("n_pages", 0)
+        if n_pages == 0:
+            return None
+
+        clean_urls: list[str] = []
+        photo_urls: list[str] = []
+        base = f"{_SERVER_BASE}/static/render_cache/{uid}/{render_hash}"
+
+        for i in range(n_pages):
+            for kind, out in [("clean", clean_urls), ("photo", photo_urls)]:
+                p = d / f"preview_{kind}_{i:02d}.webp"
+                if not p.exists():
+                    return None
+                out.append(f"{base}/preview_{kind}_{i:02d}.webp")
+
+        logger.info("local cache HIT: hash=%s uid=%s", render_hash[:8], uid)
+        return {"clean_urls": clean_urls, "photo_urls": photo_urls, "manifest": manifest}
+    except Exception as exc:
+        logger.warning("check_render_cache local: %s", exc)
+        return None
+
+
+def get_render_manifest(uid: str, render_hash: str) -> "dict | None":
+    """Read manifest from local cache."""
+    p = _CACHE_DIR / uid / render_hash / "manifest.json"
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def promote_from_cache(uid: str, render_hash: str, doc_id: str) -> "dict | None":
+    """
+    Copy cached final PNGs to a permanent local path.
+    In local dev, 'permanent' just means a different sub-directory.
+    """
+    import shutil
+    src_dir  = _CACHE_DIR / uid / render_hash
+    dest_dir = _STATIC_DIR.parent / "documents" / uid / doc_id
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest_path = src_dir / "manifest.json"
+    if not manifest_path.exists():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        n_pages  = manifest.get("n_pages", 0)
+        if n_pages == 0:
+            return None
+
+        clean_urls: list[str] = []
+        photo_urls: list[str] = []
+
+        for i in range(n_pages):
+            for kind, out in [("clean", clean_urls), ("photo", photo_urls)]:
+                src  = src_dir  / f"final_{kind}_{i:02d}.png"
+                dest = dest_dir / f"page_{kind}_{i:02d}.png"
+                if not src.exists():
+                    logger.warning("promote_from_cache local: missing %s", src)
+                    return None
+                shutil.copy2(src, dest)
+                out.append(f"{_SERVER_BASE}/documents/{uid}/{doc_id}/page_{kind}_{i:02d}.png")
+
+        logger.info("local promote_from_cache: %d pages → %s", n_pages, dest_dir)
+        return {"clean_urls": clean_urls, "photo_urls": photo_urls}
+    except Exception as exc:
+        logger.error("promote_from_cache local: %s", exc)
+        return None
+
 def upload_rendered_page_bytes(user_id: str, filename: str, image_bytes: bytes) -> str:
     return upload_rendered_page(user_id, filename, image_bytes)
 

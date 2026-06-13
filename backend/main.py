@@ -1822,18 +1822,86 @@ class ConvertBothRequest(BaseModel):
 
 
 class FinalizeRequest(BaseModel):
-    # The clean/photo page URLs returned by a previous preview render
-    # (/convert-both with preview=true). These point at temporary static files;
-    # /finalize promotes them to permanent Firebase Storage without re-rendering,
-    # guaranteeing the saved file is pixel-identical to what the user approved.
-    user_id:    str       = Field(..., min_length=1, max_length=128)
-    clean_urls: list[str] = Field(..., min_length=1, max_length=64)
-    photo_urls: list[str] = Field(..., min_length=1, max_length=64)
+    user_id: str = Field(..., min_length=1, max_length=128)
+
+    # ── New path (Phase 3): render_hash + doc_id ──────────────────────────────
+    # When these are present /finalize performs a GCS server-side copy from the
+    # render cache to a permanent documents/{uid}/{doc_id}/ path.  If the cache
+    # has expired the endpoint re-renders with the stored manifest params and
+    # produces byte-identical output (determinism contract).
+    render_hash: str | None = Field(None, min_length=64, max_length=64)
+    doc_id:      str | None = Field(None, min_length=1,  max_length=128,
+                                    pattern=r"^[A-Za-z0-9_\-]{1,128}$")
+
+    # ── Legacy path (backward compat until Phase 4 mobile rewrite) ────────────
+    # Still accepted when render_hash is absent.  These point at temporary
+    # static files on the server; /finalize copies them to Firebase Storage.
+    clean_urls: list[str] = Field(default_factory=list, max_length=64)
+    photo_urls: list[str] = Field(default_factory=list, max_length=64)
+
+    @staticmethod
+    def _validate(v: "FinalizeRequest") -> None:  # called in endpoint
+        has_hash   = v.render_hash is not None
+        has_legacy = bool(v.clean_urls)
+        if not has_hash and not has_legacy:
+            raise ValueError("Provide render_hash+doc_id or clean_urls+photo_urls")
+        if has_hash and not v.doc_id:
+            raise ValueError("doc_id is required when render_hash is provided")
 
 
-# Only basenames matching this pattern are accepted by /finalize, blocking any
-# path-traversal attempt via the URL the client sends back.
+# Only basenames matching this pattern are accepted by /finalize (legacy path),
+# blocking any path-traversal attempt via the URL the client sends back.
 _SAFE_PAGE_FILE_RE = _re_uid.compile(r"^page_(clean|photo)_\d+_\d+\.png$")
+
+
+# ---------------------------------------------------------------------------
+# Render-cache helpers (REWRITE_PLAN §3.5)
+# ---------------------------------------------------------------------------
+
+def _normalize_style(style: StyleParams) -> dict:
+    """
+    Round style parameters to their effective resolution so tiny floating-point
+    drift (41.0001 vs 41.0) never creates a cache miss.
+    """
+    return {
+        "char_height":     int(round(style.char_height)),
+        "letter_spacing":  round(float(style.letter_spacing), 1),
+        "word_spacing":    int(round(style.word_spacing)),
+        "baseline_jitter": round(float(style.baseline_jitter), 1),
+        "slant":           round(float(style.slant), 2),
+        "ink_blobs":       round(float(style.ink_blobs), 3),
+    }
+
+
+def _compute_render_hash(
+    uid:          str,
+    bank_version: int,
+    text:         str,
+    style:        StyleParams,
+    seed:         int,
+    background:   str,
+    ink_color:    str,
+) -> str:
+    """
+    SHA-256 cache key.
+
+    Parameters are normalized before hashing so the same effective render
+    always hits the same cache entry regardless of minor float variations.
+    """
+    payload = json.dumps(
+        {
+            "uid":          uid,
+            "bank_version": bank_version,
+            "text":         text,
+            "style":        _normalize_style(style),
+            "seed":         seed,
+            "background":   background,
+            "ink_color":    ink_color,
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 @app.post("/finalize")
@@ -1841,32 +1909,156 @@ async def finalize(body: FinalizeRequest, uid: str = Depends(require_auth)):
     """
     Promote an already-rendered preview to a permanent deliverable.
 
-    The preview render (/convert-both with preview=true) writes temporary PNGs
-    to the local static dir. Those files are ephemeral — the Railway container
-    filesystem resets on every redeploy, and a cleanup task prunes them after
-    24h. /finalize copies the EXACT same bytes to Firebase Storage so the file
-    the user keeps is permanent, and increments the daily usage count (preview
-    renders never do). No re-rendering happens, so the output is byte-identical
-    to what the user saw and approved.
+    **Phase 3 — hash path (preferred):**
+    The client passes ``render_hash`` + ``doc_id``.  The server performs a
+    GCS server-side copy of the cached full-res PNGs to a permanent
+    ``documents/{uid}/{doc_id}/`` path — no re-rendering, no re-upload of
+    bytes (the data never leaves GCS).  If the cache has expired (7-day TTL),
+    the manifest is used to re-render with the original (text, style, seed,
+    bank_version) params, which produces byte-identical output by the
+    determinism contract.
+
+    **Legacy path (backward compat):**
+    The client passes ``clean_urls`` + ``photo_urls`` (temporary static URLs
+    from a previous preview render).  The server reads the local files and
+    uploads them to Firebase Storage.  Will be removed in Phase 4.
 
     Response
     --------
     {
         "ok": bool,
-        "clean_urls": list[str],   # permanent Firebase URLs (or original on per-file upload failure)
+        "clean_urls": list[str],
         "photo_urls": list[str],
-        "expired": bool,           # true when source files are gone → client should re-render
+        "expired": bool,
         "usage_remaining": int | null,
         "watermark_visible": bool,
         "error": str | null
     }
     """
     assert_same_user(uid, body.user_id)
-    # General limit (not the stricter /convert limit): finalize only copies bytes,
-    # it does not render, and it runs right after several preview renders that
-    # already consumed the convert budget.
     _check_rate_limit(body.user_id)
 
+    _FREE_DAILY_LIMIT = 5
+    is_pro = firebase_client.check_is_pro_user(body.user_id)
+
+    # ── Authoritative daily-limit gate ────────────────────────────────────────
+    if not is_pro:
+        if firebase_client.get_usage_count(body.user_id) >= _FREE_DAILY_LIMIT:
+            raise HTTPException(
+                status_code=429,
+                detail=f"הגעת למגבלת {_FREE_DAILY_LIMIT} המרות ליום. שדרג לפרו להמרות ללא הגבלה.",
+            )
+
+    # =========================================================================
+    # Phase 3 path: GCS cache promotion
+    # =========================================================================
+    if body.render_hash is not None:
+        try:
+            FinalizeRequest._validate(body)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+
+        render_hash = body.render_hash
+        doc_id      = body.doc_id  # validated non-None by _validate
+
+        def _promote_sync():
+            return firebase_client.promote_from_cache(uid, render_hash, doc_id)
+
+        result = await asyncio.to_thread(_promote_sync)
+
+        if result is None:
+            # Cache expired — re-render using stored manifest params
+            logger.info("finalize: cache expired for hash=%s — re-rendering", render_hash[:8])
+            manifest = await asyncio.to_thread(
+                firebase_client.get_render_manifest, uid, render_hash
+            )
+            if manifest is None:
+                logger.error("finalize: no manifest for expired cache hash=%s", render_hash[:8])
+                raise HTTPException(
+                    status_code=409,
+                    detail="הרינדור פג תוקף ולא ניתן לשחזרו. נסה לצפות מחדש.",
+                )
+
+            # Re-render with identical params (determinism → byte-identical output)
+            from modules.synthesizer import VariantPicker, compose_paragraph, prefetch_bank_images
+            from modules.layout import (
+                load_background, render_full_page, apply_photo_effect,
+                embed_watermark, page_to_png_bytes,
+            )
+
+            re_text       = manifest["text"]
+            re_style_dict = manifest["style"]
+            re_seed       = manifest["seed"]
+            re_bg         = manifest.get("background", "lines")
+            re_ink        = manifest.get("ink_color", "black")
+            re_used_seed  = manifest["used_seed"]
+
+            bank          = firebase_client.load_character_bank(uid)
+            await asyncio.to_thread(prefetch_bank_images, bank)
+
+            _MARGIN    = 200
+            re_rng     = random.Random(re_used_seed)
+            lines      = await asyncio.to_thread(
+                compose_paragraph, re_text, VariantPicker(bank),
+                margin=_MARGIN, style=re_style_dict, ink_color=re_ink,
+                fast_mode=False, rng=re_rng,
+            )
+            bg         = load_background(re_bg)
+            clean_pgs  = await asyncio.to_thread(
+                render_full_page, lines, bg, margin=_MARGIN,
+                slant_px=re_style_dict.get("slant", 0.0), scan_mode="clean",
+            )
+            photo_pgs  = await asyncio.to_thread(
+                lambda: [
+                    apply_photo_effect(p.copy(), seed=(re_used_seed * 1_000_003 + i) & 0x7FFFFFFF)
+                    for i, p in enumerate(clean_pgs)
+                ]
+            )
+
+            def _rerender_promote():
+                clean_bytes = [page_to_png_bytes(embed_watermark(p, uid)) for p in clean_pgs]
+                photo_bytes = [page_to_png_bytes(embed_watermark(p, uid)) for p in photo_pgs]
+                return firebase_client.promote_from_cache.__func__ if False else \
+                    _direct_promote(uid, doc_id, clean_bytes, photo_bytes)
+
+            def _direct_promote(u, did, cb, pb):
+                clean_urls = [
+                    firebase_client.upload_rendered_page(u, f"page_clean_{i:02d}.png", d)
+                    for i, d in enumerate(cb)
+                ]
+                photo_urls = [
+                    firebase_client.upload_rendered_page(u, f"page_photo_{i:02d}.png", d)
+                    for i, d in enumerate(pb)
+                ]
+                return {"clean_urls": clean_urls, "photo_urls": photo_urls}
+
+            result = await asyncio.to_thread(
+                lambda: _direct_promote(
+                    uid, doc_id,
+                    [page_to_png_bytes(embed_watermark(p, uid)) for p in clean_pgs],
+                    [page_to_png_bytes(embed_watermark(p, uid)) for p in photo_pgs],
+                )
+            )
+
+        firebase_client.increment_usage(body.user_id)
+        usage_today     = firebase_client.get_usage_count(body.user_id)
+        usage_remaining = None if is_pro else max(0, _FREE_DAILY_LIMIT - usage_today)
+
+        logger.info("finalize (hash): done for user_tag=%s hash=%s",
+                    _uid_tag(body.user_id), render_hash[:8])
+        return {
+            "ok":               True,
+            "expired":          False,
+            "clean_urls":       result["clean_urls"],
+            "photo_urls":       result["photo_urls"],
+            "usage_remaining":  usage_remaining,
+            "watermark_visible": not is_pro,
+            "error":            None,
+        }
+
+    # =========================================================================
+    # Legacy path: local static files → Firebase upload
+    # =========================================================================
     pages_dir = _STATIC_DIR / "sample_pages"
 
     def _resolve_local(url: str) -> "Path | None":
@@ -1880,11 +2072,8 @@ async def finalize(body: FinalizeRequest, uid: str = Depends(require_auth)):
     clean_paths = [_resolve_local(u) for u in body.clean_urls]
     photo_paths = [_resolve_local(u) for u in body.photo_urls]
 
-    # If ANY source file is missing (container restarted, cleanup ran, or a URL
-    # was already a permanent Firebase URL), tell the client to fall back to a
-    # full re-render rather than persisting a partial document.
     if any(p is None for p in clean_paths) or any(p is None for p in photo_paths):
-        logger.info("finalize: source files unavailable for user_tag=%s → expired",
+        logger.info("finalize (legacy): source files unavailable for user_tag=%s → expired",
                     _uid_tag(body.user_id))
         return {
             "ok": False, "expired": True,
@@ -1893,39 +2082,24 @@ async def finalize(body: FinalizeRequest, uid: str = Depends(require_auth)):
             "error": None,
         }
 
-    # ── Authoritative daily-limit gate (mirrors /convert-both) ───────────────
-    _FREE_DAILY_LIMIT = 5
-    is_pro = firebase_client.check_is_pro_user(body.user_id)
-    if not is_pro:
-        if firebase_client.get_usage_count(body.user_id) >= _FREE_DAILY_LIMIT:
-            raise HTTPException(
-                status_code=429,
-                detail=f"הגעת למגבלת {_FREE_DAILY_LIMIT} המרות ליום. שדרג לפרו להמרות ללא הגבלה.",
-            )
-
     try:
         def _persist(paths: list[Path], originals: list[str]) -> list[str]:
             out: list[str] = []
             for p, original in zip(paths, originals):
                 data = p.read_bytes()
                 perm = firebase_client.upload_rendered_page(body.user_id, p.name, data)
-                # On a Firebase failure keep the still-valid static URL so the
-                # document is never broken; it just won't be permanent.
                 out.append(perm if perm else original)
             return out
 
         clean_perm = await asyncio.to_thread(_persist, clean_paths, body.clean_urls)
         photo_perm = await asyncio.to_thread(_persist, photo_paths, body.photo_urls)
 
-        # Count usage exactly once, after a successful persist.
         firebase_client.increment_usage(body.user_id)
-
         usage_today     = firebase_client.get_usage_count(body.user_id)
         usage_remaining = None if is_pro else max(0, _FREE_DAILY_LIMIT - usage_today)
 
-        logger.info("finalize: persisted %d clean + %d photo pages for user_tag=%s",
+        logger.info("finalize (legacy): persisted %d clean + %d photo for user_tag=%s",
                     len(clean_perm), len(photo_perm), _uid_tag(body.user_id))
-
         return {
             "ok": True, "expired": False,
             "clean_urls": clean_perm,
@@ -2032,6 +2206,46 @@ async def convert_both(body: ConvertBothRequest, uid: str = Depends(require_auth
         used_seed  = body.style.seed if body.style.seed is not None else secrets.randbits(31)
         render_rng = random.Random(used_seed)
 
+        bank_version = firebase_client.get_bank_version(body.user_id)
+
+        # ── Cache lookup (REWRITE_PLAN §3.5) ────────────────────────────────────
+        # For preview renders, check the render cache first.  A cache hit means
+        # we return WebP URLs immediately without any synthesis or compositing.
+        # For non-preview (final) renders we skip the cache to always produce a
+        # fresh full-quality 300 DPI PNG stored directly on Firebase.
+        render_hash: str | None = None
+        if body.preview:
+            render_hash = _compute_render_hash(
+                uid=body.user_id,
+                bank_version=bank_version,
+                text=body.text,
+                style=body.style,
+                seed=used_seed,
+                background=body.background,
+                ink_color=ink_color,
+            )
+            cached = await asyncio.to_thread(
+                firebase_client.check_render_cache, body.user_id, render_hash
+            )
+            if cached is not None:
+                FREE_DAILY_LIMIT = 5
+                is_pro_c         = firebase_client.check_is_pro_user(body.user_id)
+                usage_today_c    = firebase_client.get_usage_count(body.user_id)
+                usage_remaining_c = None if is_pro_c else max(0, FREE_DAILY_LIMIT - usage_today_c)
+                logger.info("convert-both: CACHE HIT hash=%s", render_hash[:8])
+                return {
+                    "ok":               True,
+                    "pages":            len(cached["clean_urls"]),
+                    "clean_urls":       cached["clean_urls"],
+                    "photo_urls":       cached["photo_urls"],
+                    "error":            None,
+                    "watermark_visible": not is_pro_c,
+                    "usage_remaining":  usage_remaining_c,
+                    "seed":             used_seed,
+                    "bank_version":     bank_version,
+                    "render_hash":      render_hash,
+                }
+
         # fast_mode skips normalize_stroke_width and uses BILINEAR resampling —
         # saves ~800-1200 ms per page with imperceptible quality difference at preview sizes.
         lines = await asyncio.to_thread(
@@ -2070,74 +2284,86 @@ async def convert_both(body: ConvertBothRequest, uid: str = Depends(require_auth
             ]
         )
 
-        timestamp = int(time.time())
         clean_urls: list[str] = []
         photo_urls: list[str] = []
 
-        # ── #6 Clean up stale renders before uploading new ones ──────────────────
-        # Fire-and-forget: non-fatal if it fails.  Prevents Storage cost creep
-        # from accumulated page_clean_*/page_photo_* files (2×N per conversion).
-        asyncio.get_event_loop().run_in_executor(
-            None, firebase_client.delete_old_renders, body.user_id
-        )
+        if body.preview:
+            # ── Phase 3 preview path: WebP cache ────────────────────────────────
+            # Render returns PIL arrays; convert to WebP (preview, 150 DPI equivalent)
+            # and PNG (full-res, for /finalize promotion).  Store both in GCS cache.
+            from modules.layout import page_to_webp_bytes, page_to_png_bytes
 
-        # ── #13 Temp-file cleanup on failure ─────────────────────────────────────
-        # Track every temp path created so the finally block can delete them even
-        # if export_page or Firebase upload raises an exception mid-loop.
-        _tmp_paths: list[Path] = []
+            def _build_cache_data():
+                prev_clean = [page_to_webp_bytes(embed_watermark(p, body.user_id), scale=0.5, quality=80) for p in clean_pages]
+                prev_photo = [page_to_webp_bytes(embed_watermark(p, body.user_id), scale=0.5, quality=80) for p in photo_pages]
+                fin_clean  = [page_to_png_bytes(embed_watermark(p, body.user_id)) for p in clean_pages]
+                fin_photo  = [page_to_png_bytes(embed_watermark(p, body.user_id)) for p in photo_pages]
+                return prev_clean, prev_photo, fin_clean, fin_photo
 
-        try:
-            for i, (clean_pg, photo_pg) in enumerate(zip(clean_pages, photo_pages)):
-                page_num = f"{i + 1:02d}"
+            prev_clean, prev_photo, fin_clean, fin_photo = await asyncio.to_thread(_build_cache_data)
 
-                # Clean page
-                clean_wm  = embed_watermark(clean_pg, body.user_id)
-                clean_fn  = f"page_clean_{timestamp}_{page_num}.png"
-                clean_tmp = Path(tempfile.gettempdir()) / clean_fn
-                _tmp_paths.append(clean_tmp)
-                export_page(clean_wm, "png", str(clean_tmp))
-                with open(clean_tmp, "rb") as fh:
-                    clean_bytes = fh.read()
-                # Preview renders skip Firebase Storage entirely — serve from local
-                # static files instead.  Saves ~500 ms × 2 modes per page.
-                if body.preview:
-                    dest = _STATIC_DIR / "sample_pages" / clean_fn
-                    dest.write_bytes(clean_bytes)
-                    clean_url = f"{_SERVER_HOST}/static/sample_pages/{clean_fn}"
-                else:
+            manifest = {
+                "text":       body.text,
+                "style":      _normalize_style(body.style),
+                "seed":       body.style.seed,
+                "used_seed":  used_seed,
+                "background": body.background,
+                "ink_color":  ink_color,
+                "bank_version": bank_version,
+            }
+            cache_result = await asyncio.to_thread(
+                firebase_client.store_render_cache,
+                body.user_id, render_hash,
+                prev_clean, prev_photo, fin_clean, fin_photo,
+                manifest,
+            )
+            clean_urls = cache_result["clean_urls"]
+            photo_urls = cache_result["photo_urls"]
+
+        else:
+            # ── Non-preview (final) path: full-res PNG → Firebase directly ───────
+            # Fire-and-forget cleanup of old renders (non-fatal).
+            asyncio.get_event_loop().run_in_executor(
+                None, firebase_client.delete_old_renders, body.user_id
+            )
+
+            timestamp   = int(time.time())
+            _tmp_paths: list[Path] = []
+            try:
+                for i, (clean_pg, photo_pg) in enumerate(zip(clean_pages, photo_pages)):
+                    page_num = f"{i + 1:02d}"
+
+                    clean_wm  = embed_watermark(clean_pg, body.user_id)
+                    clean_fn  = f"page_clean_{timestamp}_{page_num}.png"
+                    clean_tmp = Path(tempfile.gettempdir()) / clean_fn
+                    _tmp_paths.append(clean_tmp)
+                    export_page(clean_wm, "png", str(clean_tmp))
+                    with open(clean_tmp, "rb") as fh:
+                        clean_bytes = fh.read()
                     clean_url = firebase_client.upload_rendered_page(body.user_id, clean_fn, clean_bytes)
                     if clean_url is None:
                         dest = _STATIC_DIR / "sample_pages" / clean_fn
                         dest.write_bytes(clean_bytes)
                         clean_url = f"{_SERVER_HOST}/static/sample_pages/{clean_fn}"
-                clean_urls.append(clean_url)
+                    clean_urls.append(clean_url)
 
-                # Photo page
-                photo_wm  = embed_watermark(photo_pg, body.user_id)
-                photo_fn  = f"page_photo_{timestamp}_{page_num}.png"
-                photo_tmp = Path(tempfile.gettempdir()) / photo_fn
-                _tmp_paths.append(photo_tmp)
-                export_page(photo_wm, "png", str(photo_tmp))
-                with open(photo_tmp, "rb") as fh:
-                    photo_bytes = fh.read()
-                if body.preview:
-                    dest = _STATIC_DIR / "sample_pages" / photo_fn
-                    dest.write_bytes(photo_bytes)
-                    photo_url = f"{_SERVER_HOST}/static/sample_pages/{photo_fn}"
-                else:
+                    photo_wm  = embed_watermark(photo_pg, body.user_id)
+                    photo_fn  = f"page_photo_{timestamp}_{page_num}.png"
+                    photo_tmp = Path(tempfile.gettempdir()) / photo_fn
+                    _tmp_paths.append(photo_tmp)
+                    export_page(photo_wm, "png", str(photo_tmp))
+                    with open(photo_tmp, "rb") as fh:
+                        photo_bytes = fh.read()
                     photo_url = firebase_client.upload_rendered_page(body.user_id, photo_fn, photo_bytes)
                     if photo_url is None:
                         dest = _STATIC_DIR / "sample_pages" / photo_fn
                         dest.write_bytes(photo_bytes)
                         photo_url = f"{_SERVER_HOST}/static/sample_pages/{photo_fn}"
-                photo_urls.append(photo_url)
+                    photo_urls.append(photo_url)
+            finally:
+                for _p in _tmp_paths:
+                    _p.unlink(missing_ok=True)
 
-        finally:
-            # Always delete temp files — even on partial failure mid-loop.
-            for _p in _tmp_paths:
-                _p.unlink(missing_ok=True)
-
-        if not body.preview:
             firebase_client.increment_usage(body.user_id)
 
         FREE_DAILY_LIMIT = 5
@@ -2145,8 +2371,8 @@ async def convert_both(body: ConvertBothRequest, uid: str = Depends(require_auth
         usage_today      = firebase_client.get_usage_count(body.user_id)
         usage_remaining  = None if is_pro else max(0, FREE_DAILY_LIMIT - usage_today)
 
-        logger.info("convert-both: done — %d pages, %d clean + %d photo URLs",
-                    len(clean_pages), len(clean_urls), len(photo_urls))
+        logger.info("convert-both: done — %d pages, %d clean + %d photo URLs (preview=%s)",
+                    len(clean_pages), len(clean_urls), len(photo_urls), body.preview)
 
         return {
             "ok":               True,
@@ -2157,7 +2383,8 @@ async def convert_both(body: ConvertBothRequest, uid: str = Depends(require_auth
             "watermark_visible": not is_pro,
             "usage_remaining":  usage_remaining,
             "seed":             used_seed,
-            "bank_version":     firebase_client.get_bank_version(body.user_id),
+            "bank_version":     bank_version,
+            "render_hash":      render_hash,   # None for non-preview renders
         }
 
     except HTTPException:

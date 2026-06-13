@@ -598,6 +598,62 @@ def embed_watermark(image: np.ndarray, user_id: str) -> np.ndarray:
 # Page export
 # ---------------------------------------------------------------------------
 
+def page_to_webp_bytes(
+    page: np.ndarray,
+    scale: float = 0.5,
+    quality: int = 80,
+) -> bytes:
+    """
+    Convert a rendered RGBA page array to WebP bytes.
+
+    Parameters
+    ----------
+    page : np.ndarray
+        RGBA uint8 array (H × W × 4) produced by ``render_full_page``.
+    scale : float
+        Downscale factor. ``0.5`` → 150 DPI equivalent from a 300 DPI source.
+        ``1.0`` keeps full resolution.  Default: ``0.5``.
+    quality : int
+        WebP lossy quality (0–100).  80 gives excellent quality at ~10× the
+        byte savings vs. PNG.  Default: ``80``.
+
+    Returns
+    -------
+    bytes
+        Raw WebP-encoded bytes ready for upload or HTTP response.
+    """
+    import io as _io
+    pil = Image.fromarray(page, "RGBA").convert("RGB")
+    if scale != 1.0 and scale > 0:
+        w, h = pil.size
+        pil = pil.resize(
+            (max(1, int(w * scale)), max(1, int(h * scale))),
+            Image.LANCZOS,
+        )
+    buf = _io.BytesIO()
+    pil.save(buf, format="WEBP", quality=quality, method=4)
+    return buf.getvalue()
+
+
+def page_to_png_bytes(page: np.ndarray) -> bytes:
+    """
+    Convert a rendered RGBA page array to lossless PNG bytes.
+
+    Used by ``store_render_cache`` to store the full-res version for
+    ``/finalize`` promotion.
+
+    Returns
+    -------
+    bytes
+        Raw PNG-encoded bytes.
+    """
+    import io as _io
+    pil = Image.fromarray(page, "RGBA")
+    buf = _io.BytesIO()
+    pil.save(buf, format="PNG", compress_level=1, optimize=True)
+    return buf.getvalue()
+
+
 def export_page(page: np.ndarray, output_format: str, output_path: str) -> str:
     """
     Save a rendered page array to disk as PNG or PDF.

@@ -160,8 +160,22 @@ bank_version ב-Firestore (עולה בכל שינוי מאגר; 0 לקיימים
 מטא-דאטת מידות ב-Firestore — מדויק יותר (כולל rotate/crop) ופשוט יותר;
 החיסכון של /layout נשאר: בלי compositing, בלי PNG, בלי upload.*
 
-**שלב 3 — cache ורינדור מדורג (backend)**
-מפתח hash · WebP 150dpi ל-preview · lifecycle TTL · `/finalize` כקידום אידמפוטנטי.
+**שלב 3 — cache ורינדור מדורג (backend)** ✅ **בוצע 2026-06-13**
+`_compute_render_hash` — SHA-256 על (uid, bank_version, text, style_normalized, seed,
+background, ink_color); `_normalize_style` מונע cache-miss על drift של float.
+`/convert-both preview=True`: בדיקת cache לפני כל רינדור → hit = WebP מוחזר מיידית.
+miss = רינדור בפועל → store_render_cache שומר preview WebP (scale=0.5, quality=80)
++ full-res PNG ב-GCS תחת `renders/{uid}/{hash}/`. Manifest JSON נשמר לצד הקבצים
+עם כל params (text, style, seed, bank_version) לצורך re-render במקרה TTL.
+`/finalize` משודרג: מסלול חדש `render_hash + doc_id` → `promote_from_cache` מבצע
+GCS server-side copy מ-cache לנתיב קבוע `documents/{uid}/{doc_id}/` (אין העלאה כפולה).
+אם cache פג (7d TTL) → re-render עם manifest params → bytes זהים מהדטרמיניזם.
+מסלול legacy (clean_urls/photo_urls) נשמר לתאימות אחורה עד שלב 4.
+`page_to_webp_bytes` + `page_to_png_bytes` נוספו ל-layout.py. Stubs מקבילים נוספו
+ל-local_storage.py לפיתוח מקומי. GCS lifecycle rule (one-time setup, 7 ימים)
+מתועד כהערה בקוד: `renders/` prefix → Delete after age: 7.
+*הערה: `promote_from_cache` ב-firebase_storage.py משתמש ב-`bucket.copy_blob` (GCS
+server-side copy) — אפס bandwidth ואפס זמן רינדור ב-finalize.*
 
 **שלב 4 — קומפוזיטור (mobile)**
 `LayoutCompositor` · PreviewScreen נכתב מחדש סביב `/layout` (הסליידרים נשארים

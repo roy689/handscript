@@ -169,6 +169,204 @@ def configure(server_base_url: str) -> None:
     pass
 
 
+# ── Render cache (REWRITE_PLAN §3.5) ─────────────────────────────────────────
+# Preview renders are stored in GCS under renders/{uid}/{hash}/ with a 7-day
+# TTL lifecycle rule set on the bucket.  /finalize promotes cached full-res PNGs
+# to permanent documents/{uid}/{doc_id}/ via a server-side GCS copy (instant,
+# free), guaranteeing the saved file is byte-identical to what was previewed.
+#
+# Cache structure:
+#   renders/{uid}/{hash}/manifest.json          ← render params for re-render fallback
+#   renders/{uid}/{hash}/preview_clean_{n}.webp ← 150 DPI WebP served to mobile
+#   renders/{uid}/{hash}/preview_photo_{n}.webp
+#   renders/{uid}/{hash}/final_clean_{n}.png    ← 300 DPI PNG used by /finalize
+#   renders/{uid}/{hash}/final_photo_{n}.png
+#
+# GCS lifecycle rule (one-time bucket setup):
+#   gsutil lifecycle set lifecycle.json gs://a-written-scanner.firebasestorage.app
+# where lifecycle.json contains:
+#   { "rule": [{ "action": {"type": "Delete"},
+#                "condition": {"age": 7, "matchesPrefix": ["renders/"]} }] }
+
+
+def _render_prefix(uid: str, render_hash: str) -> str:
+    return f"renders/{uid}/{render_hash}/"
+
+
+def store_render_cache(
+    uid: str,
+    render_hash: str,
+    preview_clean: list[bytes],   # WebP bytes, 150 DPI
+    preview_photo: list[bytes],
+    final_clean:   list[bytes],   # PNG bytes, 300 DPI
+    final_photo:   list[bytes],
+    manifest:      dict,
+) -> dict:
+    """
+    Upload rendered pages to GCS cache.
+
+    Returns ``{"clean_urls": [...], "photo_urls": [...]}``.
+    ``clean_urls`` / ``photo_urls`` point at the *preview* WebP files — these
+    are the URLs returned to the mobile client for display.  The full-res PNGs
+    are stored alongside and consumed by ``promote_from_cache`` at finalize time.
+    """
+    prefix = _render_prefix(uid, render_hash)
+    clean_urls: list[str] = []
+    photo_urls: list[str] = []
+
+    for i, data in enumerate(preview_clean):
+        bname = f"{prefix}preview_clean_{i:02d}.webp"
+        url = _upload_blob(bname, data, content_type="image/webp")
+        clean_urls.append(url)
+
+    for i, data in enumerate(preview_photo):
+        bname = f"{prefix}preview_photo_{i:02d}.webp"
+        url = _upload_blob(bname, data, content_type="image/webp")
+        photo_urls.append(url)
+
+    for i, data in enumerate(final_clean):
+        bname = f"{prefix}final_clean_{i:02d}.png"
+        _upload_blob(bname, data, content_type="image/png")   # no URL needed — used by promote
+
+    for i, data in enumerate(final_photo):
+        bname = f"{prefix}final_photo_{i:02d}.png"
+        _upload_blob(bname, data, content_type="image/png")
+
+    full_manifest = {
+        **manifest,
+        "n_pages":    len(preview_clean),
+        "uid":        uid,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _upload_blob(
+        f"{prefix}manifest.json",
+        json.dumps(full_manifest, ensure_ascii=False).encode(),
+        content_type="application/json",
+    )
+
+    logger.info(
+        "store_render_cache: stored %d pages for hash=%s uid=%s",
+        len(preview_clean), render_hash[:8], uid,
+    )
+    return {"clean_urls": clean_urls, "photo_urls": photo_urls}
+
+
+def check_render_cache(uid: str, render_hash: str) -> "dict | None":
+    """
+    Return ``{"clean_urls": [...], "photo_urls": [...], "manifest": {...}}``
+    if all pages are cached, otherwise ``None``.
+    """
+    try:
+        prefix = _render_prefix(uid, render_hash)
+        manifest_blob = _bucket().blob(f"{prefix}manifest.json")
+        if not manifest_blob.exists():
+            return None
+        manifest_blob.reload()
+        manifest = json.loads(manifest_blob.download_as_bytes())
+        n_pages = manifest.get("n_pages", 0)
+        if n_pages == 0:
+            return None
+
+        clean_urls: list[str] = []
+        photo_urls: list[str] = []
+
+        for i in range(n_pages):
+            for kind, out in [("clean", clean_urls), ("photo", photo_urls)]:
+                b = _bucket().blob(f"{prefix}preview_{kind}_{i:02d}.webp")
+                if not b.exists():
+                    logger.debug("cache miss: %s", b.name)
+                    return None
+                b.reload()
+                meta = b.metadata or {}
+                token = meta.get("firebaseStorageDownloadTokens", "")
+                encoded = urllib.parse.quote(b.name, safe="")
+                url = (
+                    f"https://firebasestorage.googleapis.com/v0/b/{_bucket().name}"
+                    f"/o/{encoded}?alt=media&token={token}"
+                )
+                out.append(url)
+
+        logger.info("cache HIT: hash=%s uid=%s pages=%d", render_hash[:8], uid, n_pages)
+        return {"clean_urls": clean_urls, "photo_urls": photo_urls, "manifest": manifest}
+
+    except Exception as exc:
+        logger.warning("check_render_cache: error for %s/%s: %s", uid, render_hash[:8], exc)
+        return None
+
+
+def get_render_manifest(uid: str, render_hash: str) -> "dict | None":
+    """Read the manifest JSON from cache; None if not found."""
+    try:
+        b = _bucket().blob(f"{_render_prefix(uid, render_hash)}manifest.json")
+        if not b.exists():
+            return None
+        return json.loads(b.download_as_bytes())
+    except Exception as exc:
+        logger.warning("get_render_manifest: error for %s/%s: %s", uid, render_hash[:8], exc)
+        return None
+
+
+def promote_from_cache(
+    uid:         str,
+    render_hash: str,
+    doc_id:      str,
+) -> "dict | None":
+    """
+    Server-side GCS copy of cached full-res PNGs to a permanent path.
+
+    Copies ``renders/{uid}/{hash}/final_*_{n}.png``
+         → ``documents/{uid}/{doc_id}/page_clean_{n}.png``  (and photo).
+
+    Returns ``{"clean_urls": [...], "photo_urls": [...]}``, or ``None`` if
+    any source blob is missing (caller should fall back to re-render).
+    """
+    try:
+        prefix   = _render_prefix(uid, render_hash)
+        dest_pfx = f"documents/{uid}/{doc_id}/"
+        bucket   = _bucket()
+
+        manifest_blob = bucket.blob(f"{prefix}manifest.json")
+        if not manifest_blob.exists():
+            return None
+        n_pages = json.loads(manifest_blob.download_as_bytes()).get("n_pages", 0)
+        if n_pages == 0:
+            return None
+
+        clean_urls: list[str] = []
+        photo_urls: list[str] = []
+
+        for i in range(n_pages):
+            for kind, out in [("clean", clean_urls), ("photo", photo_urls)]:
+                src_name  = f"{prefix}final_{kind}_{i:02d}.png"
+                dest_name = f"{dest_pfx}page_{kind}_{i:02d}.png"
+                src_blob  = bucket.blob(src_name)
+                if not src_blob.exists():
+                    logger.warning("promote_from_cache: missing %s", src_name)
+                    return None
+
+                # Server-side copy — no data leaves GCS
+                token       = str(uuid.uuid4())
+                dest_blob   = bucket.copy_blob(src_blob, bucket, new_name=dest_name)
+                dest_blob.metadata = {"firebaseStorageDownloadTokens": token}
+                dest_blob.patch()
+                encoded = urllib.parse.quote(dest_name, safe="")
+                url = (
+                    f"https://firebasestorage.googleapis.com/v0/b/{bucket.name}"
+                    f"/o/{encoded}?alt=media&token={token}"
+                )
+                out.append(url)
+
+        logger.info(
+            "promote_from_cache: promoted %d pages to %s for uid=%s",
+            n_pages, dest_pfx, uid,
+        )
+        return {"clean_urls": clean_urls, "photo_urls": photo_urls}
+
+    except Exception as exc:
+        logger.error("promote_from_cache: failed for %s/%s: %s", uid, render_hash[:8], exc)
+        return None
+
+
 # ── Bank versioning (REWRITE_PLAN §3.1) ───────────────────────────────────────
 # Every mutation of the glyph bank (add / replace / delete a variant or char)
 # bumps an integer `version` on the parent doc character_banks/{user_id}.
