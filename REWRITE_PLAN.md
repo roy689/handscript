@@ -148,10 +148,17 @@ bank_version ב-Firestore (עולה בכל שינוי מאגר; 0 לקיימים
 ב-/glyphs ו-/convert-both · בדיקות 41-42: hash-identity + אי-דליפה ל-random גלובלי.
 *אחורה-תואם מלא: קליינט ישן בלי seed מקבל התנהגות זהה להיום + seed בתשובה.*
 
-**שלב 2 — פיצול המנוע + מטא-דאטת מידות (backend)**
-compute_layout/rasterize · שמירת w/h של כל variant ב-Firestore (+מיגרציה
-חד-פעמית לדגימות קיימות) · `/layout` endpoint · בדיקת שקילות: rasterize על
-layout ≡ הפלט הישן.
+**שלב 2 — פיצול המנוע + /layout (backend)** ✅ **בוצע 2026-06-12**
+`plan_line`/`raster_line` + `plan_paragraph`/`plan_visual_line` — כל החלטה
+אקראית וגיאומטרית נרשמת ב-plan; ה-raster טהור (אפס rng). `compose_line`/
+`compose_paragraph` הפכו ל-wrappers — שקילות byte-identical מובנית. כתמים
+פוצלו ל-`_plan_ink_blobs`/`_paint_ink_blobs`. `pick_meta` חושף איזה variant
+נבחר (אינדקס+URL). ב-layout.py: `plan_page_assignment` + `line_tilt` (מקור
+אמת יחיד ל-tilt, גם ל-render). Endpoint חדש `POST /layout` מחזיר גיאומטריה
+אבסולוטית מלאה לקומפוזיטור. בדיקות 43-44: רוחב plan ≡ רוחב raster, גיאומטריה
+דטרמיניסטית. *סטייה מתועדת מהתוכנית: המדידה משתמשת בתמונות שב-LRU במקום
+מטא-דאטת מידות ב-Firestore — מדויק יותר (כולל rotate/crop) ופשוט יותר;
+החיסכון של /layout נשאר: בלי compositing, בלי PNG, בלי upload.*
 
 **שלב 3 — cache ורינדור מדורג (backend)**
 מפתח hash · WebP 150dpi ל-preview · lifecycle TTL · `/finalize` כקידום אידמפוטנטי.

@@ -346,6 +346,56 @@ def _tilt_line(arr: np.ndarray, tilt_px: float) -> tuple:
 
 
 # ---------------------------------------------------------------------------
+# Page-assignment planner (REWRITE_PLAN §3.3)
+# ---------------------------------------------------------------------------
+
+def plan_page_assignment(
+    num_lines: int,
+    line_h: int,
+    page_h: int,
+    margin: int = 200,
+) -> list[dict]:
+    """
+    Compute which page and y-coordinate each line lands on, replicating the
+    EXACT pagination loop of render_full_page (same fit check, same advance):
+
+        y = _TOP_MARGIN
+        if y + line_h > page_h - margin → new page, y = _TOP_MARGIN
+        place at y;  y += line_h + _LINE_GAP
+
+    Used by the /layout endpoint so the mobile compositor paginates identically
+    to the rasterized output. Returns [{"page": int, "y": int}, ...] per line.
+    """
+    placements: list[dict] = []
+    page = 0
+    y    = _TOP_MARGIN
+    bottom_margin = margin
+
+    for _ in range(num_lines):
+        if y + line_h > page_h - bottom_margin:
+            page += 1
+            y = _TOP_MARGIN
+        placements.append({"page": page, "y": y})
+        y += line_h + _LINE_GAP
+
+    return placements
+
+
+def line_tilt(line_idx: int, slant_px: float) -> float:
+    """
+    Per-line baseline tilt, replicating render_full_page exactly (including
+    the ≤0.5 px dead-zone). Exposed for the /layout endpoint so the client
+    compositor tilts each line like the rasterizer does.
+    """
+    if slant_px <= 0.5:
+        return 0.0
+    seed      = (line_idx * 2654435761) & 0xFFFFFFFF
+    direction = 1 if (seed >> 16) & 1 else -1
+    variation = 0.6 + 0.8 * ((seed & 0xFFFF) / 65535.0)  # 0.6-1.4×
+    return direction * slant_px * variation
+
+
+# ---------------------------------------------------------------------------
 # Full-page renderer
 # ---------------------------------------------------------------------------
 
@@ -427,12 +477,10 @@ def render_full_page(
         lw = line_img.shape[1]   # varies with text content
 
         # Apply baseline tilt: each line independently slopes up or down.
-        if slant_px > 0.5:
-            # Alternate direction per line with small random variation
-            seed      = (line_idx * 2654435761) & 0xFFFFFFFF
-            direction = 1 if (seed >> 16) & 1 else -1
-            variation = 0.6 + 0.8 * ((seed & 0xFFFF) / 65535.0)  # 0.6-1.4×
-            this_tilt = direction * slant_px * variation
+        # line_tilt() is the single source of truth — also used by /layout
+        # so the client compositor reproduces the exact same slope per line.
+        this_tilt = line_tilt(line_idx, slant_px)
+        if this_tilt != 0.0:
             tilted, top_offset = _tilt_line(line_img, this_tilt)
         else:
             tilted, top_offset = line_img, 0

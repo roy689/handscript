@@ -2252,6 +2252,129 @@ async def get_glyphs(body: GlyphsRequest, uid: str = Depends(require_auth)):
     }
 
 
+class LayoutRequest(BaseModel):
+    text:    str         = Field(..., min_length=1, max_length=_MAX_TEXT)
+    user_id: str         = Field(..., min_length=1, max_length=128)
+    style:   StyleParams = StyleParams()
+    # fast_mode resampling must match the render the client will display next
+    # to this layout (/convert-both with preview=True uses fast_mode) — glyph
+    # ink-crop widths can differ by ±1px between resampling modes.
+    preview: bool        = True
+
+
+@app.post("/layout")
+async def compute_layout(body: LayoutRequest, uid: str = Depends(require_auth)):
+    """
+    Geometry-only layout for the mobile compositor (REWRITE_PLAN §3.3).
+
+    Runs the EXACT same planning code as the rasterizer (plan_paragraph —
+    same rng draw order, same seed) but skips compositing and PNG encoding,
+    so it is fast enough to call on every slider drag. The client draws each
+    glyph image at the returned absolute coordinates; the later /convert-both
+    call with the SAME seed rasterizes the IDENTICAL layout.
+
+    Response:
+    {
+      "ok": true, "seed": int, "bank_version": int,
+      "page_geometry": { page_w, page_h, top_margin, side_margin,
+                         line_height, line_gap, baseline_ratio },
+      "pages": [ { "lines": [ { "y", "x", "width", "tilt",
+                   "glyphs": [ {char, url, variant, x, y, w, h} ] } ] } ]
+    }
+    Glyph x/y are absolute page coordinates (server pixels, 2480×3508 A4).
+    """
+    assert_same_user(uid, body.user_id)
+    _check_rate_limit(body.user_id)
+    from modules.synthesizer import (
+        VariantPicker, plan_paragraph, plan_visual_line, prefetch_bank_images,
+        _LINE_HEIGHT as _SYN_LINE_H, _BASELINE_Y_RATIO,
+    )
+    from modules.layout import (
+        plan_page_assignment, line_tilt, _PAGE_W, _PAGE_H, _TOP_MARGIN, _LINE_GAP,
+    )
+
+    try:
+        bank = firebase_client.load_character_bank(body.user_id)
+        if not bank:
+            return {"ok": False, "pages": [], "error": "המאגר ריק — צלם תווים תחילה"}
+
+        # Glyph images are needed for exact ink-crop measurement; after the
+        # first call they sit in the in-memory LRU so this is near-instant.
+        await asyncio.to_thread(prefetch_bank_images, bank)
+
+        result = validate_text(body.text, bank)
+        if not result["ok"]:
+            return {
+                "ok": False, "pages": [],
+                "error": f"Missing characters: {', '.join(result['missing'])}",
+            }
+
+        used_seed  = body.style.seed if body.style.seed is not None else secrets.randbits(31)
+        render_rng = random.Random(used_seed)
+
+        style_dict = {
+            "char_height":     body.style.char_height,
+            "letter_spacing":  body.style.letter_spacing,
+            "word_spacing":    body.style.word_spacing,
+            "baseline_jitter": body.style.baseline_jitter,
+            "slant":           body.style.slant,
+            "ink_blobs":       body.style.ink_blobs,
+        }
+        _MARGIN = 200
+        picker  = VariantPicker(bank)
+
+        entries = await asyncio.to_thread(
+            plan_paragraph,
+            body.text, picker,
+            margin=_MARGIN,
+            style=style_dict,
+            fast_mode=body.preview,
+            rng=render_rng,
+        )
+        if not entries:
+            return {"ok": False, "pages": [], "error": "No content to render"}
+
+        assignment = plan_page_assignment(len(entries), _SYN_LINE_H, _PAGE_H, _MARGIN)
+        n_pages    = assignment[-1]["page"] + 1 if assignment else 1
+
+        pages: list[dict] = [{"lines": []} for _ in range(n_pages)]
+        for line_idx, (entry, pos) in enumerate(zip(entries, assignment)):
+            width, glyphs = plan_visual_line(entry)
+            line_x = max(_MARGIN, _PAGE_W - width - _MARGIN)
+            pages[pos["page"]]["lines"].append({
+                "y":      pos["y"],
+                "x":      line_x,
+                "width":  width,
+                "tilt":   line_tilt(line_idx, body.style.slant),
+                "glyphs": [
+                    {**g, "x": g["x"] + line_x, "y": g["y"] + pos["y"]}
+                    for g in glyphs
+                ],
+            })
+
+        return {
+            "ok":           True,
+            "seed":         used_seed,
+            "bank_version": firebase_client.get_bank_version(body.user_id),
+            "page_geometry": {
+                "page_w":         _PAGE_W,
+                "page_h":         _PAGE_H,
+                "top_margin":     _TOP_MARGIN,
+                "side_margin":    _MARGIN,
+                "line_height":    _SYN_LINE_H,
+                "line_gap":       _LINE_GAP,
+                "baseline_ratio": _BASELINE_Y_RATIO,
+            },
+            "pages": pages,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("layout: unhandled error text_len=%d: %s", len(body.text), exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="שגיאת שרת פנימית. נסה שוב.")
+
+
 @app.get("/bank/{user_id}")
 async def get_bank(user_id: str, uid: str = Depends(require_auth)):
     """Return the user's current character bank (characters list)."""

@@ -208,6 +208,20 @@ class VariantPicker:
             RGBA image (H × W × 4, uint8), or None when the character is
             absent from the bank or its variants list is empty.
         """
+        img, _idx, _url = self.pick_meta(char, rng=rng)
+        return img
+
+    def pick_meta(
+        self, char: str, rng: "random.Random | None" = None,
+    ) -> "tuple[Optional[np.ndarray], int, Optional[str]]":
+        """
+        Like :meth:`pick`, but also returns WHICH variant was chosen.
+
+        Returns ``(image, variant_index, variant_url)``; ``(None, -1, None)``
+        when the character is absent. The index/url are recorded into layout
+        plans (REWRITE_PLAN §3.3) so the mobile compositor can fetch the exact
+        glyph image the server placed.
+        """
         # Try the raw character first (Firebase stores keys as the actual char).
         # Fall back to the normalised key for backward-compat with older banks.
         normalized = normalize_char(char)
@@ -216,17 +230,17 @@ class VariantPicker:
         char_data = self._bank.get(bank_key)
         if char_data is None:
             logger.debug("Character %r (keys tried: %r, %r) not in bank", char, char, normalized)
-            return None
+            return None, -1, None
 
         variants = char_data.get("variants") or []
         n = len(variants)
 
         if n == 0:
             logger.warning("Character %r has an empty variants list", char)
-            return None
+            return None, -1, None
 
         if n == 1:
-            return self._get_image(bank_key, 0)
+            return self._get_image(bank_key, 0), 0, self._variant_url(variants, 0)
 
         # ── Shuffled-deck variant selection ───────────────────────────────────
         # Each character gets its own deck (a shuffled list of variant indices).
@@ -250,7 +264,18 @@ class VariantPicker:
         self._last_used[bank_key] = chosen
         logger.debug("pick: char=%r → variant %d/%d", bank_key, chosen, n)
 
-        return self._get_image(bank_key, chosen)
+        return self._get_image(bank_key, chosen), chosen, self._variant_url(variants, chosen)
+
+    @staticmethod
+    def _variant_url(variants: list, idx: int) -> "str | None":
+        """URL of variant *idx*, or None for in-memory (test) banks."""
+        try:
+            v = variants[idx]
+            if isinstance(v, dict):
+                return v.get("url")
+        except (IndexError, TypeError):
+            pass
+        return None
 
     def reset(self) -> None:
         """
@@ -1096,6 +1121,53 @@ def apply_slant(img: np.ndarray, angle_deg: float) -> np.ndarray:
     )
 
 
+def _plan_ink_blobs(
+    glyph_x: int,
+    glyph_y: int,
+    glyph_w: int,
+    glyph_h: int,
+    blob_prob: float,
+    rng: "random.Random | None" = None,
+) -> list[dict]:
+    """
+    PLAN step of ink-blob generation (REWRITE_PLAN §3.2): consume the exact
+    same rng draws as the legacy _add_ink_blob and return blob parameters
+    instead of painting. The raster step (_paint_ink_blobs) consumes NO rng,
+    so plan+paint is byte-identical to the legacy single-step function.
+    """
+    _r = rng if rng is not None else random
+    if blob_prob <= 0 or _r.random() > blob_prob:
+        return []
+    blobs: list[dict] = []
+    for _ in range(_r.randint(1, 2)):
+        # Blob anchors: right edge (pen start in RTL) or a random mid-stroke point
+        if _r.random() < 0.55:
+            bx = glyph_x + glyph_w + _r.randint(-2, 2)
+            by = glyph_y + glyph_h - _r.randint(0, max(1, glyph_h // 5))
+        else:
+            bx = glyph_x + _r.randint(0, max(1, glyph_w))
+            by = glyph_y + _r.randint(0, glyph_h)
+        radius = _r.randint(max(4, glyph_h // 10), max(8, glyph_h // 5))
+        alpha  = _r.randint(180, 240)
+        blobs.append({"x": bx, "y": by, "r": radius, "a": alpha})
+    return blobs
+
+
+def _paint_ink_blobs(canvas: Image.Image, blobs: list[dict], ink_rgb: tuple) -> None:
+    """RASTER step of ink-blob generation — pure painting, no randomness."""
+    if not blobs:
+        return
+    draw = ImageDraw.Draw(canvas)
+    r, g, b = ink_rgb
+    for blob in blobs:
+        radius = blob["r"]
+        draw.ellipse(
+            [blob["x"] - radius, blob["y"] - radius,
+             blob["x"] + radius, blob["y"] + radius],
+            fill=(r, g, b, blob["a"]),
+        )
+
+
 def _add_ink_blob(
     canvas: Image.Image,
     glyph_x: int,
@@ -1107,29 +1179,14 @@ def _add_ink_blob(
     rng: "random.Random | None" = None,
 ) -> None:
     """
-    With probability *blob_prob*, draw a small ink-accumulation dot on *canvas*
-    near the start or end of the glyph stroke (simulates pen start/stop blobs).
-    Modifies canvas in-place. Seeded via *rng* for deterministic rendering.
+    Legacy single-step API: plan + paint in one call. Kept for backward
+    compatibility; new code should use _plan_ink_blobs / _paint_ink_blobs.
     """
-    _r = rng if rng is not None else random
-    if blob_prob <= 0 or _r.random() > blob_prob:
-        return
-    draw = ImageDraw.Draw(canvas)
-    r, g, b = ink_rgb
-    for _ in range(_r.randint(1, 2)):
-        # Blob anchors: right edge (pen start in RTL) or a random mid-stroke point
-        if _r.random() < 0.55:
-            bx = glyph_x + glyph_w + _r.randint(-2, 2)
-            by = glyph_y + glyph_h - _r.randint(0, max(1, glyph_h // 5))
-        else:
-            bx = glyph_x + _r.randint(0, max(1, glyph_w))
-            by = glyph_y + _r.randint(0, glyph_h)
-        radius = _r.randint(max(4, glyph_h // 10), max(8, glyph_h // 5))
-        alpha  = _r.randint(180, 240)
-        draw.ellipse(
-            [bx - radius, by - radius, bx + radius, by + radius],
-            fill=(r, g, b, alpha),
-        )
+    _paint_ink_blobs(
+        canvas,
+        _plan_ink_blobs(glyph_x, glyph_y, glyph_w, glyph_h, blob_prob, rng=rng),
+        ink_rgb,
+    )
 
 
 def _hcrop_to_ink(img: np.ndarray) -> np.ndarray:
@@ -1155,7 +1212,7 @@ def _hcrop_to_ink(img: np.ndarray) -> np.ndarray:
     return img[:, cols[0]:cols[-1] + 1, :]
 
 
-def compose_line(
+def plan_line(
     chars: list[str],
     picker: VariantPicker,
     direction: str = "rtl",
@@ -1163,9 +1220,25 @@ def compose_line(
     ink_color: str = "black",
     fast_mode: bool = False,
     rng: "random.Random | None" = None,
-) -> np.ndarray:
+) -> "tuple[dict, list[np.ndarray]]":
     """
-    Render a single line of text as an RGBA numpy array.
+    PLAN step of line rendering (REWRITE_PLAN §3.2) — computes the full layout
+    of one line and records every random decision, WITHOUT compositing.
+
+    Returns ``(line_plan, glyph_images)`` where:
+      line_plan = {
+        "width":  int,                 # final line canvas width (px)
+        "height": _LINE_HEIGHT,
+        "glyphs": [ { "char", "x", "y", "w", "h",
+                      "variant", "url",            # which bank variant was used
+                      "img",                       # index into glyph_images
+                      "blobs": [ {x, y, r, a} ] }, ... ]   # visual (paste) order
+      }
+      glyph_images = transformed RGBA arrays, aligned with the "img" indices.
+
+    ``raster_line(line_plan, glyph_images, ink_color)`` pastes the result and
+    consumes NO randomness — so plan+raster is byte-identical to the legacy
+    single-step compose_line (which is now a thin wrapper over both).
 
     For each character the function:
       1. Picks a glyph variant (via VariantPicker)
@@ -1194,11 +1267,11 @@ def compose_line(
 
     Returns
     -------
-    np.ndarray
-        RGBA array of shape (120, total_width, 4).
+    tuple[dict, list[np.ndarray]]
+        (line_plan, glyph_images) — see above.
     """
     if not chars:
-        return np.zeros((_LINE_HEIGHT, 0, 4), dtype=np.uint8)
+        return {"width": 0, "height": _LINE_HEIGHT, "glyphs": []}, []
 
     # ------------------------------------------------------------------
     # Deterministic rendering: a seeded rng makes every random decision in
@@ -1216,13 +1289,13 @@ def compose_line(
     # ------------------------------------------------------------------
     # Step 1 — Render every glyph in logical order
     # ------------------------------------------------------------------
-    # glyphs[i] = (RGBA_array, vertical_offset_int) or None (space / missing)
+    # glyphs[i] = (RGBA_array, v_off, variant_idx, variant_url) or None
     glyphs: list = []
     for ch in chars:
         if ch == " ":
             glyphs.append(None)
         else:
-            raw = picker.pick(ch, rng=rng)
+            raw, v_idx, v_url = picker.pick_meta(ch, rng=rng)
             if raw is None:
                 logger.warning("compose_line: char %r not in bank — leaving gap", ch)
                 glyphs.append(None)   # character absent from bank → blank gap
@@ -1256,7 +1329,7 @@ def compose_line(
                     # making it uniform, fully slider-controlled, and able to
                     # reach zero (touching) at the minimum.
                     inked           = _hcrop_to_ink(inked)
-                    glyphs.append((inked, v_off))
+                    glyphs.append((inked, v_off, v_idx, v_url))
                 except Exception as exc:
                     logger.error("compose_line: failed to render char %r: %s — skipping", ch, exc)
                     glyphs.append(None)
@@ -1364,22 +1437,23 @@ def compose_line(
     total_width = max(1, sum(w + s for w, s in zip(widths, spacings)) - spacings[-1])
 
     # ------------------------------------------------------------------
-    # Step 4 — Composite onto a blank RGBA canvas
+    # Step 4 — PLAN glyph placements (no compositing; rng draws happen in the
+    # exact same order as the legacy paste loop, so plan+raster reproduces the
+    # legacy bytes draw-for-draw).
     # ------------------------------------------------------------------
-    canvas     = Image.new("RGBA", (total_width, _LINE_HEIGHT), (0, 0, 0, 0))
     baseline_y = round(_LINE_HEIGHT * _BASELINE_Y_RATIO)
+    blob_prob  = float(_st.get("ink_blobs", 0.0))
 
-    blob_prob = float(_st.get("ink_blobs", 0.0))
-    ink_rgb   = _INK_RGB.get(ink_color, (26, 23, 20))
+    placements:   list[dict]      = []
+    glyph_images: list[np.ndarray] = []
 
     x = 0
     for idx, w, s in zip(visual_indices, widths, spacings):
         glyph = glyphs[idx]
         if glyph is not None:
-            img, v_off  = glyph
+            img, v_off, v_idx, v_url = glyph
             ch_here     = chars[idx]
             asc_ratio   = _CHAR_ASCENDER_RATIO.get(ch_here, 1.0)
-            pil_g       = Image.fromarray(img, "RGBA")
             # Pre-jitter target height — used for POSITION so jitter scale/rotation
             # don't push the glyph above the top ruled line unexpectedly.
             h_ratio_here    = _CHAR_HEIGHT_RATIO.get(ch_here, 1.0)
@@ -1401,12 +1475,73 @@ def compose_line(
                 y = baseline_y - ascender_h_here + v_off + baseline_dance
             # Clamp: never let a glyph start above the line canvas top.
             y = max(0, y)
-            canvas.paste(pil_g, (x, y), pil_g)
-            # Ink blobs at stroke endpoints
-            _add_ink_blob(canvas, x, y, pil_g.width, pil_g.height, blob_prob, ink_rgb, rng=rng)
+
+            gh, gw = img.shape[0], img.shape[1]
+            blobs  = _plan_ink_blobs(x, y, gw, gh, blob_prob, rng=rng)
+
+            placements.append({
+                "char":    ch_here,
+                "x":       x,
+                "y":       y,
+                "w":       gw,
+                "h":       gh,
+                "variant": v_idx,
+                "url":     v_url,
+                "img":     len(glyph_images),
+                "blobs":   blobs,
+            })
+            glyph_images.append(img)
         x += w + s
 
+    line_plan = {"width": total_width, "height": _LINE_HEIGHT, "glyphs": placements}
+    return line_plan, glyph_images
+
+
+def raster_line(
+    line_plan: dict,
+    glyph_images: list[np.ndarray],
+    ink_color: str = "black",
+) -> np.ndarray:
+    """
+    RASTER step of line rendering (REWRITE_PLAN §3.2): paste the pre-planned
+    glyph images and blobs onto a fresh canvas. Consumes NO randomness — the
+    output is a pure function of (line_plan, glyph_images, ink_color).
+    """
+    width = line_plan["width"]
+    if width <= 0:
+        return np.zeros((_LINE_HEIGHT, 0, 4), dtype=np.uint8)
+
+    canvas  = Image.new("RGBA", (width, _LINE_HEIGHT), (0, 0, 0, 0))
+    ink_rgb = _INK_RGB.get(ink_color, (26, 23, 20))
+
+    for g in line_plan["glyphs"]:
+        pil_g = Image.fromarray(glyph_images[g["img"]], "RGBA")
+        canvas.paste(pil_g, (g["x"], g["y"]), pil_g)
+        _paint_ink_blobs(canvas, g["blobs"], ink_rgb)
+
     return np.array(canvas, dtype=np.uint8)
+
+
+def compose_line(
+    chars: list[str],
+    picker: VariantPicker,
+    direction: str = "rtl",
+    style: "dict | None" = None,
+    ink_color: str = "black",
+    fast_mode: bool = False,
+    rng: "random.Random | None" = None,
+) -> np.ndarray:
+    """
+    Render a single line of text as an RGBA numpy array.
+
+    Thin wrapper: plan_line (all decisions + rng draws) → raster_line (pure
+    pasting). Public behaviour is identical to the legacy monolithic version.
+    """
+    line_plan, glyph_images = plan_line(
+        chars, picker, direction, style=style, ink_color=ink_color,
+        fast_mode=fast_mode, rng=rng,
+    )
+    return raster_line(line_plan, glyph_images, ink_color=ink_color)
 
 
 def _join_word_images_with_gaps(
@@ -1472,6 +1607,51 @@ def compose_paragraph(
     list[np.ndarray]
         One RGBA array per line, each shaped (_LINE_HEIGHT, line_width, 4).
     """
+    entries = plan_paragraph(
+        text, picker, page_width=page_width, margin=margin, style=style,
+        ink_color=ink_color, fast_mode=fast_mode, rng=rng,
+    )
+
+    all_lines: list[np.ndarray] = []
+    for entry in entries:
+        if entry["type"] == "blank":
+            all_lines.append(np.zeros((_LINE_HEIGHT, 1, 4), dtype=np.uint8))
+            continue
+        word_imgs = [
+            raster_line(w["plan"], w["images"], ink_color=ink_color)
+            for w in entry["words"]
+        ]
+        gaps = [w["gap"] for w in entry["words"]]
+        all_lines.append(_flush_rtl_line(word_imgs, gaps))
+    return all_lines
+
+
+def plan_paragraph(
+    text: str,
+    picker: VariantPicker,
+    page_width: int = 2480,
+    margin: int = 200,
+    style: "dict | None" = None,
+    ink_color: str = "black",
+    fast_mode: bool = False,
+    rng: "random.Random | None" = None,
+) -> list[dict]:
+    """
+    PLAN step of paragraph layout (REWRITE_PLAN §3.2/3.3).
+
+    Splits *text* into words, plans each word (plan_line), and wraps words
+    into lines exactly like the legacy compose_paragraph — same rng draw
+    order, so plan+raster is byte-identical to the legacy pipeline.
+
+    Returns a list of line entries (document order):
+      {"type": "blank", "width": 1, "words": []}
+      {"type": "text",  "width": int,        # joined visual line width
+       "words": [ {"plan": line_plan, "images": [...], "gap": int}, ... ] }
+
+    ``words`` is in LOGICAL order; ``gap`` is inserted BEFORE the word when
+    joining (gap of the first word in a line is 0). Visual (RTL) placement is
+    derived via :func:`plan_visual_line`.
+    """
     if not text.strip():
         return []
 
@@ -1483,76 +1663,116 @@ def compose_paragraph(
     # N leaves lines 1…N-1 pixel-identical (their draws come first).
     _r = rng if rng is not None else random
 
-    def _pack_words_into_lines(rendered_words: list[np.ndarray]) -> list[np.ndarray]:
-        """Pack a flat list of rendered word-images into wrapped lines."""
-        if not rendered_words:
+    # Use None-sentinel so explicit 0 (slider at min) is honoured.
+    # Fallback to _SPACE_WIDTH only when the style key is absent entirely.
+    _raw_wsp_para = _style.get("word_spacing")
+    word_sp_base = float(_raw_wsp_para) if _raw_wsp_para is not None else float(_SPACE_WIDTH)
+
+    def _rand_word_gap() -> int:
+        # Reduced sigma (15 % vs old 20 %) + no 60 % floor — makes spacing
+        # consistent across the line and lets slider=0 produce near-zero gaps.
+        sigma = word_sp_base * 0.15
+        return max(0, int(_r.gauss(word_sp_base, sigma)))
+
+    def _entry_width(words: "list[dict]") -> int:
+        # Joined width must mirror _flush_rtl_line + _join_word_images_with_gaps:
+        # gaps are REVERSED and the new first gap is zeroed before joining.
+        rev_gaps = list(reversed([w["gap"] for w in words]))
+        if rev_gaps:
+            rev_gaps[0] = 0
+        return sum(rev_gaps) + sum(w["plan"]["width"] for w in words)
+
+    def _pack_words_into_lines(word_entries: "list[dict]") -> list[dict]:
+        """Pack planned words into wrapped lines — same draws as legacy."""
+        if not word_entries:
             return []
 
-        # Use None-sentinel so explicit 0 (slider at min) is honoured.
-        # Fallback to _SPACE_WIDTH only when the style key is absent entirely.
-        _raw_wsp_para = _style.get("word_spacing")
-        word_sp_base = float(_raw_wsp_para) if _raw_wsp_para is not None else float(_SPACE_WIDTH)
-
-        def _rand_word_gap() -> int:
-            # Reduced sigma (15 % vs old 20 %) + no 60 % floor — makes spacing
-            # consistent across the line and lets slider=0 produce near-zero gaps.
-            sigma = word_sp_base * 0.15
-            return max(0, int(_r.gauss(word_sp_base, sigma)))
-
-        out_lines: list[np.ndarray] = []
-        line_words: list[np.ndarray] = []
-        line_gaps:  list[int]        = []
+        out_lines:  list[dict] = []
+        line_words: list[dict] = []
         line_w: int = 0
 
-        for img in rendered_words:
-            ww     = img.shape[1]
+        for entry in word_entries:
+            ww     = entry["plan"]["width"]
             gap    = _rand_word_gap() if line_words else 0
             needed = gap + ww
 
             if line_words and line_w + needed > usable_w:
-                out_lines.append(_flush_rtl_line(line_words, line_gaps))
-                line_words = [img]
-                line_gaps  = [0]
+                out_lines.append({"type": "text", "width": _entry_width(line_words), "words": line_words})
+                line_words = [{**entry, "gap": 0}]
                 line_w     = ww
             else:
-                line_words.append(img)
-                line_gaps.append(gap)
+                line_words.append({**entry, "gap": gap})
                 line_w += needed
 
         if line_words:
-            out_lines.append(_flush_rtl_line(line_words, line_gaps))
+            out_lines.append({"type": "text", "width": _entry_width(line_words), "words": line_words})
         return out_lines
 
     # ── Split on explicit newlines first, preserving Enter-key breaks ─────────
-    # Each element of `paragraphs` is either a non-empty string (words to wrap)
-    # or an empty string (blank line from two consecutive newlines).
     paragraphs = text.split("\n")
 
-    all_lines: list[np.ndarray] = []
+    all_entries: list[dict] = []
 
     for para in paragraphs:
         # Empty paragraph → explicit blank line (transparent strip)
         if not para.strip():
-            all_lines.append(np.zeros((_LINE_HEIGHT, 1, 4), dtype=np.uint8))
+            all_entries.append({"type": "blank", "width": 1, "words": []})
             continue
 
-        # ── Step 1: render every word to get exact pixel widths ───────────────
+        # ── Step 1: plan every word to get exact pixel widths ─────────────────
         raw_words = para.split(" ")
-        rendered_words: list[np.ndarray] = []
+        word_entries: list[dict] = []
         for word in raw_words:
             if not word:
                 continue
             chars = list(word)
             dir_  = _detect_direction(chars)
-            rendered_words.append(
-                compose_line(chars, picker, dir_, style=_style, ink_color=ink_color,
-                             fast_mode=fast_mode, rng=rng)
+            w_plan, w_images = plan_line(
+                chars, picker, dir_, style=_style, ink_color=ink_color,
+                fast_mode=fast_mode, rng=rng,
             )
+            word_entries.append({"plan": w_plan, "images": w_images, "gap": 0})
 
         # ── Step 2: wrap words into lines ─────────────────────────────────────
-        all_lines.extend(_pack_words_into_lines(rendered_words))
+        all_entries.extend(_pack_words_into_lines(word_entries))
 
-    return all_lines
+    return all_entries
+
+
+def plan_visual_line(entry: dict) -> "tuple[int, list[dict]]":
+    """
+    Convert one plan_paragraph line entry into VISUAL (RTL-flushed) glyph
+    placements, mirroring _flush_rtl_line exactly: words and gaps reversed,
+    new first gap zeroed, x offsets accumulated left→right.
+
+    Returns (line_width, glyphs) where each glyph dict has absolute
+    line-local coordinates: {char, url, variant, x, y, w, h}.
+    """
+    if entry["type"] == "blank" or not entry["words"]:
+        return entry.get("width", 1), []
+
+    rev_words = list(reversed(entry["words"]))
+    rev_gaps  = list(reversed([w["gap"] for w in entry["words"]]))
+    if rev_gaps:
+        rev_gaps[0] = 0
+
+    glyphs: list[dict] = []
+    x = 0
+    for gap, wentry in zip(rev_gaps, rev_words):
+        x += gap
+        for g in wentry["plan"]["glyphs"]:
+            glyphs.append({
+                "char":    g["char"],
+                "url":     g["url"],
+                "variant": g["variant"],
+                "x":       g["x"] + x,
+                "y":       g["y"],
+                "w":       g["w"],
+                "h":       g["h"],
+            })
+        x += wentry["plan"]["width"]
+
+    return x, glyphs
 
 
 def _flush_rtl_line(
@@ -2133,6 +2353,38 @@ def run_tests() -> None:
     )
     assert _out_d == _out_a, "seeded render changed across global-state variations"
     print("PASS  no leakage to module-level random (global state does not affect seeded renders)")
+
+    # Test 43 — plan/raster split: layout geometry matches rasterized pixels.
+    # plan_paragraph (geometry) and compose_paragraph (pixels) with the same
+    # seed must agree on every line width — this is the contract that lets the
+    # mobile compositor (/layout) trust the geometry as ground truth.
+    _ent_picker = VariantPicker(bank_det)
+    _ent_rng    = random.Random(123)
+    _entries    = plan_paragraph(_det_text, _ent_picker, style=_det_style, rng=_ent_rng)
+    _ras_picker = VariantPicker(bank_det)
+    _ras_rng    = random.Random(123)
+    _ras_lines  = compose_paragraph(_det_text, _ras_picker, style=_det_style, rng=_ras_rng)
+    assert len(_entries) == len(_ras_lines), "plan/raster line count mismatch"
+    for _entry, _line_img in zip(_entries, _ras_lines):
+        _vis_w, _vis_glyphs = plan_visual_line(_entry)
+        assert _vis_w == _line_img.shape[1], (
+            f"plan width {_vis_w} != raster width {_line_img.shape[1]}"
+        )
+        for _g in _vis_glyphs:
+            assert 0 <= _g["x"] <= _vis_w,            "glyph x outside line bounds"
+            assert _g["x"] + _g["w"] <= _vis_w + 4,   "glyph overflows line width"
+    print("PASS  plan/raster split: layout geometry matches rasterized line widths")
+
+    # Test 44 — layout geometry is deterministic per seed
+    def _plan_geo(seed_val: int) -> list:
+        p = VariantPicker(bank_det)
+        r = random.Random(seed_val)
+        return [plan_visual_line(e) for e in
+                plan_paragraph(_det_text, p, style=_det_style, rng=r)]
+
+    assert _plan_geo(123) == _plan_geo(123), "same seed produced different layout geometry"
+    assert _plan_geo(123) != _plan_geo(456), "different seeds produced identical geometry"
+    print("PASS  /layout geometry deterministic per seed")
 
     print()
     print("All tests passed.")
