@@ -67,11 +67,20 @@ export default function EditorScreen({ navigation }: Props) {
     return () => { s1.remove(); s2.remove(); };
   }, []);
 
-  // Default style values passed to Preview (user adjusts them there via sliders)
+  // Default style values passed to Preview (user adjusts them there via sliders).
+  // All values are in backend-px units; PreviewScreen inverts them to 0-100 slider units.
+  //   charHeight=85   → slider ≈ 50   (natural x-height at 300 DPI A4)
+  //   letterSpacing=9 → slider ≈ 57   (natural inter-char gap, ~15 % of avg glyph width)
+  //   wordSpacing=42  → slider ≈ 49   (readable word gap, ~0.5× char width)
+  //   lineJitter=3    → slider ≈ 12   (subtle baseline bounce, σ = 3 % of char height)
+  //   slant=6         → slider = 15   (gentle natural lean, ±variation per line)
+  //   inkBlobs=0.02   → slider = 10   (subtle 2 % blob probability)
   const textSize      = 85;
-  const letterSpacing = 4;
-  const wordSpacing   = 35;
+  const letterSpacing = 9;
+  const wordSpacing   = 42;
   const lineJitter    = 3;
+  const defaultSlant     = 6;
+  const defaultInkBlobs  = 0.02;
 
   // ── Draft auto-restore: load saved text on mount ───────────────────────────
   // Runs once when the screen mounts. If a non-empty draft exists from a
@@ -248,8 +257,8 @@ export default function EditorScreen({ navigation }: Props) {
           letterSpacing:  letterSpacing,
           wordSpacing:    wordSpacing,
           baselineJitter: lineJitter,
-          slant:          0,
-          inkBlobs:       0,
+          slant:          defaultSlant,
+          inkBlobs:       defaultInkBlobs,
         },
       });
 

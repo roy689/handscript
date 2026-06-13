@@ -57,9 +57,9 @@ interface HandwritingStyle {
   charHeight:     number;  // 0-100 → char_height     = 40 + s*0.9   (40…130 backend px)
   letterSpacing:  number;  // 0-100 → letter_spacing  = s*0.30 - 8   (-8…+22 px, negative = overlap)
   wordSpacing:    number;  // 0-100 → word_spacing    = s*0.85       (0…85 px, 0 = words touch)
-  baselineJitter: number;  // 0-100 → baseline_jitter = s*0.25       (0…25 % σ of char height)
+  baselineJitter: number;  // 0-100 → baseline_jitter = s*0.15       (0…15 % σ of char height)
   slant:          number;  // 0-100 → slant           = s*0.4        (0…40 px line-tilt)
-  inkBlobs:       number;  // 0-100 → ink_blobs       = s*0.003      (0…0.30 blob probability)
+  inkBlobs:       number;  // 0-100 → ink_blobs       = s*0.002      (0…0.20 blob probability)
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -109,9 +109,9 @@ const A4_RATIO = 297 / 210;
 // charHeight   : backend = 40 + slider * 0.9   (range 40–130 px)
 // letterSpacing: backend = slider * 0.30 - 8   (range  -8–+22 px, negative = overlap)
 // wordSpacing  : backend = slider * 0.85       (range   0–85 px)
-// baselineJitter: backend = slider * 0.25      (range  0–25 %)
+// baselineJitter: backend = slider * 0.15      (range  0–15 %)
 // slant        : backend = slider * 0.4        (range  0–40 px line-tilt)
-// inkBlobs     : backend = slider * 0.003      (range  0–0.30)
+// inkBlobs     : backend = slider * 0.002      (range  0–0.20)
 //
 // Server-side clamps (synthesizer.py): letter spacing floored at -25% of the
 // average glyph width; the canvas applies the same clamp (see lsp below).
@@ -243,6 +243,7 @@ function styleEquals(a: HandwritingStyle, b: HandwritingStyle): boolean {
  */
 const PreviewSliderRow = React.memo(function PreviewSliderRow({
   id, label, value, styles, accentColor, borderColor, onLiveChange, onComplete,
+  min = 0, max = 100,
 }: {
   id:           keyof HandwritingStyle;
   label:        string;
@@ -252,6 +253,9 @@ const PreviewSliderRow = React.memo(function PreviewSliderRow({
   borderColor:  string;
   onLiveChange: (id: keyof HandwritingStyle, v: number) => void;
   onComplete:   (id: keyof HandwritingStyle, v: number) => void;
+  /** Clamp the usable range without changing the 0-100 scale. Defaults: min=0, max=100. */
+  min?:         number;
+  max?:         number;
 }) {
   const [display, setDisplay] = useState(value);
   // Re-sync when the committed value changes externally (e.g. draft restore).
@@ -265,7 +269,7 @@ const PreviewSliderRow = React.memo(function PreviewSliderRow({
       </View>
       <Slider
         style={styles.sliderControl}
-        minimumValue={0} maximumValue={100} step={1}
+        minimumValue={min} maximumValue={max} step={1}
         value={value}
         onValueChange={v => { setDisplay(v); onLiveChange(id, v); }}
         onSlidingComplete={v => { setDisplay(v); onComplete(id, v); }}
@@ -273,7 +277,7 @@ const PreviewSliderRow = React.memo(function PreviewSliderRow({
         maximumTrackTintColor={borderColor}
         thumbTintColor={accentColor}
         accessibilityLabel={label}
-        accessibilityValue={{ min: 0, max: 100, now: Math.round(display) }}
+        accessibilityValue={{ min, max, now: Math.round(display) }}
       />
     </View>
   );
@@ -310,11 +314,11 @@ export default function PreviewScreen({ navigation, route }: Props) {
   const clamp = (v: number) => Math.round(Math.max(0, Math.min(100, v)));
   const [hs, setHs] = useState<HandwritingStyle>({
     charHeight:     clamp((initStyle.charHeight - 40) / 0.9),        // 85→50
-    letterSpacing:  clamp((initStyle.letterSpacing + 8) / 0.30),     // maps backend px → slider
-    wordSpacing:    clamp(initStyle.wordSpacing / 0.85),              // 35→41 (natural)
-    baselineJitter: clamp(initStyle.baselineJitter / 0.25),          // 3→12
-    slant:          15,   // slight natural lean by default
-    inkBlobs:       10,   // subtle blob effect by default
+    letterSpacing:  clamp((initStyle.letterSpacing + 8) / 0.30),     // 9→57 (natural inter-char)
+    wordSpacing:    clamp(initStyle.wordSpacing / 0.85),              // 42→49 (readable word gap)
+    baselineJitter: clamp(initStyle.baselineJitter / 0.15),          // 3→20  (subtle bounce)
+    slant:          clamp(initStyle.slant / 0.4),                    // 6→15  (gentle lean)
+    inkBlobs:       clamp(initStyle.inkBlobs / 0.002),               // 0.02→10 (subtle blobs)
   });
 
   // Mutable text — all edits allowed; chars not in bank show as computer font
@@ -503,9 +507,9 @@ export default function PreviewScreen({ navigation, route }: Props) {
               char_height:     Math.round(40 + liveHs.charHeight * 0.9),
               letter_spacing:  liveHs.letterSpacing * 0.30 - 8,
               word_spacing:    Math.round(liveHs.wordSpacing * 0.85),
-              baseline_jitter: liveHs.baselineJitter * 0.25,
+              baseline_jitter: liveHs.baselineJitter * 0.15,
               slant:           liveHs.slant * 0.4,
-              ink_blobs:       liveHs.inkBlobs * 0.003,
+              ink_blobs:       liveHs.inkBlobs * 0.002,
             },
           }),
         });
@@ -620,9 +624,9 @@ export default function PreviewScreen({ navigation, route }: Props) {
                 char_height:     Math.round(40 + hs.charHeight * 0.9),
                 letter_spacing:  hs.letterSpacing * 0.30 - 8,
                 word_spacing:    Math.round(hs.wordSpacing * 0.85),
-                baseline_jitter: hs.baselineJitter * 0.25,
+                baseline_jitter: hs.baselineJitter * 0.15,
                 slant:           hs.slant * 0.4,
-                ink_blobs:       hs.inkBlobs * 0.003,
+                ink_blobs:       hs.inkBlobs * 0.002,
               },
             }),
           },
@@ -858,7 +862,7 @@ export default function PreviewScreen({ navigation, route }: Props) {
             onPress={() => { impactLight(); setEditMode(v => !v); }}
             accessibilityRole="button"
             accessibilityLabel={editMode ? 'סגור עריכת טקסט' : 'ערוך טקסט'}
-            accessibilityHint="מאפשר מחיקת תווים ורדת שורה — לא ניתן להוסיף תווים חדשים"
+            accessibilityHint="ניתן לערוך חופשי; תווים שאינם במאגר כתב היד יוצגו בגופן רגיל"
           >
             <Text style={styles.editToggleIcon}>{editMode ? '✕' : '✏'}</Text>
             <Text style={styles.editToggleLabel}>{editMode ? 'סגור עריכה' : 'ערוך טקסט'}</Text>
@@ -866,7 +870,16 @@ export default function PreviewScreen({ navigation, route }: Props) {
 
           {editMode && (
             <View style={styles.editBox}>
-              <Text style={styles.editHint}>תווים שאינם במאגר יוצגו בגופן רגיל</Text>
+              <View style={styles.editHintRow}>
+                <Text style={styles.editHint}>תווים שאינם במאגר יוצגו בגופן רגיל</Text>
+                {/* Character counter — turns red when approaching the limit */}
+                <Text style={[
+                  styles.editCharCount,
+                  editableText.length > MAX_TEXT_LEN * 0.9 && styles.editCharCountWarn,
+                ]}>
+                  {editableText.length}/{MAX_TEXT_LEN}
+                </Text>
+              </View>
               <TextInput
                 style={styles.editInput}
                 value={editableText}
@@ -884,14 +897,18 @@ export default function PreviewScreen({ navigation, route }: Props) {
 
           <View style={styles.divider} />
 
-          {/* Rows 1-3: all sliders share the same throttled live-canvas logic */}
+          {/* Rows 1-3: all sliders share the same throttled live-canvas logic.
+              Each entry: [label, key, min?, max?] — min/max clamp the slider range
+              without rescaling the 0-100 value domain.
+              charHeight:  min=20 → backend 40+20×0.9=58px minimum (readable on screen)
+              wordSpacing: min=5  → backend 5×0.85=4px, avoids words literally touching */}
           {([
-            [['גודל', 'charHeight'], ['ריווח אות',  'letterSpacing']],
-            [['ריווח מילה', 'wordSpacing'], ['ריקוד', 'baselineJitter']],
+            [['גודל', 'charHeight', 20], ['ריווח אות',  'letterSpacing']],
+            [['ריווח מילה', 'wordSpacing', 5], ['ריקוד', 'baselineJitter']],
             [['נטייה', 'slant'], ['צבירת דיו', 'inkBlobs']],
-          ] as [string, keyof HandwritingStyle][][]).map((row, ri) => (
+          ] as [string, keyof HandwritingStyle, number?, number?][][]).map((row, ri) => (
             <View key={ri} style={[styles.slidersRow, ri === 2 && { marginBottom: 14 }]}>
-              {row.map(([label, key]) => (
+              {row.map(([label, key, minV, maxV]) => (
                 <PreviewSliderRow
                   key={key}
                   id={key}
@@ -902,6 +919,8 @@ export default function PreviewScreen({ navigation, route }: Props) {
                   borderColor={colors.border}
                   onLiveChange={handleSliderLive}
                   onComplete={handleSliderComplete}
+                  min={minV}
+                  max={maxV}
                 />
               ))}
             </View>
@@ -1220,15 +1239,30 @@ function getStyles(colors: ThemeColors) {
       backgroundColor: colors.bgInput,
       overflow:        'hidden' as const,
     },
+    editHintRow: {
+      flexDirection:   'row',
+      justifyContent:  'space-between',
+      alignItems:      'center',
+      paddingHorizontal: 10,
+      paddingTop:        6,
+      paddingBottom:     2,
+    },
     editHint: {
       fontSize:          11,
       fontFamily:        fonts.regular,
       color:             colors.inkFaint,
       textAlign:         'right',
       writingDirection:  'rtl',
-      paddingHorizontal: 10,
-      paddingTop:        6,
-      paddingBottom:     2,
+      flexShrink:        1,
+    },
+    editCharCount: {
+      fontSize:          11,
+      fontFamily:        fonts.regular,
+      color:             colors.inkFaint,
+      marginStart:       8,
+    },
+    editCharCountWarn: {
+      color: '#C9271A',   // red — same as ink red
     },
     editInput: {
       fontSize:          15,
