@@ -181,9 +181,11 @@ server-side copy) — אפס bandwidth ואפס זמן רינדור ב-finalize.
 `LayoutCompositor` · PreviewScreen נכתב מחדש סביב `/layout` (הסליידרים נשארים
 כמו שהם ויזואלית) · מחיקת מנוע הקנבס · FinalView עובר ל-render_hash.
 
-**שלב 5 — עומס ותצפיות**
-Semaphore+429 · backoff בקליינט · מדדי Sentry (זמן layout, זמן רינדור, cache
-hit-rate) · בדיקת עומס (k6, 100 משתמשים מקבילים) · הורדת DEBUG.
+**שלב 5 — עומס ותצפיות ✅ הושלם 2026-06-13**
+`asyncio.Semaphore(cpu×2)` + `asyncio.timeout(2s)` → `429 + Retry-After: 5` ·
+`fetchWithBackoff` בקליינט (3 ניסיונות, 2→4→8 s) · Sentry `layout.duration_ms` +
+`render.duration_ms` + `render.cache_hit` tag · `SYNTH_DEBUG=1` במקום setLevel
+גלובלי · `backend/tests/k6_load_test.js` (100 VU, 30 s, p95/p99 thresholds).
 
 כל שלב נפרס ונבדק בנפרד; שלבים 1-3 אחורה-תואמים (ה-API הישן ממשיך לעבוד עד שלב 4).
 

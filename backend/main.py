@@ -73,7 +73,9 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
     datefmt="%H:%M:%S",
 )
-logging.getLogger("modules.synthesizer").setLevel(logging.DEBUG)
+# DEBUG verbosity for synthesizer is opt-in via SYNTH_DEBUG=1 (never in production)
+if os.getenv("SYNTH_DEBUG") == "1":
+    logging.getLogger("modules.synthesizer").setLevel(logging.DEBUG)
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -510,6 +512,20 @@ def _prune_rate_buckets() -> None:
                 bucket_dict[key] = [t for t in bucket_dict[key] if now - t < _RATE_WINDOW]
                 if not bucket_dict[key]:
                     del bucket_dict[key]
+
+
+# ---------------------------------------------------------------------------
+# Render concurrency semaphore (REWRITE_PLAN §5)
+# ---------------------------------------------------------------------------
+# Limits simultaneous compose_paragraph + render_full_page calls to
+# 2 × CPU-count.  Requests that cannot acquire the slot within 2 s receive
+# HTTP 429 + Retry-After: 5 so the client knows to back off without retrying
+# immediately.  Cache hits (check_render_cache → True) bypass the semaphore
+# entirely — they cost only a GCS HEAD call.
+_RENDER_SLOTS      = (os.cpu_count() or 1) * 2
+_RENDER_SEMAPHORE  = asyncio.Semaphore(_RENDER_SLOTS)
+_RENDER_ACQUIRE_S  = 2.0   # seconds to wait before returning 429
+_RENDER_RETRY_AFTER = 5    # Retry-After header value
 
 
 # ---------------------------------------------------------------------------
@@ -2233,6 +2249,12 @@ async def convert_both(body: ConvertBothRequest, uid: str = Depends(require_auth
                 usage_today_c    = firebase_client.get_usage_count(body.user_id)
                 usage_remaining_c = None if is_pro_c else max(0, FREE_DAILY_LIMIT - usage_today_c)
                 logger.info("convert-both: CACHE HIT hash=%s", render_hash[:8])
+                try:
+                    import sentry_sdk as _sentry
+                    _sentry.set_tag("render.cache_hit", "true")
+                    _sentry.set_tag("render.preview", "true")
+                except Exception:
+                    pass
                 return {
                     "ok":               True,
                     "pages":            len(cached["clean_urls"]),
@@ -2246,133 +2268,159 @@ async def convert_both(body: ConvertBothRequest, uid: str = Depends(require_auth
                     "render_hash":      render_hash,
                 }
 
-        # fast_mode skips normalize_stroke_width and uses BILINEAR resampling —
-        # saves ~800-1200 ms per page with imperceptible quality difference at preview sizes.
-        lines = await asyncio.to_thread(
-            compose_paragraph,
-            body.text, picker,
-            margin=_MARGIN,
-            style=style_dict,
-            ink_color=ink_color,
-            fast_mode=body.preview,
-            rng=render_rng,
-        )
-        logger.info("convert-both: synthesised %d lines (fast_mode=%s)", len(lines), body.preview)
+        # ── Render semaphore (REWRITE_PLAN §5) ──────────────────────────────────
+        # Cache hits (above) bypass this block entirely.  Only the CPU-heavy
+        # compose + raster path is throttled.  If all _RENDER_SLOTS slots are
+        # occupied for longer than _RENDER_ACQUIRE_S, we return 429 immediately
+        # so the client can back off instead of piling up blocked coroutines.
+        _render_t0 = time.perf_counter()
+        try:
+            async with asyncio.timeout(_RENDER_ACQUIRE_S):
+                async with _RENDER_SEMAPHORE:
+                    # fast_mode skips normalize_stroke_width and uses BILINEAR resampling —
+                    # saves ~800-1200 ms per page with imperceptible quality difference at preview sizes.
+                    lines = await asyncio.to_thread(
+                        compose_paragraph,
+                        body.text, picker,
+                        margin=_MARGIN,
+                        style=style_dict,
+                        ink_color=ink_color,
+                        fast_mode=body.preview,
+                        rng=render_rng,
+                    )
+                    logger.info("convert-both: synthesised %d lines (fast_mode=%s)", len(lines), body.preview)
 
-        if not lines:
-            return {"ok": False, "pages": 0, "clean_urls": [], "photo_urls": [],
-                    "error": "No content to render"}
+                    if not lines:
+                        return {"ok": False, "pages": 0, "clean_urls": [], "photo_urls": [],
+                                "error": "No content to render"}
 
-        bg_type    = body.background   # already validated by Pydantic
-        logger.info("convert-both: background=%r", bg_type)
-        background = load_background(bg_type)
+                    bg_type    = body.background   # already validated by Pydantic
+                    background = load_background(bg_type)
 
-        # Render clean pages once (CPU-bound — run off the event loop)
-        clean_pages = await asyncio.to_thread(
-            render_full_page,
-            lines, background, margin=_MARGIN,
-            slant_px=body.style.slant, scan_mode='clean',
-        )
+                    # Render clean pages once (CPU-bound — run off the event loop)
+                    clean_pages = await asyncio.to_thread(
+                        render_full_page,
+                        lines, background, margin=_MARGIN,
+                        slant_px=body.style.slant, scan_mode='clean',
+                    )
 
-        # Derive photo pages from clean pages (avoids second synthesis pass).
-        # Each page gets a deterministic per-page seed derived from the master
-        # seed, so the paper texture / sensor noise are reproducible too.
-        photo_pages = await asyncio.to_thread(
-            lambda: [
-                apply_photo_effect(p.copy(), seed=(used_seed * 1_000_003 + i) & 0x7FFFFFFF)
-                for i, p in enumerate(clean_pages)
-            ]
-        )
+                    # Derive photo pages from clean pages (avoids second synthesis pass).
+                    # Each page gets a deterministic per-page seed derived from the master
+                    # seed, so the paper texture / sensor noise are reproducible too.
+                    photo_pages = await asyncio.to_thread(
+                        lambda: [
+                            apply_photo_effect(p.copy(), seed=(used_seed * 1_000_003 + i) & 0x7FFFFFFF)
+                            for i, p in enumerate(clean_pages)
+                        ]
+                    )
 
-        clean_urls: list[str] = []
-        photo_urls: list[str] = []
+                    clean_urls: list[str] = []
+                    photo_urls: list[str] = []
 
-        if body.preview:
-            # ── Phase 3 preview path: WebP cache ────────────────────────────────
-            # Render returns PIL arrays; convert to WebP (preview, 150 DPI equivalent)
-            # and PNG (full-res, for /finalize promotion).  Store both in GCS cache.
-            from modules.layout import page_to_webp_bytes, page_to_png_bytes
+                    if body.preview:
+                        # ── Phase 3 preview path: WebP cache ────────────────────────────
+                        # Render returns PIL arrays; convert to WebP (preview, 150 DPI equivalent)
+                        # and PNG (full-res, for /finalize promotion).  Store both in GCS cache.
+                        from modules.layout import page_to_webp_bytes, page_to_png_bytes
 
-            def _build_cache_data():
-                prev_clean = [page_to_webp_bytes(embed_watermark(p, body.user_id), scale=0.5, quality=80) for p in clean_pages]
-                prev_photo = [page_to_webp_bytes(embed_watermark(p, body.user_id), scale=0.5, quality=80) for p in photo_pages]
-                fin_clean  = [page_to_png_bytes(embed_watermark(p, body.user_id)) for p in clean_pages]
-                fin_photo  = [page_to_png_bytes(embed_watermark(p, body.user_id)) for p in photo_pages]
-                return prev_clean, prev_photo, fin_clean, fin_photo
+                        def _build_cache_data():
+                            prev_clean = [page_to_webp_bytes(embed_watermark(p, body.user_id), scale=0.5, quality=80) for p in clean_pages]
+                            prev_photo = [page_to_webp_bytes(embed_watermark(p, body.user_id), scale=0.5, quality=80) for p in photo_pages]
+                            fin_clean  = [page_to_png_bytes(embed_watermark(p, body.user_id)) for p in clean_pages]
+                            fin_photo  = [page_to_png_bytes(embed_watermark(p, body.user_id)) for p in photo_pages]
+                            return prev_clean, prev_photo, fin_clean, fin_photo
 
-            prev_clean, prev_photo, fin_clean, fin_photo = await asyncio.to_thread(_build_cache_data)
+                        prev_clean, prev_photo, fin_clean, fin_photo = await asyncio.to_thread(_build_cache_data)
 
-            manifest = {
-                "text":       body.text,
-                "style":      _normalize_style(body.style),
-                "seed":       body.style.seed,
-                "used_seed":  used_seed,
-                "background": body.background,
-                "ink_color":  ink_color,
-                "bank_version": bank_version,
-            }
-            cache_result = await asyncio.to_thread(
-                firebase_client.store_render_cache,
-                body.user_id, render_hash,
-                prev_clean, prev_photo, fin_clean, fin_photo,
-                manifest,
+                        manifest = {
+                            "text":       body.text,
+                            "style":      _normalize_style(body.style),
+                            "seed":       body.style.seed,
+                            "used_seed":  used_seed,
+                            "background": body.background,
+                            "ink_color":  ink_color,
+                            "bank_version": bank_version,
+                        }
+                        cache_result = await asyncio.to_thread(
+                            firebase_client.store_render_cache,
+                            body.user_id, render_hash,
+                            prev_clean, prev_photo, fin_clean, fin_photo,
+                            manifest,
+                        )
+                        clean_urls = cache_result["clean_urls"]
+                        photo_urls = cache_result["photo_urls"]
+
+                    else:
+                        # ── Non-preview (final) path: full-res PNG → Firebase directly ──
+                        # Fire-and-forget cleanup of old renders (non-fatal).
+                        asyncio.get_event_loop().run_in_executor(
+                            None, firebase_client.delete_old_renders, body.user_id
+                        )
+
+                        timestamp   = int(time.time())
+                        _tmp_paths: list[Path] = []
+                        try:
+                            for i, (clean_pg, photo_pg) in enumerate(zip(clean_pages, photo_pages)):
+                                page_num = f"{i + 1:02d}"
+
+                                clean_wm  = embed_watermark(clean_pg, body.user_id)
+                                clean_fn  = f"page_clean_{timestamp}_{page_num}.png"
+                                clean_tmp = Path(tempfile.gettempdir()) / clean_fn
+                                _tmp_paths.append(clean_tmp)
+                                export_page(clean_wm, "png", str(clean_tmp))
+                                with open(clean_tmp, "rb") as fh:
+                                    clean_bytes = fh.read()
+                                clean_url = firebase_client.upload_rendered_page(body.user_id, clean_fn, clean_bytes)
+                                if clean_url is None:
+                                    dest = _STATIC_DIR / "sample_pages" / clean_fn
+                                    dest.write_bytes(clean_bytes)
+                                    clean_url = f"{_SERVER_HOST}/static/sample_pages/{clean_fn}"
+                                clean_urls.append(clean_url)
+
+                                photo_wm  = embed_watermark(photo_pg, body.user_id)
+                                photo_fn  = f"page_photo_{timestamp}_{page_num}.png"
+                                photo_tmp = Path(tempfile.gettempdir()) / photo_fn
+                                _tmp_paths.append(photo_tmp)
+                                export_page(photo_wm, "png", str(photo_tmp))
+                                with open(photo_tmp, "rb") as fh:
+                                    photo_bytes = fh.read()
+                                photo_url = firebase_client.upload_rendered_page(body.user_id, photo_fn, photo_bytes)
+                                if photo_url is None:
+                                    dest = _STATIC_DIR / "sample_pages" / photo_fn
+                                    dest.write_bytes(photo_bytes)
+                                    photo_url = f"{_SERVER_HOST}/static/sample_pages/{photo_fn}"
+                                photo_urls.append(photo_url)
+                        finally:
+                            for _p in _tmp_paths:
+                                _p.unlink(missing_ok=True)
+
+                        firebase_client.increment_usage(body.user_id)
+
+        except TimeoutError:
+            # asyncio.timeout() deadline exceeded while waiting for a semaphore slot.
+            raise HTTPException(
+                status_code=429,
+                detail="השרת עמוס כרגע. נסה שוב בעוד 5 שניות.",
+                headers={"Retry-After": str(_RENDER_RETRY_AFTER)},
             )
-            clean_urls = cache_result["clean_urls"]
-            photo_urls = cache_result["photo_urls"]
+        _render_ms = (time.perf_counter() - _render_t0) * 1000
 
-        else:
-            # ── Non-preview (final) path: full-res PNG → Firebase directly ───────
-            # Fire-and-forget cleanup of old renders (non-fatal).
-            asyncio.get_event_loop().run_in_executor(
-                None, firebase_client.delete_old_renders, body.user_id
-            )
-
-            timestamp   = int(time.time())
-            _tmp_paths: list[Path] = []
-            try:
-                for i, (clean_pg, photo_pg) in enumerate(zip(clean_pages, photo_pages)):
-                    page_num = f"{i + 1:02d}"
-
-                    clean_wm  = embed_watermark(clean_pg, body.user_id)
-                    clean_fn  = f"page_clean_{timestamp}_{page_num}.png"
-                    clean_tmp = Path(tempfile.gettempdir()) / clean_fn
-                    _tmp_paths.append(clean_tmp)
-                    export_page(clean_wm, "png", str(clean_tmp))
-                    with open(clean_tmp, "rb") as fh:
-                        clean_bytes = fh.read()
-                    clean_url = firebase_client.upload_rendered_page(body.user_id, clean_fn, clean_bytes)
-                    if clean_url is None:
-                        dest = _STATIC_DIR / "sample_pages" / clean_fn
-                        dest.write_bytes(clean_bytes)
-                        clean_url = f"{_SERVER_HOST}/static/sample_pages/{clean_fn}"
-                    clean_urls.append(clean_url)
-
-                    photo_wm  = embed_watermark(photo_pg, body.user_id)
-                    photo_fn  = f"page_photo_{timestamp}_{page_num}.png"
-                    photo_tmp = Path(tempfile.gettempdir()) / photo_fn
-                    _tmp_paths.append(photo_tmp)
-                    export_page(photo_wm, "png", str(photo_tmp))
-                    with open(photo_tmp, "rb") as fh:
-                        photo_bytes = fh.read()
-                    photo_url = firebase_client.upload_rendered_page(body.user_id, photo_fn, photo_bytes)
-                    if photo_url is None:
-                        dest = _STATIC_DIR / "sample_pages" / photo_fn
-                        dest.write_bytes(photo_bytes)
-                        photo_url = f"{_SERVER_HOST}/static/sample_pages/{photo_fn}"
-                    photo_urls.append(photo_url)
-            finally:
-                for _p in _tmp_paths:
-                    _p.unlink(missing_ok=True)
-
-            firebase_client.increment_usage(body.user_id)
+        # ── Sentry observability (REWRITE_PLAN §5) ───────────────────────────────
+        try:
+            import sentry_sdk as _sentry
+            _sentry.set_measurement("render.duration_ms", _render_ms, unit="millisecond")
+            _sentry.set_tag("render.cache_hit", "false")
+            _sentry.set_tag("render.preview", str(body.preview).lower())
+        except Exception:
+            pass
 
         FREE_DAILY_LIMIT = 5
         is_pro           = firebase_client.check_is_pro_user(body.user_id)
         usage_today      = firebase_client.get_usage_count(body.user_id)
         usage_remaining  = None if is_pro else max(0, FREE_DAILY_LIMIT - usage_today)
 
-        logger.info("convert-both: done — %d pages, %d clean + %d photo URLs (preview=%s)",
-                    len(clean_pages), len(clean_urls), len(photo_urls), body.preview)
+        logger.info("convert-both: done — %d pages, %d clean + %d photo URLs (preview=%s, render_ms=%.0f)",
+                    len(clean_pages), len(clean_urls), len(photo_urls), body.preview, _render_ms)
 
         return {
             "ok":               True,
@@ -2521,6 +2569,7 @@ async def compute_layout(body: LayoutRequest, uid: str = Depends(require_auth)):
     )
 
     try:
+        _layout_t0 = time.perf_counter()
         bank = firebase_client.load_character_bank(body.user_id)
         if not bank:
             return {"ok": False, "pages": [], "error": "המאגר ריק — צלם תווים תחילה"}
@@ -2578,6 +2627,16 @@ async def compute_layout(body: LayoutRequest, uid: str = Depends(require_auth)):
                     for g in glyphs
                 ],
             })
+
+        _layout_ms = (time.perf_counter() - _layout_t0) * 1000
+        logger.info("layout: done — %d pages, %d lines (%.0f ms)",
+                    len(pages), sum(len(p["lines"]) for p in pages), _layout_ms)
+        # ── Sentry observability (REWRITE_PLAN §5) ───────────────────────────────
+        try:
+            import sentry_sdk as _sentry
+            _sentry.set_measurement("layout.duration_ms", _layout_ms, unit="millisecond")
+        except Exception:
+            pass
 
         return {
             "ok":           True,

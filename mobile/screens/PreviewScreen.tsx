@@ -67,6 +67,31 @@ interface HandwritingStyle {
 const PAGE_MARGIN_H  = 14;   // horizontal margin around notebook on screen
 const NOTEBOOK_HPAD  = 14;   // padding inside notebook (left+right)
 
+// ── 429 fetch with exponential backoff (REWRITE_PLAN §5) ────────────────────
+// Used for /convert-both (preview).  Reads Retry-After header; backs off
+// 2 s → 4 s → 8 s; honours the abort signal throughout.
+async function fetchWithBackoff(
+  input:     RequestInfo,
+  init:      RequestInit,
+  signal:    AbortSignal,
+  maxRetries = 3,
+): Promise<Response> {
+  let delayMs = 2_000;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+    const res = await fetch(input, { ...init, signal });
+    if (res.status !== 429 || attempt === maxRetries) return res;
+    const retryAfterSec = parseInt(res.headers.get('Retry-After') ?? '5', 10);
+    const waitMs = Math.max(retryAfterSec * 1_000, delayMs);
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(resolve, waitMs);
+      signal.addEventListener('abort', () => { clearTimeout(timer); reject(new DOMException('Aborted', 'AbortError')); }, { once: true });
+    });
+    delayMs = Math.min(delayMs * 2, 30_000);
+  }
+  throw new Error('fetchWithBackoff: max retries exceeded');
+}
+
 // Server-side page geometry (A4 @ 300 DPI) — used as ratio source
 const SRV_PAGE_W      = 2480;
 const SRV_PAGE_H      = 3508;
@@ -575,29 +600,32 @@ export default function PreviewScreen({ navigation, route }: Props) {
 
       setIsServerRendering(true);
       try {
-        const res = await fetch(`${BACKEND_URL}/convert-both`, {
-          method:  'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          },
-          signal: controller.signal,
-          body: JSON.stringify({
-            text:       editableText,
-            user_id:    userId,
-            background: pageBgRef.current,
-            ink_color:  inkColor,
-            preview:    true,
-            style: {
-              char_height:     Math.round(40 + hs.charHeight * 0.9),
-              letter_spacing:  hs.letterSpacing * 0.30 - 8,
-              word_spacing:    Math.round(hs.wordSpacing * 0.85),
-              baseline_jitter: hs.baselineJitter * 0.25,
-              slant:           hs.slant * 0.4,
-              ink_blobs:       hs.inkBlobs * 0.003,
+        const res = await fetchWithBackoff(
+          `${BACKEND_URL}/convert-both`,
+          {
+            method:  'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...(token ? { Authorization: `Bearer ${token}` } : {}),
             },
-          }),
-        });
+            body: JSON.stringify({
+              text:       editableText,
+              user_id:    userId,
+              background: pageBgRef.current,
+              ink_color:  inkColor,
+              preview:    true,
+              style: {
+                char_height:     Math.round(40 + hs.charHeight * 0.9),
+                letter_spacing:  hs.letterSpacing * 0.30 - 8,
+                word_spacing:    Math.round(hs.wordSpacing * 0.85),
+                baseline_jitter: hs.baselineJitter * 0.25,
+                slant:           hs.slant * 0.4,
+                ink_blobs:       hs.inkBlobs * 0.003,
+              },
+            }),
+          },
+          controller.signal,
+        );
         if (!res.ok || controller.signal.aborted) return;
         const data = await res.json() as {
           ok: boolean; clean_urls?: string[]; photo_urls?: string[];
