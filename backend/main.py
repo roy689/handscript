@@ -524,8 +524,14 @@ def _prune_rate_buckets() -> None:
 # entirely — they cost only a GCS HEAD call.
 _RENDER_SLOTS      = (os.cpu_count() or 1) * 2
 _RENDER_SEMAPHORE  = asyncio.Semaphore(_RENDER_SLOTS)
-_RENDER_ACQUIRE_S  = 2.0   # seconds to wait before returning 429
-_RENDER_RETRY_AFTER = 5    # Retry-After header value
+# Max seconds to wait for a semaphore slot + complete the render.
+# Must exceed the longest expected render time on Railway (warm: 5-10s, cold: 20-30s).
+# NOTE: asyncio.timeout() wraps both the semaphore *wait* and the render itself, so
+# this value must be large enough to let the entire operation complete — not just the
+# queue wait.  Set to 120s so normal renders never hit it; the Railway HTTP timeout
+# (300s) and the client-side AbortController (300s) handle truly runaway requests.
+_RENDER_ACQUIRE_S  = 120.0  # was 2.0 — too short; caused false 429s on every render
+_RENDER_RETRY_AFTER = 30    # Retry-After header value (was 5)
 
 
 # ---------------------------------------------------------------------------
@@ -2038,7 +2044,7 @@ async def finalize(body: FinalizeRequest, uid: str = Depends(require_auth)):
             except TimeoutError:
                 raise HTTPException(
                     status_code=429,
-                    detail="השרת עמוס כרגע. נסה שוב בעוד 5 שניות.",
+                    detail="השרת עמוס כרגע. נסה שוב בעוד 30 שניות.",
                     headers={"Retry-After": str(_RENDER_RETRY_AFTER)},
                 )
 
@@ -2403,10 +2409,10 @@ async def convert_both(body: ConvertBothRequest, uid: str = Depends(require_auth
                         firebase_client.increment_usage(body.user_id)
 
         except TimeoutError:
-            # asyncio.timeout() deadline exceeded while waiting for a semaphore slot.
+            # asyncio.timeout() deadline exceeded (slot wait + render > _RENDER_ACQUIRE_S).
             raise HTTPException(
                 status_code=429,
-                detail="השרת עמוס כרגע. נסה שוב בעוד 5 שניות.",
+                detail="השרת עמוס כרגע. נסה שוב בעוד 30 שניות.",
                 headers={"Retry-After": str(_RENDER_RETRY_AFTER)},
             )
         _render_ms = (time.perf_counter() - _render_t0) * 1000

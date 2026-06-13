@@ -67,6 +67,31 @@ function absUrl(url: string): string {
   return url.startsWith('http') ? url : `${BACKEND_URL}${url}`;
 }
 
+// ── 429 fetch with exponential backoff ──────────────────────────────────────
+// Reads Retry-After header; backs off 2s → 4s → 8s; honours the abort signal.
+// Mirrors PreviewScreen's fetchWithBackoff — keep in sync.
+async function fetchWithBackoff(
+  input:     RequestInfo,
+  init:      RequestInit,
+  signal:    AbortSignal,
+  maxRetries = 3,
+): Promise<Response> {
+  let delayMs = 2_000;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+    const res = await fetch(input, { ...init, signal });
+    if (res.status !== 429 || attempt === maxRetries) return res;
+    const retryAfterSec = parseInt(res.headers.get('Retry-After') ?? '5', 10);
+    const waitMs = Math.max(retryAfterSec * 1_000, delayMs);
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(resolve, waitMs);
+      signal.addEventListener('abort', () => { clearTimeout(timer); reject(new DOMException('Aborted', 'AbortError')); }, { once: true });
+    });
+    delayMs = Math.min(delayMs * 2, 30_000);
+  }
+  throw new Error('fetchWithBackoff: unreachable');
+}
+
 async function fetchBothModes(
   text: string,
   background: string,
@@ -90,25 +115,29 @@ async function fetchBothModes(
   console.log('[FinalView] fetchBothModes → background=%s inkColor=%s', background, inkColor);
 
   try {
-    const res = await fetch(`${BACKEND_URL}/convert-both`, {
-      method:  'POST',
-      headers,
-      signal:  controller.signal,
-      body:    JSON.stringify({
-        text,
-        user_id: userId,
-        background,
-        ink_color: inkColor,
-        style: {
-          char_height:     Math.round(40 + style.charHeight * 0.9),
-          letter_spacing:  style.letterSpacing * 0.30 - 8,       // -8..22 px (negative = overlap at min)
-          word_spacing:    Math.round(style.wordSpacing * 0.85),  // 0–85 px (0 = words touch)
-          baseline_jitter: style.baselineJitter * 0.15,
-          slant:           style.slant * 0.4,
-          ink_blobs:       style.inkBlobs * 0.002,
-        },
-      }),
-    });
+    // Use fetchWithBackoff so transient 429s (server busy) are retried automatically.
+    const res = await fetchWithBackoff(
+      `${BACKEND_URL}/convert-both`,
+      {
+        method:  'POST',
+        headers,
+        body:    JSON.stringify({
+          text,
+          user_id: userId,
+          background,
+          ink_color: inkColor,
+          style: {
+            char_height:     Math.round(40 + style.charHeight * 0.9),
+            letter_spacing:  style.letterSpacing * 0.30 - 8,       // -8..22 px (negative = overlap at min)
+            word_spacing:    Math.round(style.wordSpacing * 0.85),  // 0–85 px (0 = words touch)
+            baseline_jitter: style.baselineJitter * 0.15,
+            slant:           style.slant * 0.4,
+            ink_blobs:       style.inkBlobs * 0.002,
+          },
+        }),
+      },
+      controller.signal,
+    );
     if (!res.ok) {
       const body = await res.json().catch(() => ({})) as { error?: string };
       throw new Error(body.error ?? `שגיאת שרת (${res.status})`);
@@ -173,18 +202,34 @@ async function finalizeRender(
     ? { user_id: userId, render_hash: renderHash, doc_id: docId }
     : { user_id: userId, clean_urls: cleanUrls, photo_urls: photoUrls };
 
-  const res = await fetch(`${BACKEND_URL}/finalize`, {
-    method:  'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-    body: JSON.stringify(body),
-  });
+  // /finalize with render_hash only copies from GCS cache — no semaphore.
+  // However if the cache expired the server re-renders, which CAN hit the semaphore
+  // and return 429 with a Retry-After header.  Retry server-busy 429s; treat
+  // 429 WITHOUT Retry-After as the daily usage limit (do not retry).
+  const controller = new AbortController();
+  const finTimer = setTimeout(() => controller.abort(), 300_000);
+  let res: Response;
+  try {
+    res = await fetchWithBackoff(
+      `${BACKEND_URL}/finalize`,
+      {
+        method:  'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify(body),
+      },
+      controller.signal,
+    );
+  } finally {
+    clearTimeout(finTimer);
+  }
 
   if (res.status === 429) {
-    const body = await res.json().catch(() => ({})) as { detail?: string };
-    throw new Error(body.detail ?? 'הגעת למגבלת ההמרות היומית');
+    // fetchWithBackoff already retried 3× — this is a genuine daily-limit 429.
+    const errBody = await res.json().catch(() => ({})) as { detail?: string };
+    throw new Error(errBody.detail ?? 'הגעת למגבלת ההמרות היומית');
   }
   if (!res.ok) throw new Error(`שגיאת שרת (${res.status})`);
 
