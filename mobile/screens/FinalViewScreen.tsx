@@ -148,13 +148,30 @@ interface FinalizeResult {
  * Returns ok=false, expired=true when the source files are gone (container
  * restart / cleanup) so the caller can fall back to a full re-render.
  */
+/**
+ * Generate a short random document ID matching pattern ^[A-Za-z0-9_-]{1,128}$.
+ * Used as the GCS destination path when promote_from_cache is invoked.
+ */
+function generateDocId(): string {
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+}
+
 async function finalizeRender(
   cleanUrls: string[],
   photoUrls: string[],
+  renderHash?: string,
+  docId?: string,
 ): Promise<FinalizeResult> {
   const token  = await getAuthToken();
   const userId = getCurrentUserId();
   if (!userId) throw new Error('משתמש לא מחובר');
+
+  // Phase 3 path: use render_hash + doc_id so the server performs a GCS server-side
+  // copy (zero bytes transferred) instead of re-uploading from temporary static files.
+  // Falls back to legacy clean_urls/photo_urls when render_hash is absent.
+  const body = renderHash && docId
+    ? { user_id: userId, render_hash: renderHash, doc_id: docId }
+    : { user_id: userId, clean_urls: cleanUrls, photo_urls: photoUrls };
 
   const res = await fetch(`${BACKEND_URL}/finalize`, {
     method:  'POST',
@@ -162,7 +179,7 @@ async function finalizeRender(
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
-    body: JSON.stringify({ user_id: userId, clean_urls: cleanUrls, photo_urls: photoUrls }),
+    body: JSON.stringify(body),
   });
 
   if (res.status === 429) {
@@ -259,7 +276,13 @@ async function buildPdfFromLocalUris(localUris: string[]): Promise<string> {
 // ── Screen ────────────────────────────────────────────────────────────────────
 
 export default function FinalViewScreen({ navigation, route }: Props) {
-  const { text, background, glyphMap: _glyphMap, style: gs, inkColor, previewUrls } = route.params;
+  const {
+    text, background, glyphMap: _glyphMap, style: gs, inkColor, previewUrls,
+    renderHash, seed: _seed,
+  } = route.params;
+  // doc_id is stable for this FinalView session; generated once on mount so all
+  // finalize calls (including retries) share the same GCS destination path.
+  const docIdRef = useRef(generateDocId());
   const { width: W } = useWindowDimensions();
   const { colors } = useTheme();
   const styles = useMemo(() => getStyles(colors), [colors]);
@@ -368,7 +391,10 @@ export default function FinalViewScreen({ navigation, route }: Props) {
     let cancelled = false;
     const run = (async () => {
       try {
-        const result = await finalizeRender(previewUrls!.clean, previewUrls!.photo);
+        const result = await finalizeRender(
+          previewUrls!.clean, previewUrls!.photo,
+          renderHash, docIdRef.current,
+        );
         if (cancelled) return;
 
         if (result.ok && result.cleanUrls.length && result.photoUrls.length) {

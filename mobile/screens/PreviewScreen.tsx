@@ -34,6 +34,7 @@ import { BACKEND_URL, MAX_TEXT_LEN }   from '../src/config';
 import { impactLight }                 from '../src/utils/haptics';
 import { fetchJSON, getAuthToken }      from '../src/utils/api';
 import { getCurrentUserId }            from '../src/services/auth';
+import LayoutCompositor, { type LayoutJSON, type LayoutPage } from '../components/LayoutCompositor';
 
 const DRAFT_KEY = 'preview_draft';
 
@@ -46,7 +47,6 @@ type Props = NativeStackScreenProps<RootStackParamList, 'Preview'>;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-type GlyphDims = Record<string, { w: number; h: number }>;
 type InkColor  = 'black' | 'blue' | 'red';
 type PageBg    = 'lines' | 'grid' | 'blank';
 
@@ -66,7 +66,6 @@ interface HandwritingStyle {
 
 const PAGE_MARGIN_H  = 14;   // horizontal margin around notebook on screen
 const NOTEBOOK_HPAD  = 14;   // padding inside notebook (left+right)
-const FALLBACK_RATIO = 0.78; // fallback glyph aspect ratio
 
 // Server-side page geometry (A4 @ 300 DPI) — used as ratio source
 const SRV_PAGE_W      = 2480;
@@ -75,15 +74,9 @@ const SRV_TOP_MARGIN  = 200;   // top margin — text AND background lines start
 const SRV_LINE_H      = 184;   // line pitch = _LINE_HEIGHT(180) + _LINE_GAP(4) in layout.py
 const SRV_LINES_SPACING = 180; // background ruled-line interval in layout.py (_LINES_SPACING)
 const SRV_SIDE_MARGIN = 200;   // left/right margin for text
-// Usable text width on server: SRV_PAGE_W - 2×SRV_SIDE_MARGIN = 2080 px
-const SRV_USABLE_W    = SRV_PAGE_W - 2 * SRV_SIDE_MARGIN;   // 2080
 
 // A4 height/width ratio
 const A4_RATIO = 297 / 210;
-
-// Lines of text per page — must match render_full_page capacity:
-// floor((SRV_PAGE_H - 2*SRV_TOP_MARGIN) / SRV_LINE_H) = floor(3108/184) = 16
-const PAGE_LINES = 16;
 
 // Slider (0-100) → backend px conversion factors (used in FinalViewScreen too)
 // charHeight   : backend = 40 + slider * 0.9   (range 40–130 px)
@@ -120,276 +113,6 @@ const BG_LABELS: Record<PageBg, string> = {
 
 function absUrl(url: string): string {
   return url.startsWith('http') ? url : `${BACKEND_URL}${url}`;
-}
-
-function seededRand(seed: number): number {
-  // Mulberry32-style integer hash — much better distribution than sin-based PRNG,
-  // especially for seeds that differ only in one component (e.g. same li/wi, different ci).
-  let s = (seed ^ 0x9e3779b9) >>> 0;
-  s = Math.imul(s ^ (s >>> 16), 0x85ebca6b) >>> 0;
-  s = Math.imul(s ^ (s >>> 13), 0xc2b2ae35) >>> 0;
-  // IMPORTANT: the final `>>> 0` converts the XOR result to unsigned 32-bit.
-  // Without it, JavaScript's ^ operator can return a signed (negative) integer
-  // when bit 31 is set, causing seededRand to return values in [-1, 0) instead
-  // of [0, 1). That breaks any caller that compares the result to 0 — most
-  // critically the ink-blob gate `blobSeed < blobProb`, which would fire even
-  // when blobProb is 0 (ink-blob slider fully off).
-  return ((s ^ (s >>> 16)) >>> 0) / 0x100000000;
-}
-
-/**
- * Seeded standard-normal sample (Box-Muller over two seededRand draws).
- * Used to approximate the server's `random.gauss` for baseline jitter so the
- * canvas shows the same *distribution* (bell curve with tails) instead of the
- * old uniform ±σ, which looked flatter/more mechanical than the final render.
- */
-function seededGauss(seed: number): number {
-  const u1 = Math.max(1e-9, seededRand(seed));
-  const u2 = seededRand((seed ^ 0x6d2b79f5) >>> 0);
-  return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
-}
-
-/**
- * Pick one variant URL for a single character occurrence.
- *
- * Approximates the server's shuffled-deck selection (synthesizer.py
- * VariantPicker). NOTE: the server's shuffle is NOT seeded (true random per
- * render), so the canvas can only match the statistical contract — every
- * variant appears once per cycle, no immediate repeats — never the exact
- * picks. Exact fidelity comes from displaying the server image itself.
- *
- * How it works:
- *   - The N variants are conceptually arranged in a "shuffled deck" that repeats
- *     every N occurrences.  The shuffle order within each deck cycle is derived
- *     from a seed that depends on the character and the cycle number, so the same
- *     text always produces the same assignment in the preview.
- *   - Within a cycle of length N, position p gets variant deck[p].
- *   - The deck for cycle c is produced by a Fisher-Yates shuffle seeded with
- *     hash(charCode × 31 + c × 1000003), keeping things deterministic.
- *
- * This matches the server contract: every N occurrences each variant appears
- * exactly once, and no variant repeats on consecutive occurrences (because
- * consecutive deck cycles avoid starting with the same index that ended the
- * previous deck, mirroring the server's _last_used guard).
- *
- * `occurrence` is the 0-based count of how many times this character has
- * already appeared in the document before this instance.
- *
- * Accepts a plain string too, for resilience against an older server build
- * that still returns a single URL per character.
- */
-function pickVariantUrl(
-  variants: string[] | string | undefined,
-  occurrence: number,
-  charCode: number = 0,
-): string | undefined {
-  if (!variants) return undefined;
-  const arr = (Array.isArray(variants) ? variants : [variants]).filter(Boolean);
-  if (arr.length === 0) return undefined;
-  if (arr.length === 1) return arr[0];
-
-  const n         = arr.length;
-  const cycle     = Math.floor(occurrence / n); // which deck repetition we're in
-  const posInCycle = occurrence % n;            // position within the current deck
-
-  // Build a deterministic shuffled deck for this (char, cycle) pair.
-  // Fisher-Yates with seededRand as the RNG.
-  // (Indices are provably in-bounds; `!` silences noUncheckedIndexedAccess.)
-  const shuffledDeck = (c: number): number[] => {
-    const deck = Array.from({ length: n }, (_, i) => i);
-    for (let i = n - 1; i > 0; i--) {
-      // Unique seed per (char, cycle, swap-position) so each step is independent
-      const swapSeed = (charCode * 31 + c * 1_000_003 + i * 7) >>> 0;
-      const j   = Math.floor(seededRand(swapSeed) * (i + 1));
-      const tmp = deck[i]!;
-      deck[i]   = deck[j]!;
-      deck[j]   = tmp;
-    }
-    return deck;
-  };
-
-  const deck = shuffledDeck(cycle);
-
-  // Mirror the server's _last_used guard: if the first card of this deck equals
-  // the last card of the previous deck, swap it with the last card of this deck.
-  if (cycle > 0 && n > 1) {
-    const lastOfPrev = shuffledDeck(cycle - 1)[n - 1];
-    if (deck[0] === lastOfPrev) {
-      const tmp   = deck[0]!;
-      deck[0]     = deck[n - 1]!;
-      deck[n - 1] = tmp;
-    }
-  }
-
-  return arr[deck[posInCycle]!];
-}
-
-// ── Per-character typography ──────────────────────────────────────────────────
-// MUST stay in sync with synthesizer.py (_CHAR_HEIGHT_RATIO / _CHAR_ASCENDER_RATIO)
-// so the client preview matches the server-rendered final output.
-//
-// heightRatio  = glyph height as a multiple of the base x-height (default 1.0)
-// ascenderRatio = fraction of glyph height ABOVE the baseline (default 1.0)
-//                 glyphTop = baselineY - gh * ascenderRatio
-//                 ascenderRatio = 1.0   → bottom sits exactly on the baseline
-//                 ascenderRatio < 1.0   → glyph hangs below the baseline (descender)
-//                 ascenderRatio > 1.0   → glyph floats above the baseline
-// CHAR_HEIGHT_RATIO — MUST stay in sync with _CHAR_HEIGHT_RATIO in synthesizer.py.
-// Controls glyph height as a fraction of the base x-height so line-breaking in
-// the preview produces the same wrapping as the server-rendered final output.
-const CHAR_HEIGHT_RATIO: Record<string, number> = {
-  // ── Hebrew: standard x-height (entirely above baseline) ──────────────
-  'א': 0.92, 'ב': 0.92, 'ג': 0.82, 'ד': 0.82, 'ה': 0.90,
-  'ו': 0.68, 'ז': 0.78, 'ח': 0.92, 'ט': 0.92, 'כ': 0.90,
-  'מ': 0.92, 'נ': 0.82, 'ס': 0.92, 'ע': 0.90, 'פ': 0.90,
-  'צ': 0.85, 'ר': 0.75, 'ש': 0.92, 'ת': 0.92, 'ם': 0.95,
-  // ── Hebrew: yod — small mark, sits in upper portion of line ──────────
-  'י': 0.35,
-  // ── Hebrew: ascender ─────────────────────────────────────────────────
-  'ל': 1.35,
-  // ── Hebrew: descenders (top at x-height, stem below baseline) ─────────
-  'ק': 1.19, 'ך': 1.56, 'ן': 1.80, 'ף': 1.38, 'ץ': 1.31,
-
-  // ── Latin uppercase (cap-height, on baseline) ─────────────────────────
-  'A': 1.10, 'B': 1.10, 'C': 1.10, 'D': 1.10, 'E': 1.10,
-  'F': 1.10, 'G': 1.10, 'H': 1.10, 'I': 1.10, 'J': 1.10,
-  'K': 1.10, 'L': 1.10, 'M': 1.10, 'N': 1.10, 'O': 1.10,
-  'P': 1.10, 'Q': 1.10, 'R': 1.10, 'S': 1.10, 'T': 1.10,
-  'U': 1.10, 'V': 1.10, 'W': 1.10, 'X': 1.10, 'Y': 1.10, 'Z': 1.10,
-
-  // ── Latin lowercase: x-height group ──────────────────────────────────
-  'a': 0.92, 'c': 0.92, 'e': 0.92, 'i': 0.92, 'm': 0.92, 'n': 0.92,
-  'o': 0.92, 'r': 0.80, 's': 0.88, 'u': 0.92, 'v': 0.92,
-  'w': 0.92, 'x': 0.88, 'z': 0.88,
-  // ── Latin lowercase: ascenders ────────────────────────────────────────
-  'b': 1.25, 'd': 1.25, 'h': 1.22, 'k': 1.22, 'l': 1.22,
-  'f': 1.20, 't': 1.05,
-  // ── Latin lowercase: descenders ──────────────────────────────────────
-  'g': 1.38, 'j': 1.38, 'p': 1.25, 'q': 1.25, 'y': 1.30,
-
-  // ── Digits (x-height, on baseline) ───────────────────────────────────
-  '0': 0.95, '1': 0.95, '2': 0.95, '3': 0.95, '4': 0.95,
-  '5': 0.95, '6': 0.95, '7': 0.95, '8': 0.95, '9': 0.95,
-
-  // ── Punctuation ───────────────────────────────────────────────────────
-  '.': 0.15, '…': 0.15,
-  ',': 0.28,
-  ':': 0.80, ';': 0.85,
-  '!': 1.00, '?': 1.00,
-  "'": 0.22, '"': 0.22, '׳': 0.22, '״': 0.22,
-  '-': 0.12, '–': 0.12, '—': 0.12,
-  '(': 1.10, ')': 1.10, '[': 1.10, ']': 1.10, '{': 1.10, '}': 1.10,
-
-  // ── Math symbols ─────────────────────────────────────────────────────
-  '+': 0.55, '−': 0.12, '×': 0.55, '÷': 0.55,
-  '=': 0.45, '≠': 0.55,
-  '<': 0.65, '>': 0.65, '≤': 0.75, '≥': 0.75,
-  '±': 0.85, '%': 0.95, '√': 1.20,
-  '^': 0.45, 'π': 0.90,
-
-  // ── Currency ──────────────────────────────────────────────────────────
-  '₪': 1.05, '$': 1.20, '€': 1.00, '£': 1.00, '¢': 0.85,
-
-  // ── Arrows ────────────────────────────────────────────────────────────
-  '←': 0.55, '→': 0.55, '↑': 1.00, '↓': 1.00,
-
-  // ── Special symbols ───────────────────────────────────────────────────
-  '@': 1.05, '#': 1.00, '&': 1.00,
-  '*': 0.45, '/': 1.10, '\\': 1.10, '|': 1.10,
-  '~': 0.35, '_': 0.10,
-};
-
-// CHAR_ASCENDER_RATIO — fraction of glyph height that sits ABOVE the baseline.
-// glyphTop = baselineY - gh * ascRatio
-// asc=1.0 → bottom on baseline; asc<1.0 → descender; asc>1.0 → floats above baseline.
-// MUST stay in sync with _CHAR_ASCENDER_RATIO in synthesizer.py.
-const CHAR_ASCENDER_RATIO: Record<string, number> = {
-  // ── Hebrew: yod — upper portion of line, not pinned to very top ──────
-  'י': 2.3,
-  // ── Hebrew: descenders — top at x-height top, stem below baseline ─────
-  'ק': 0.840, 'ך': 0.641, 'ן': 0.556, 'ף': 0.725, 'ץ': 0.763,
-
-  // ── Latin descenders — bowl top aligns with x-height top ─────────────
-  'g': 0.725, 'j': 0.725, 'p': 0.800, 'q': 0.800, 'y': 0.769,
-
-  // ── Punctuation ───────────────────────────────────────────────────────
-  '.': 1.0, '…': 1.0,
-  ',': 0.82,   // dot near baseline + short tail below
-  ':': 1.0, ';': 0.94,
-  '!': 1.0, '?': 1.0,
-  // Quotes float near top of x-height (asc = 80 / (80 × 0.22) ≈ 4.54)
-  "'": 4.54, '"': 4.54, '׳': 4.54, '״': 4.54,
-  // Dashes centred in x-height zone
-  '-': 4.69, '–': 4.69, '—': 4.69,
-  // Brackets foot on baseline
-  '(': 1.0, ')': 1.0, '[': 1.0, ']': 1.0, '{': 1.0, '}': 1.0,
-  '_': 0.0,   // entirely below baseline
-
-  // ── Math symbols — centred operators (asc = 40/h + 0.5) ──────────────
-  '+': 1.41, '−': 4.69, '×': 1.41, '÷': 1.41,
-  '=': 1.61, '≠': 1.41,
-  '<': 1.27, '>': 1.27,
-  '≤': 1.17, '≥': 1.17,
-  '±': 1.09,
-  '%': 1.0, '√': 1.0,
-  '^': 2.22, '*': 2.22,   // superscripts pinned to top of x-height
-  '~': 1.93,
-
-  // ── Currency / arrows / special — foot on baseline ───────────────────
-  '₪': 1.0, '$': 1.0, '€': 1.0, '£': 1.0, '¢': 1.0,
-  '←': 1.41, '→': 1.41, '↑': 1.0, '↓': 1.0,
-  '@': 1.0, '#': 1.0, '&': 1.0,
-  '/': 1.0, '\\': 1.0, '|': 1.0,
-};
-
-// Baseline sits 62% from the top of each line row (matches backend _BASELINE_Y_RATIO)
-const BASELINE_Y_RATIO = 0.62;
-
-function glyphDisplayH(ch: string, baseCharH: number): number {
-  return Math.max(4, Math.round(baseCharH * (CHAR_HEIGHT_RATIO[ch] ?? 1.0)));
-}
-
-function charWidthFor(ch: string, charH: number, dims: GlyphDims): number {
-  const gh    = glyphDisplayH(ch, charH);
-  const d     = dims[ch];
-  const ratio = d && d.h > 0 ? d.w / d.h : FALLBACK_RATIO;
-  return Math.round(ratio * gh);
-}
-
-function wordWidth(word: string, charH: number, lsp: number, dims: GlyphDims): number {
-  const chars = word.split('');
-  return chars.reduce((s, ch) => s + charWidthFor(ch, charH, dims), 0)
-    + Math.max(0, chars.length - 1) * lsp;
-}
-
-// Sentinel used to represent an explicit newline (Enter key) in the word list.
-const NEWLINE_SENTINEL = '\n';
-
-function breakLines(
-  words: string[], canvasInnerW: number,
-  charH: number, lsp: number, wsp: number, dims: GlyphDims,
-): string[][] {
-  const lines: string[][] = [];
-  let line: string[] = [];
-  let lineW = 0;
-  for (const word of words) {
-    // Explicit newline — flush current line and start a new (possibly empty) one.
-    if (word === NEWLINE_SENTINEL) {
-      lines.push(line);
-      line = [];
-      lineW = 0;
-      continue;
-    }
-    const ww  = wordWidth(word, charH, lsp, dims);
-    const gap = line.length > 0 ? wsp : 0;
-    if (line.length > 0 && lineW + gap + ww > canvasInnerW) {
-      lines.push(line); line = [word]; lineW = ww;
-    } else {
-      line.push(word); lineW += gap + ww;
-    }
-  }
-  if (line.length) lines.push(line);
-  return lines;
 }
 
 // ── Notebook page component ────────────────────────────────────────────────────
@@ -474,240 +197,6 @@ function NotebookPage({
   );
 }
 
-// ── Direction helpers ─────────────────────────────────────────────────────────
-
-function isHebrewChar(ch: string): boolean {
-  return ch >= 'א' && ch <= 'ת';
-}
-
-/** Returns 'rtl' if the line contains any Hebrew letter, otherwise 'ltr'. */
-function lineDirection(words: string[]): 'rtl' | 'ltr' {
-  for (const w of words) {
-    for (const ch of w) {
-      if (isHebrewChar(ch)) return 'rtl';
-    }
-  }
-  return 'ltr';
-}
-
-// ── Handwriting canvas ────────────────────────────────────────────────────────
-
-const HandwritingCanvas = React.memo(function HandwritingCanvas({
-  pageLines, glyphMap, displayCharH, lsp, wsp, jitterPct,
-  slantPx, blobProb,
-  canvasInnerW, lineH, topM, dims, inkColor,
-  lineIndexOffset, initialOccurrences,
-}: {
-  pageLines:    string[][];
-  glyphMap:     Record<string, string[]>;
-  displayCharH: number;
-  lsp:          number;
-  wsp:          number;
-  jitterPct:    number;   // σ as % of per-char height — matches server jitter_pct
-  slantPx:      number;
-  blobProb:     number;
-  canvasInnerW: number;
-  lineH:        number;
-  topM:         number;
-  dims:         GlyphDims;
-  inkColor:     InkColor;
-  // Global line index of the first line on this page (currentPage * PAGE_LINES).
-  // The server seeds line tilt by DOCUMENT line index (layout.py line_idx), so
-  // the canvas must offset its page-local index to match on pages 2+.
-  lineIndexOffset: number;
-  // Per-char occurrence counts accumulated on PREVIOUS pages. The server's
-  // VariantPicker counts occurrences across the whole document, so round-robin
-  // cycles on pages 2+ must start from these offsets, not from zero.
-  initialOccurrences: Record<string, number>;
-}) {
-  const { colors } = useTheme();
-  const inkHex = INK_COLORS[inkColor];
-
-  // Track how many times each character has appeared so far in the DOCUMENT
-  // (seeded with counts from previous pages), so round-robin sample selection
-  // stays continuous across page boundaries — same contract as the server.
-  const charOccurrences: Record<string, number> = { ...initialOccurrences };
-
-  // All glyphs rendered at uniform displayCharH → consistent stroke weight
-  return (
-    <View style={{ paddingHorizontal: NOTEBOOK_HPAD, paddingTop: topM }}>
-      {pageLines.map((line, li) => {
-        const dir = lineDirection(line);
-        const rtl = dir === 'rtl';
-        let x = rtl ? canvasInnerW : 0;
-        const cells: React.ReactElement[] = [];
-
-        // Global (document-wide) line index — matches the server's line_idx in
-        // layout.py, which runs across ALL lines, not per page. Using the
-        // page-local index here made tilt direction/magnitude diverge on page 2+.
-        const gli = li + lineIndexOffset;
-
-        // Per-line tilt: direction alternates per line, magnitude from slantPx.
-        // Seed formula mirrors layout.py exactly: (line_idx * 2654435761) & 0xFFFFFFFF.
-        const lineSeed  = (gli * 2654435761) & 0xFFFFFFFF;
-        const tiltDir   = (lineSeed >> 16) & 1 ? 1 : -1;
-        const tiltVar   = 0.6 + 0.8 * ((lineSeed & 0xFFFF) / 65535);
-        const lineTilt  = slantPx > 0 ? tiltDir * slantPx * tiltVar : 0;
-
-        // Baseline at 62% from top of row — matches server's
-        // `baseline_y = round(_LINE_HEIGHT * _BASELINE_Y_RATIO)` (= round(180*0.62) = 112).
-        // Normal letters (asc=1.0) have bottom on baseline, upper 38% is descender space.
-        // Quotes/dashes (asc>1) float near the top; descenders (asc<1) hang below.
-        const baselineY = Math.round(lineH * BASELINE_Y_RATIO);
-
-        line.forEach((word, wi) => {
-          word.split('').forEach((ch, ci) => {
-            // Base (un-jittered) cell size — the cursor advances by THESE values
-            // so the canvas layout matches breakLines() exactly (which measures
-            // un-jittered widths). The visual ±3% size jitter below is applied
-            // to the rendered glyph only, centred inside the base cell — same
-            // as the server, which positions glyphs from PRE-jitter metrics.
-            const ghBase = glyphDisplayH(ch, displayCharH);
-            const cwBase = charWidthFor(ch, displayCharH, dims);
-            const sizeJitter = 1 + (seededRand(gli * 997 + wi * 97 + ci * 53 + 7) - 0.5) * 0.06;
-            const gh  = Math.round(ghBase * sizeJitter);
-            const cw  = Math.round(cwBase * sizeJitter);
-
-            // RTL: move cursor left before placing; LTR: place then move right
-            if (rtl) x -= cwBase;
-            const glyphX = x + Math.round((cwBase - cw) / 2);   // centre jittered glyph in base cell
-            if (!rtl) x += cwBase;
-
-            const ascRatio = CHAR_ASCENDER_RATIO[ch] ?? 1.0;
-            // Position from PRE-jitter height (server: "Use pre-jitter ascender
-            // so scale/rotation jitter don't shift position").
-            const glyphTop = baselineY - ghBase * ascRatio;
-            // Baseline dance — mirrors synthesizer.py: Gaussian with
-            // σ = char_height × jitter_pct/100, SKIPPED for descenders (tails
-            // stay anchored) and for yod (pinned to x-height top).
-            const isDescender = ascRatio < 1.0;
-            const jit = (isDescender || ch === 'י' || jitterPct <= 0)
-              ? 0
-              : seededGauss(gli * 997 + wi * 97 + ci * 31 + 13) * ghBase * (jitterPct / 100);
-            const tiltY = rtl
-              ? lineTilt * (1 - glyphX / canvasInnerW)
-              : lineTilt * (glyphX / canvasInnerW);
-            // Pick variant by round-robin: count how many times this character
-            // has appeared so far in the document and advance the counter.
-            // charCode seeds the deck shuffle so each character gets its own
-            // rotation rhythm (omitting it made ALL chars share one deck order).
-            const occurrence = charOccurrences[ch] ?? 0;
-            charOccurrences[ch] = occurrence + 1;
-            const url  = pickVariantUrl(glyphMap[ch], occurrence, ch.charCodeAt(0));
-            cells.push(
-              <View
-                key={`${li}_${wi}_${ci}`}
-                style={{
-                  position: 'absolute',
-                  left:     glyphX,
-                  top:      glyphTop,
-                  width:    cw,
-                  height:   gh,
-                  overflow: 'visible',
-                  transform: [{ translateY: jit + tiltY }],
-                }}
-              >
-                {url ? (
-                  <>
-                    {/*
-                      Two-layer rendering to match the server's binary-alpha compositing.
-                      When React Native downsamples a glyph from ~160 px stored height to
-                      ~14 px display height it introduces sub-pixel semi-transparency along
-                      stroke edges, making strokes look thinner than the server output.
-                      The server binarises the alpha channel (0 or 255, no intermediate
-                      values) before compositing, which produces full-opacity strokes.
-                      We replicate this with a gently blurred base layer that fills in the
-                      sub-pixel gaps, topped by a sharp layer that keeps edges crisp.
-                      blurRadius = gh * 0.03 ≈ 0.4 px at default size — enough to fill
-                      bilinear-interpolated fringe pixels without making glyphs look fuzzy.
-                    */}
-                    <Image
-                      source={{ uri: absUrl(url) }}
-                      style={{ position: 'absolute', width: cw, height: gh, tintColor: inkHex }}
-                      resizeMode="contain"
-                      blurRadius={Math.max(0.3, gh * 0.03)}
-                    />
-                    <Image
-                      source={{ uri: absUrl(url) }}
-                      style={{ width: cw, height: gh, tintColor: inkHex }}
-                      resizeMode="contain"
-                    />
-                  </>
-                ) : (
-                  /* Character not in glyphMap — dashed border box + dim letter
-                     so it's visually distinct from real handwriting but still
-                     readable. Matches the upgrade described in HANDSCRIPT_HANDOFF. */
-                  <View style={{
-                    width: cw, height: gh,
-                    alignItems: 'center', justifyContent: 'center',
-                    borderWidth: 1,
-                    borderStyle: 'dashed',
-                    borderColor: INK_COLORS[inkColor],
-                    borderRadius: 2,
-                    opacity: 0.35,
-                  }}>
-                    <Text style={{
-                      color: INK_COLORS[inkColor],
-                      fontFamily: fonts.regular,
-                      fontSize: Math.max(6, gh * 0.55),
-                    }}>{ch}</Text>
-                  </View>
-                )}
-              </View>,
-            );
-            // Ink blob dot near glyph endpoint.
-            // Mirrors _add_ink_blob in synthesizer.py more closely: 55% of blobs
-            // sit at the stroke END (bottom-right corner of the glyph), the rest
-            // anywhere on the glyph; size ~ glyph height / 10…5.
-            const blobSeed = seededRand(gli * 997 + wi * 97 + ci * 67 + 11);
-            if (blobSeed < blobProb) {
-              const sizeT    = seededRand(gli * 997 + wi * 97 + ci * 67 + 23);
-              const blobSize = Math.max(2, Math.round(gh * (0.1 + sizeT * 0.1)));   // h/10…h/5
-              const atEnd    = seededRand(gli * 997 + wi * 97 + ci * 67 + 29) < 0.55;
-              const blobOffX = atEnd
-                ? cw - blobSize / 2
-                : seededRand(gli * 997 + wi * 97 + ci * 67 + 13) * cw;
-              // Vertical position relative to the GLYPH (server: by = glyph_y + …),
-              // not the line box — blobs stick to the letter they belong to.
-              const blobTop = atEnd
-                ? glyphTop + gh - seededRand(gli * 997 + wi * 97 + ci * 67 + 17) * gh * 0.2 - blobSize / 2
-                : glyphTop + seededRand(gli * 997 + wi * 97 + ci * 67 + 17) * gh - blobSize / 2;
-              const blobOpa  = 0.70 + seededRand(gli * 997 + wi * 97 + ci * 67 + 19) * 0.24;   // ≈ alpha 180–240
-              cells.push(
-                <View
-                  key={`b_${li}_${wi}_${ci}`}
-                  style={{
-                    position:        'absolute',
-                    left:            glyphX + blobOffX,
-                    top:             blobTop,
-                    width:           blobSize,
-                    height:          blobSize,
-                    borderRadius:    blobSize / 2,
-                    backgroundColor: inkHex,
-                    opacity:         blobOpa,
-                    transform:       [{ translateY: jit + tiltY }],
-                  }}
-                />,
-              );
-            }
-            if (ci < word.length - 1) { if (rtl) x -= lsp; else x += lsp; }
-          });
-          if (wi < line.length - 1) { if (rtl) x -= wsp; else x += wsp; }
-        });
-
-        return (
-          <View
-            key={li}
-            style={{ width: canvasInnerW, height: lineH, direction: 'ltr', overflow: 'visible' }}
-          >
-            {cells}
-          </View>
-        );
-      })}
-    </View>
-  );
-});
-
 // ── Slider row ────────────────────────────────────────────────────────────────
 
 /** Field-by-field equality — used to skip no-op commits (tap without drag). */
@@ -786,7 +275,6 @@ export default function PreviewScreen({ navigation, route }: Props) {
   const bgLineH      = Math.round(pageH * SRV_LINES_SPACING / SRV_PAGE_H);
   const topM         = Math.round(pageH * SRV_TOP_MARGIN / SRV_PAGE_H);
   const marginLineX  = Math.round(notebookW * SRV_SIDE_MARGIN / SRV_PAGE_W);
-  const canvasInnerW = notebookW - 2 * NOTEBOOK_HPAD;
 
   // Convert initStyle (backend px units) → 0-100 slider values.
   // Inverse of FinalViewScreen formulas:
@@ -861,13 +349,19 @@ export default function PreviewScreen({ navigation, route }: Props) {
 
   const [inkColor, setInkColor] = useState<InkColor>(initInkColor ?? 'black');
   const [pageBg,   setPageBg]   = useState<PageBg>((initBg as PageBg) ?? 'lines');
-  const [isLoaded,      setIsLoaded]      = useState(false);
-  // isPrefetching: true only while new dims are loading for chars added in edit mode.
-  // Unlike isLoaded=false, it does NOT hide the canvas — it shows a small indicator
-  // so the user sees the canvas with FALLBACK_RATIO while new dims are measured.
-  const [isPrefetching, setIsPrefetching] = useState(false);
-  const [glyphDims,   setGlyphDims]   = useState<GlyphDims>({});
   const [currentPage, setCurrentPage] = useState(0);
+
+  // ── Phase 4: LayoutCompositor state ─────────────────────────────────────────
+  // layoutData: /layout response — drives LayoutCompositor during drag and when
+  // serverPreviewUrls is absent (initial load / after style change debounce).
+  const [layoutData,      setLayoutData]      = useState<LayoutJSON | null>(null);
+  const [isLayoutLoading, setIsLayoutLoading] = useState(false);
+  // renderHash / usedSeed: returned by /convert-both; passed to FinalViewScreen
+  // so /finalize can use the Phase 3 GCS server-side copy path instead of re-upload.
+  const [renderHash, setRenderHash] = useState<string | null>(null);
+  const [usedSeed,   setUsedSeed]   = useState<number | null>(null);
+  const layoutAbortRef    = useRef<AbortController | null>(null);
+  const layoutDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // liveHs: drives the canvas during slider drag (throttled updates)
   const [liveHs,     setLiveHs]     = useState<HandwritingStyle>(hs);
@@ -939,172 +433,77 @@ export default function PreviewScreen({ navigation, route }: Props) {
     if (draftDebounce.current)        { clearTimeout(draftDebounce.current);        draftDebounce.current = null; }
     if (serverRenderDebounceRef.current) { clearTimeout(serverRenderDebounceRef.current); }
     if (finishSafetyTimerRef.current) { clearTimeout(finishSafetyTimerRef.current); }
+    if (layoutDebounceRef.current)    { clearTimeout(layoutDebounceRef.current); }
     serverRenderAbortRef.current?.abort();
+    layoutAbortRef.current?.abort();
   }, []);
 
-  // ── Unified pixel scale ─────────────────────────────────────────────────
-  //
-  // pixelScale = (preview usable width) / (server usable width)
-  //            = canvasInnerW / SRV_USABLE_W
-  //
-  // This single factor converts any server-pixel value to a preview-pixel value
-  // so that character widths, letter/word spacing, and slant all maintain the
-  // same PROPORTIONS as the server render.  Crucially, this makes line-breaking
-  // in the preview produce the same wraps as render_full_page on the server.
-  //
-  // canvasInnerW = notebookW - 2*NOTEBOOK_HPAD  (preview usable width)
-  // SRV_USABLE_W = SRV_PAGE_W - 2*SRV_SIDE_MARGIN = 2080  (server usable width)
-  //
-  const pixelScale = canvasInnerW / SRV_USABLE_W;   // e.g. 334/2080 ≈ 0.161
+  // screenScale: server pixels → screen pixels for LayoutCompositor
+  // notebookW / SRV_PAGE_W so glyph coords map to the exact same position
+  // on the screen as they do in the server-rendered image.
+  const screenScale = notebookW / SRV_PAGE_W;
 
-  // Backend char height (server pixels): slider 0→40 px, slider 100→130 px
-  const charHBackend = 40 + liveHs.charHeight * 0.9;   // 40-130 server px
-
-  // Display char height for the preview canvas.
-  //
-  // SYNC RULE: displayCharH must equal charHBackend * pixelScale so that
-  //   displayCharH / canvasInnerW  ≡  charHBackend / SRV_USABLE_W
-  //
-  // This identity guarantees that word widths and letter spacings have the
-  // same ratio to the usable canvas width as they do on the server, which
-  // in turn ensures that line-breaking in breakLines() produces exactly the
-  // same wraps as compose_paragraph() on the server.
-  //
-  // Previous formula (lineH-based) made glyphs ~58% larger relative to the
-  // canvas, causing the preview to break lines earlier than the server.
-  const displayCharH = Math.max(4, Math.round(charHBackend * pixelScale));
-
-  // Average glyph width at the current size — used for the same negative-spacing
-  // clamp the server applies (letter spacing floored at -25% of avg glyph width).
-  const avgCharW = useMemo(() => {
-    const chars = editableText.replace(/\s+/g, '').split('');
-    if (chars.length === 0) return displayCharH * FALLBACK_RATIO;
-    const total = chars.reduce((s, ch) => s + charWidthFor(ch, displayCharH, glyphDims), 0);
-    return total / chars.length;
-  }, [editableText, displayCharH, glyphDims]);
-
-  // ── Spacing — both scaled by pixelScale to stay proportional to the server render ──
-  // Letter spacing: backend_px = slider * 0.30 - 8, scaled to preview px.
-  // slider=0 → -8 px (letters overlap, tighter than touching), matching the server.
-  // Clamped at -25% of avg glyph width — same floor as synthesizer.py (_CLAMP_NEG).
-  const lsp = Math.max(
-    Math.round(-avgCharW * 0.25),
-    Math.round((liveHs.letterSpacing * 0.30 - 8) * pixelScale),
-  );
-  //
-  // Word spacing:    backend_px = slider * 0.85          (range   0 …  +85 px)
-  //   slider=0  →  0 px (words touching)  |  slider=100 → +85 px
-  const wsp = Math.max(0, Math.round(liveHs.wordSpacing * 0.85 * pixelScale));
-  // jitterPct: σ as % of per-char height — same unit the server uses
-  // (baseline_jitter = slider * 0.25). Per-glyph Gaussian happens in the canvas.
-  const jitterPct = Math.max(0, liveHs.baselineJitter * 0.25);
-  // slantPx: line tilt per line in preview pixels.
-  // Server sends slant = slider * 0.4 (server px) and SKIPS tilt entirely when
-  // slant_px ≤ 0.5 (layout.py) — apply the same threshold before scaling.
-  const slantBackendPx = liveHs.slant * 0.4;
-  const slantPx  = slantBackendPx > 0.5 ? slantBackendPx * pixelScale : 0;
-  const blobProb = liveHs.inkBlobs * 0.003; // 0-0.30
-  // ── Prefetch glyph images ──────────────────────────────────────────────────
+  // ── /layout — geometry-only render (fast, no rasterisation) ─────────────────
+  // Called on every liveHs or text change (debounced 120ms) to drive the
+  // LayoutCompositor during drag and during the initial-load window before the
+  // first /convert-both response arrives.
   useEffect(() => {
-    let cancelled = false;
+    if (layoutDebounceRef.current) clearTimeout(layoutDebounceRef.current);
+    layoutDebounceRef.current = setTimeout(async () => {
+      layoutAbortRef.current?.abort();
+      const controller = new AbortController();
+      layoutAbortRef.current = controller;
 
-    // Normalise to arrays (tolerating an older single-string response).
-    const allEntries = Object.entries(liveGlyphMap)
-      .map(([ch, urls]) => [ch, Array.isArray(urls) ? urls : urls ? [urls] : []] as const)
-      .filter(([, urls]) => urls.length > 0);
+      const userId = getCurrentUserId();
+      if (!userId) return;
+      const token = await getAuthToken();
+      if (controller.signal.aborted) return;
 
-    if (!allEntries.length) { setIsLoaded(true); return; }
-
-    // On initial load (isLoaded=false): process every char, show full spinner.
-    // On subsequent loads from edit mode (isLoaded=true): only process NEW chars
-    // that have no measured dims yet, and show a small isPrefetching indicator
-    // so the canvas stays visible instead of flashing back to a spinner.
-    const isInitialLoad = !isLoaded;
-    const entriesToProcess = isInitialLoad
-      ? allEntries
-      : allEntries.filter(([ch]) => !glyphDims[ch]);
-
-    if (!isInitialLoad && entriesToProcess.length === 0) return; // nothing new to load
-
-    if (!isInitialLoad) setIsPrefetching(true);
-
-    const collectedDims: GlyphDims = {};
-    const promises: Promise<unknown>[] = [];
-
-    for (const [ch, urls] of entriesToProcess) {
-      for (const u of urls) {
-        promises.push(Image.prefetch(absUrl(u)).catch(() => null));
+      setIsLayoutLoading(true);
+      try {
+        const res = await fetch(`${BACKEND_URL}/layout`, {
+          method:  'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          signal: controller.signal,
+          body: JSON.stringify({
+            text:    editableText,
+            user_id: userId,
+            preview: true,
+            style: {
+              char_height:     Math.round(40 + liveHs.charHeight * 0.9),
+              letter_spacing:  liveHs.letterSpacing * 0.30 - 8,
+              word_spacing:    Math.round(liveHs.wordSpacing * 0.85),
+              baseline_jitter: liveHs.baselineJitter * 0.25,
+              slant:           liveHs.slant * 0.4,
+              ink_blobs:       liveHs.inkBlobs * 0.003,
+            },
+          }),
+        });
+        if (!res.ok || controller.signal.aborted) return;
+        const data = await res.json() as LayoutJSON;
+        if (controller.signal.aborted) return;
+        if (data.ok && data.pages?.length) setLayoutData(data);
+      } catch {
+        // AbortError or network error — LayoutCompositor retains previous layout
+      } finally {
+        if (!controller.signal.aborted) setIsLayoutLoading(false);
       }
-      // Measure dimensions from the first variant only.
-      // (entries are pre-filtered to urls.length > 0, so urls[0] exists)
-      promises.push(
-        new Promise<void>(resolve => {
-          Image.getSize(absUrl(urls[0]!),
-            (w, h) => { collectedDims[ch] = { w, h }; resolve(); },
-            ()     => { resolve(); },
-          );
-        }),
-      );
-    }
+    }, 120);
 
-    Promise.all(promises)
-      .then(() => {
-        if (!cancelled) {
-          // Merge — never discard dims for previously loaded chars.
-          setGlyphDims(prev => ({ ...prev, ...collectedDims }));
-          setIsLoaded(true);
-          setIsPrefetching(false);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) { setIsLoaded(true); setIsPrefetching(false); }
-      });
-
-    return () => { cancelled = true; };
+    return () => {
+      if (layoutDebounceRef.current) clearTimeout(layoutDebounceRef.current);
+      layoutAbortRef.current?.abort();
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [liveGlyphMap]);
+  }, [editableText, liveHs]);
 
-  // Split preserving explicit newlines as NEWLINE_SENTINEL tokens so that
-  // Enter-key line breaks in the edit box produce real new lines in the canvas.
-  const words = useMemo(() => {
-    const result: string[] = [];
-    const paragraphs = editableText.split('\n');
-    paragraphs.forEach((para, i) => {
-      const ws = para.split(/[ \t]+/).filter(Boolean);
-      result.push(...ws);
-      // Insert a sentinel for every newline between paragraphs (not after the last).
-      if (i < paragraphs.length - 1) result.push(NEWLINE_SENTINEL);
-    });
-    return result;
-  }, [editableText]);
-
-  const allLines = useMemo(() => {
-    if (!isLoaded) return [];
-    return breakLines(words, canvasInnerW, displayCharH, lsp, wsp, glyphDims);
-  }, [isLoaded, words, canvasInnerW, displayCharH, lsp, wsp, glyphDims]);
-
-  // When server preview is available, use its page count as ground truth.
-  // The server is authoritative — canvas line-breaking is an approximation.
+  // Page count: server preview (authoritative) > layout response > 1
   const totalPages = serverPreviewUrls
     ? serverPreviewUrls.clean.length
-    : Math.max(1, Math.ceil(allLines.length / PAGE_LINES));
-  const pageLines  = useMemo(
-    () => allLines.slice(currentPage * PAGE_LINES, (currentPage + 1) * PAGE_LINES),
-    [allLines, currentPage],
-  );
-
-  // Occurrence count of every char on pages BEFORE the current one — feeds the
-  // canvas so variant round-robin continues across page boundaries, matching
-  // the server's document-wide VariantPicker counters.
-  const initialOccurrences = useMemo(() => {
-    const counts: Record<string, number> = {};
-    for (const line of allLines.slice(0, currentPage * PAGE_LINES)) {
-      for (const word of line) {
-        for (const ch of word) counts[ch] = (counts[ch] ?? 0) + 1;
-      }
-    }
-    return counts;
-  }, [allLines, currentPage]);
+    : (layoutData?.pages.length ?? 1);
 
   // Reset to page 0 only when the TEXT changes (pagination genuinely reshuffles).
   // Style/ink/background tweaks keep the user on their current page — resetting
@@ -1202,10 +601,13 @@ export default function PreviewScreen({ navigation, route }: Props) {
         if (!res.ok || controller.signal.aborted) return;
         const data = await res.json() as {
           ok: boolean; clean_urls?: string[]; photo_urls?: string[];
+          render_hash?: string; seed?: number;
         };
         if (controller.signal.aborted) return;
         if (data.ok && data.clean_urls?.length && data.photo_urls?.length) {
           setServerPreviewUrls({ clean: data.clean_urls, photo: data.photo_urls });
+          if (data.render_hash) setRenderHash(data.render_hash);
+          if (data.seed != null) setUsedSeed(data.seed);
         }
       } catch {
         // AbortError or network error — canvas stays visible, no error shown
@@ -1243,7 +645,10 @@ export default function PreviewScreen({ navigation, route }: Props) {
       glyphMap:    liveGlyphMap,
       style:       pendingHsRef.current,
       inkColor,
-      previewUrls: urls ?? undefined,
+      previewUrls:  urls ?? undefined,
+      // Phase 3 render-cache: /finalize can use GCS server-side copy when these are present.
+      renderHash:  renderHash ?? undefined,
+      seed:        usedSeed   ?? undefined,
     });
     const unsub = navigation.addListener('focus', () => {
       isFinishingRef.current = false;
@@ -1251,7 +656,7 @@ export default function PreviewScreen({ navigation, route }: Props) {
       setIsFinishing(false);   // reset waiting UI when the user returns to edit
       unsub();
     });
-  }, [navigation, editableText, liveGlyphMap, inkColor]);
+  }, [navigation, editableText, liveGlyphMap, inkColor, renderHash, usedSeed]);
 
   // Auto-navigate when the in-progress server render completes and the user
   // already tapped "Finish" while waiting.
@@ -1318,39 +723,31 @@ export default function PreviewScreen({ navigation, route }: Props) {
           <View style={styles.frameClip}>
             {/* Server image: exact final output — shown when not dragging a slider */}
             {serverPreviewUrls && !isDragging ? (
+              /* Server image: exact final output — shown when not dragging a slider */
               <Image
                 source={{ uri: absUrl(serverPreviewUrls.clean[currentPage] ?? '') }}
                 style={{ width: notebookW, height: pageH }}
                 resizeMode="stretch"
               />
             ) : (
-              /* Canvas: live approximate preview — always shown while dragging */
+              /* LayoutCompositor: live preview from /layout — replaces client canvas */
               <NotebookPage pageW={notebookW} pageH={pageH} lineH={lineH} bgLineH={bgLineH}
                 topM={topM} marginLineX={marginLineX} pageBg={pageBg}>
-                {!isLoaded ? (
+                {layoutData?.pages[currentPage] ? (
+                  <LayoutCompositor
+                    page={layoutData.pages[currentPage] as LayoutPage}
+                    inkColor={inkColor}
+                    screenScale={screenScale}
+                    backendUrl={BACKEND_URL}
+                  />
+                ) : (
                   <View style={[styles.loadingBox, { height: pageH }]}>
                     <ActivityIndicator size="large" color={colors.accent} />
                     <Text style={styles.loadingTitle}>מכין את כתב היד...</Text>
-                    <Text style={styles.loadingSub}>טוען תמונות לתצוגה</Text>
+                    <Text style={styles.loadingSub}>
+                      {isLayoutLoading ? 'מחשב פריסה...' : 'טוען נתונים...'}
+                    </Text>
                   </View>
-                ) : (
-                  <HandwritingCanvas
-                    pageLines={pageLines}
-                    glyphMap={liveGlyphMap}
-                    displayCharH={displayCharH}
-                    lsp={lsp}
-                    wsp={wsp}
-                    jitterPct={jitterPct}
-                    slantPx={slantPx}
-                    blobProb={blobProb}
-                    canvasInnerW={canvasInnerW}
-                    lineH={lineH}
-                    topM={topM}
-                    dims={glyphDims}
-                    inkColor={inkColor}
-                    lineIndexOffset={currentPage * PAGE_LINES}
-                    initialOccurrences={initialOccurrences}
-                  />
                 )}
               </NotebookPage>
             )}
@@ -1370,11 +767,11 @@ export default function PreviewScreen({ navigation, route }: Props) {
           </View>
         )}
 
-        {/* ── PREFETCH INDICATOR — visible only while edit-mode glyphs load ─── */}
-        {isPrefetching && (
+        {/* ── LAYOUT LOADING STRIP — visible while /layout is in flight ─── */}
+        {isLayoutLoading && isDragging && (
           <View style={styles.prefetchStrip}>
             <ActivityIndicator size="small" color={colors.accent} />
-            <Text style={styles.prefetchText}>מעדכן תווים חדשים...</Text>
+            <Text style={styles.prefetchText}>מחשב פריסה...</Text>
           </View>
         )}
 
@@ -1545,11 +942,11 @@ export default function PreviewScreen({ navigation, route }: Props) {
               waitingFinish && styles.finishBtnWaiting,
             ]}
             onPress={() => { impactLight(); handleFinish(); }}
-            disabled={!isLoaded || waitingFinish}
+            disabled={(!layoutData && !serverPreviewUrls) || waitingFinish}
             accessibilityRole="button"
             accessibilityLabel={waitingFinish ? 'ממתין לתצוגה מדויקת...' : 'סיום עריכה'}
             accessibilityHint="עובר למסך התוצאה הסופית עם אפשרויות שמירה ושיתוף"
-            accessibilityState={{ disabled: !isLoaded || waitingFinish, busy: waitingFinish }}
+            accessibilityState={{ disabled: (!layoutData && !serverPreviewUrls) || waitingFinish, busy: waitingFinish }}
           >
             {waitingFinish ? (
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>

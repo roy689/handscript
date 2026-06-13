@@ -31,6 +31,10 @@ export type RootStackParamList = {
     // When present, FinalView uses these directly and skips the /convert-both call,
     // guaranteeing that what the user saw in preview is exactly what they get.
     previewUrls?: { clean: string[]; photo: string[] };
+    // Phase 3 render-cache fields — enable /finalize to use GCS server-side copy
+    // instead of re-uploading from temporary static files.
+    renderHash?:  string;   // SHA-256 hex from /convert-both response
+    seed?:        number;   // RNG seed used for the preview render (for fallback re-render)
   };
   Profile:          undefined;
   Settings:         undefined;
