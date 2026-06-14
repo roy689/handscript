@@ -111,10 +111,45 @@ export default function CharacterListScreen({ navigation }: Props) {
 
   useFocusEffect(
     useCallback(() => {
-      AsyncStorage.getItem('character_status').then(raw => {
-        try { if (raw) setStatus(JSON.parse(raw)); }
-        catch { setStatus({}); }
-      }).catch(() => {});
+      // ── Load character_status from AsyncStorage, with cloud fallback ──────────
+      // AsyncStorage is device-local and is wiped on reinstall or on a new device.
+      // When it's empty we call GET /bank/{uid} to re-hydrate from Firebase so the
+      // user's drawn characters are visible without them having to re-scan anything.
+      (async () => {
+        let storedRaw: string | null = null;
+        try { storedRaw = await AsyncStorage.getItem('character_status'); } catch { /* ignore */ }
+
+        if (storedRaw) {
+          // Fast path: local cache is present, use it immediately.
+          try { setStatus(JSON.parse(storedRaw)); } catch { setStatus({}); }
+        } else {
+          // Slow path: fresh install or new device — fetch from server.
+          try {
+            const uid   = getCurrentUserId();
+            const token = await getAuthToken();
+            if (uid) {
+              const res = await fetch(`${BACKEND_URL}/bank/${uid}`, {
+                headers: token ? { Authorization: `Bearer ${token}` } : {},
+              });
+              if (res.ok) {
+                const data = await res.json() as {
+                  characters?: Record<string, number>;
+                };
+                const chars = data.characters ?? {};
+                // Build the same shape that CharacterSampleReviewScreen writes:
+                // { [char]: { captured: boolean, count: number } }
+                const rebuilt: Record<string, { captured: boolean; count: number }> = {};
+                for (const [ch, count] of Object.entries(chars)) {
+                  rebuilt[ch] = { captured: count > 0, count };
+                }
+                setStatus(rebuilt);
+                // Persist so subsequent visits skip the server call.
+                await AsyncStorage.setItem('character_status', JSON.stringify(rebuilt));
+              }
+            }
+          } catch { /* best-effort; leave status empty if network fails */ }
+        }
+      })();
 
       headerAnim.setValue(0);
       sectionAnims.forEach(a => a.setValue(0));

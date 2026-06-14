@@ -2675,12 +2675,32 @@ async def compute_layout(body: LayoutRequest, uid: str = Depends(require_auth)):
 
 @app.get("/bank/{user_id}")
 async def get_bank(user_id: str, uid: str = Depends(require_auth)):
-    """Return the user's current character bank (characters list)."""
+    """Return the user's current character bank with per-character variant counts.
+
+    Response
+    --------
+    {
+        "user_id": str,
+        "characters": { "<char>": <count>, ... },   # variant count per character
+        "count": int,                                # total distinct characters
+    }
+
+    The ``characters`` map is used by the mobile app to re-hydrate the local
+    ``character_status`` AsyncStorage cache on a fresh install or a new device.
+    Previously this endpoint returned only a flat list of keys; returning counts
+    lets the client restore the exact badge numbers without a separate lookup.
+    """
     assert_same_user(uid, user_id)
     logger.info("[bank] user_tag=%s", _uid_tag(uid))
     bank = firebase_client.load_character_bank(user_id)
-    chars = list(bank.keys())
-    return {"user_id": user_id, "characters": chars, "count": len(chars)}
+    char_counts: dict[str, int] = {}
+    for ch, data in bank.items():
+        if isinstance(data, dict):
+            n = data.get("count") or len(data.get("variants", []))
+        else:
+            n = 0
+        char_counts[ch] = int(n)
+    return {"user_id": user_id, "characters": char_counts, "count": len(char_counts)}
 
 
 @app.get("/usage/{user_id}")
