@@ -406,6 +406,16 @@ export default function PreviewScreen({ navigation, route }: Props) {
   // so isDragging can't get stuck true (which would hide the server preview).
   const dragSafetyRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // ── WYSIWYG seed synchronisation ─────────────────────────────────────────
+  // /layout (LayoutCompositor) and /convert-both (server preview image) must
+  // use the SAME random seed so they pick identical glyph variants, apply
+  // identical spacing jitter, and position characters identically.
+  // Without this, each call generates its own seed → different variants →
+  // text appears to "change size/spacing" the moment the precise view loads.
+  // The seed is regenerated at the start of each new committed render cycle
+  // (hs / text / ink / bg change) via a companion useEffect below.
+  const renderSeedRef = useRef<number>(Math.floor(Math.random() * 2 ** 31));
+
   // ── Slider handlers (stable identities so PreviewSliderRow can memo) ──────
   const handleSliderLive = useCallback((id: keyof HandwritingStyle, v: number) => {
     pendingHsRef.current = { ...pendingHsRef.current, [id]: v };
@@ -510,6 +520,7 @@ export default function PreviewScreen({ navigation, route }: Props) {
               baseline_jitter: liveHs.baselineJitter * 0.15,
               slant:           liveHs.slant * 0.4,
               ink_blobs:       liveHs.inkBlobs * 0.002,
+              seed:            renderSeedRef.current,   // ← sync with /convert-both
             },
           }),
         });
@@ -547,6 +558,14 @@ export default function PreviewScreen({ navigation, route }: Props) {
   }, [totalPages]);
   // Keep pendingHsRef in sync whenever hs changes from an external source
   useEffect(() => { pendingHsRef.current = hs; setLiveHs(hs); }, [hs]);
+
+  // Regenerate the shared render seed at the start of every new committed
+  // render cycle.  Runs BEFORE the /layout and /convert-both effects so
+  // both effects read the fresh seed from renderSeedRef.current.
+  useEffect(() => {
+    renderSeedRef.current = Math.floor(Math.random() * 2 ** 31);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hs, editableText, inkColor, pageBg]);
 
   // ── Draft persistence ──────────────────────────────────────────────────────
   // Saves hs, inkColor, AND pageBg so that going back from FinalView to Preview
@@ -627,6 +646,7 @@ export default function PreviewScreen({ navigation, route }: Props) {
                 baseline_jitter: hs.baselineJitter * 0.15,
                 slant:           hs.slant * 0.4,
                 ink_blobs:       hs.inkBlobs * 0.002,
+                seed:            renderSeedRef.current,   // ← same seed as /layout → identical variants
               },
             }),
           },

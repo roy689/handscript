@@ -156,19 +156,28 @@ const LayoutCompositor = React.memo(function LayoutCompositor({
                 which introduces sub-pixel semi-transparency along stroke edges,
                 making strokes look thinner than the server output.  A gently
                 blurred base layer fills the bilinear-interpolated fringe pixels;
-                the sharp top layer keeps edges crisp — same technique as the old
-                HandwritingCanvas.
+                the sharp top layer keeps edges crisp.
+
+                resizeMode="stretch" — intentional.
+                g.w × g.h are the dimensions of the SERVER-processed glyph (scaled
+                to char_height then hcrop'd).  The bank image at `url` has a
+                different aspect ratio (uncrop'd original).  "contain" would
+                letterbox it, shifting the glyph's ink edge away from g.x and
+                making glyphs appear smaller/taller than the server output.
+                "stretch" fills the planned bounding box exactly, matching the
+                server's glyph footprint pixel-for-pixel, at the cost of slight
+                horizontal compression (≤ the hcrop amount, typically < 10 %).
               */}
               <Image
                 source={{ uri }}
                 style={{ position: 'absolute', width: sw, height: sh, tintColor: inkHex }}
-                resizeMode="contain"
+                resizeMode="stretch"
                 blurRadius={Math.max(0.3, sh * 0.03)}
               />
               <Image
                 source={{ uri }}
                 style={{ width: sw, height: sh, tintColor: inkHex }}
-                resizeMode="contain"
+                resizeMode="stretch"
               />
             </View>
           );
